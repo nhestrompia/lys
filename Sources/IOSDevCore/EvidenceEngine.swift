@@ -72,12 +72,11 @@ public actor EvidenceLedger {
         missing.append("Deterministic UI assertion tied to an acceptance criterion")
       }
       if !passed.contains(.screenshot) { missing.append("Fresh screenshot") }
-      if current.contains(where: {
-        $0.kind == .runtimeLog && $0.status == .failed && !$0.acknowledged
-      }) {
-        missing.append("Acknowledge or resolve crash/error log")
-      }
     }
+    let hasRuntimeFailure = current.contains {
+      $0.kind == .runtimeLog && $0.status == .failed && !$0.acknowledged
+    }
+    if hasRuntimeFailure { missing.append("Acknowledge or resolve crash/error log") }
     if requirement.testsChanged && !passed.contains(.test) {
       missing.append("Affected tests passing, or explicit no-relevant-tests evidence")
     }
@@ -85,10 +84,12 @@ public actor EvidenceLedger {
       (requirement.codeChanged ? [.build] : [])
         + (requirement.testsChanged ? [.test] : [])
         + (requirement.uiChanged ? [.launch, .uiAssertion, .screenshot, .runtimeLog] : []))
-    let hasFailure = current.contains {
-      relevantKinds.contains($0.kind) && $0.status == .failed
-        && ($0.kind != .runtimeLog || !$0.acknowledged)
-    }
+    let hasFailure =
+      hasRuntimeFailure
+      || current.contains {
+        relevantKinds.contains($0.kind) && $0.status == .failed
+          && ($0.kind != .runtimeLog || !$0.acknowledged)
+      }
     let hasBlocker = current.contains {
       relevantKinds.contains($0.kind) && $0.status == .blocked
     }

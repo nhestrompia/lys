@@ -30,6 +30,15 @@ struct IOSDevWorkbenchApp: App {
     }
     .windowStyle(.hiddenTitleBar)
     .defaultSize(width: 1440, height: 860)
+    .commands {
+      CommandGroup(after: .sidebar) {
+        Divider()
+        Button(model.isTerminalExpanded ? "Hide Terminal" : "Show Terminal") {
+          model.toggleTerminal()
+        }
+        .keyboardShortcut("j", modifiers: .command)
+      }
+    }
   }
 }
 

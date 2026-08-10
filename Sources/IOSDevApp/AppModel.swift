@@ -30,11 +30,13 @@ struct FileNode: Identifiable, Hashable {
 
 struct TimelineItem: Identifiable {
   enum State { case complete, active, waiting, warning }
+  enum Category { case system, agent, tool, permission }
   let id = UUID()
   var time: String
   var title: String
   var detail: String
   var state: State
+  var category: Category = .system
 }
 
 struct TaskPlanItem: Identifiable {
@@ -48,13 +50,64 @@ struct AgentPermissionOption: Identifiable, Hashable {
   var id: String
   var name: String
   var kind: String
+
+  var isAllow: Bool { kind.hasPrefix("allow") }
+  var isPersistent: Bool { kind.hasSuffix("always") }
+  var displayName: String {
+    let normalized = name.lowercased()
+    switch kind {
+    case "allow_once" where normalized == "allow" || normalized.contains("allow once"):
+      return "Allow once"
+    case "allow_always"
+    where normalized.contains("session") || normalized.contains("always")
+      || normalized.contains("don't ask") || normalized.contains("dont ask"):
+      return "Allow for this task"
+    case "reject_once": return "Deny"
+    case "reject_always": return "Always deny"
+    default: return name
+    }
+  }
 }
 
 struct AgentPermissionRequest: Identifiable {
   let id = UUID()
+  var toolCallID: String?
   var title: String
   var detail: String
+  var scopeLabel: String
+  var scopeDetail: String?
+  var command: String?
   var options: [AgentPermissionOption]
+}
+
+private struct AgentToolContext {
+  var toolCallID: String
+  var title: String?
+  var name: String?
+  var kind: String?
+  var status: String?
+  var rawInput: JSONValue?
+  var rawOutput: JSONValue?
+  var locations: [String] = []
+}
+
+struct TerminalEntry: Identifiable {
+  enum State { case running, succeeded, failed, cancelled }
+  let id: UUID
+  var command: String
+  var workingDirectory: String
+  var output: String
+  var state: State
+  var startedAt: Date
+
+  init(command: String, workingDirectory: String, state: State = .running) {
+    id = UUID()
+    self.command = command
+    self.workingDirectory = workingDirectory
+    output = ""
+    self.state = state
+    startedAt = Date()
+  }
 }
 
 enum AppOperation: Equatable {
@@ -83,6 +136,34 @@ enum AppOperation: Equatable {
     case .refreshing: "Relaunching the installed app and capturing a fresh screenshot."
     }
   }
+}
+
+enum PreviewInteractionState: Equatable {
+  case unavailable
+  case warming
+  case ready
+  case sending
+
+  var label: String {
+    switch self {
+    case .unavailable: "Interaction unavailable"
+    case .warming: "Connecting interaction…"
+    case .ready: "Interactive"
+    case .sending: "Sending tap…"
+    }
+  }
+}
+
+struct PreviewTapFeedback: Identifiable, Equatable {
+  let id = UUID()
+  let x: Double
+  let y: Double
+}
+
+private struct PreviewTapRequest {
+  let x: Double
+  let y: Double
+  let sessionID: UUID
 }
 
 @MainActor
@@ -120,6 +201,10 @@ public final class AppModel: ObservableObject {
   @Published var isBusy = false
   @Published var selectedAppearance: SimulatorAppearance = .light
   @Published var currentScreenshot: URL?
+  @Published var currentScreenshotImage: NSImage?
+  @Published var previewInteractionState: PreviewInteractionState = .unavailable
+  @Published var previewTapFeedback: PreviewTapFeedback?
+  @Published var previewLatencyMS: Int?
   @Published var appOperation: AppOperation = .idle
   @Published var adapters: [DetectedAdapter] = []
   @Published var selectedAdapterID = ""
@@ -130,6 +215,8 @@ public final class AppModel: ObservableObject {
   @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
+  @Published var terminalEntries: [TerminalEntry] = []
+  @Published public var isTerminalExpanded = false
 
   var selectedDestination: Destination? {
     destinations.first { $0.udid == selectedDestinationID }
@@ -146,14 +233,16 @@ public final class AppModel: ObservableObject {
     UIHierarchyInspector.meaningfulElements(from: hierarchyElements)
   }
   var requiresUIVerification: Bool { activeWorktree != nil && selectedTarget != nil }
-  var isExpoRepository: Bool {
-    guard let repository,
-      let data = try? Data(contentsOf: repository.appending(path: "package.json")),
-      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return false }
-    let dependencies = root["dependencies"] as? [String: Any]
-    let development = root["devDependencies"] as? [String: Any]
-    return dependencies?["expo"] != nil || development?["expo"] != nil
+  var isExpoRepository: Bool { expoProjectRoot != nil }
+  var expoProjectRoot: URL? {
+    guard let workspace = taskWorkspace?.standardizedFileURL else { return nil }
+    var candidate = taskContainer()?.deletingLastPathComponent().standardizedFileURL ?? workspace
+    while candidate.path == workspace.path || candidate.path.hasPrefix(workspace.path + "/") {
+      if Self.packageUsesExpo(at: candidate) { return candidate }
+      guard candidate.path != workspace.path else { break }
+      candidate.deleteLastPathComponent()
+    }
+    return Self.packageUsesExpo(at: workspace) ? workspace : nil
   }
   var needsExpoPreparation: Bool { isExpoRepository && containers.isEmpty }
   var agentComposerBlocker: String? {
@@ -178,6 +267,7 @@ public final class AppModel: ObservableObject {
   private let workspaceManager = WorkspaceManager()
   private let runtime = RuntimeController()
   private let runner = ProcessRunner()
+  private let metroRunner = ProcessRunner()
   private let taskRoot: URL
   private let runtimeRoot: URL
   private let adapterRoot: URL
@@ -189,8 +279,29 @@ public final class AppModel: ObservableObject {
   private var metroRunID: UUID?
   private var metroWorkspace: URL?
   private var metroExitDiagnostic: String?
+  private var metroTerminalID: UUID?
+  private var metroShouldStayRunning = false
+  private var metroRecoveryTask: Task<Void, Never>?
+  private var repositoryLoadTask: Task<Void, Never>?
+  private var repositoryLoadID = UUID()
   private var permissionContinuation: CheckedContinuation<RPCEnvelope, Never>?
   private var pendingPermissionRPCID: RPCID?
+  private var pendingPermissionFingerprint: String?
+  private var persistentPermissionChoices: [String: String] = [:]
+  private var didRecordRoutineTestingPermission = false
+  private var agentMessageTimelineID: UUID?
+  private var agentMessageProtocolID: String?
+  private var agentMessageBuffer = ""
+  private var agentMessageFlushTask: Task<Void, Never>?
+  private var agentToolContexts: [String: AgentToolContext] = [:]
+  private var agentToolTimelineIDs: [String: UUID] = [:]
+  private var pendingPreviewTaps: [PreviewTapRequest] = []
+  private var previewTapWorker: Task<Void, Never>?
+  private var previewWarmupTask: Task<Void, Never>?
+  private var previewFeedbackTask: Task<Void, Never>?
+  private var previewSessionID = UUID()
+  private var terminalOutputBuffers: [UUID: String] = [:]
+  private var terminalFlushTask: Task<Void, Never>?
 
   public init() {
     let support =
@@ -236,48 +347,85 @@ public final class AppModel: ObservableObject {
   }
 
   func openRepository(_ url: URL) {
+    repositoryLoadTask?.cancel()
+    repositoryLoadID = UUID()
+    resetPreviewInteraction()
+    let loadID = repositoryLoadID
+    let openedRepository = url.resolvingSymlinksInPath().standardizedFileURL
+    disableMetroPersistence()
     cancelOwnedMetro()
     activeACPClient?.cancel()
     activeACPClient = nil
     activeACPSessionID = nil
     resolveAgentPermission(optionID: nil)
-    repository = url.resolvingSymlinksInPath().standardizedFileURL
+    resetAgentPresentation()
+    repository = openedRepository
+    isGitRepository = false
+    branchName = ""
     activeWorktree = nil
     baseline = nil
     proposedChanges = []
     applyConflicts = []
     evidence = []
     verificationReport = nil
-    currentScreenshot = nil
+    setCurrentScreenshot(nil)
+    selectedTarget = nil
+    selectedElement = nil
+    hierarchyElements = []
+    generation = 0
+    terminalEntries = []
+    terminalOutputBuffers = [:]
+    terminalFlushTask?.cancel()
+    terminalFlushTask = nil
+    isTerminalExpanded = false
     appOperation = .idle
-    containers = ToolchainDiscovery.projectContainers(in: url)
+    containers = ToolchainDiscovery.projectContainers(in: openedRepository)
     selectedContainer = containers.first
-    files = Self.children(of: url, depth: 0)
+    files = Self.children(of: openedRepository, depth: 0)
     selectedFile = nil
     source = ""
     taskTitle = ""
     timeline = [
-      .init(time: Self.now(), title: "Repository opened", detail: url.path, state: .complete),
+      .init(
+        time: Self.now(), title: "Repository opened", detail: openedRepository.path,
+        state: .complete),
       .init(
         time: "—", title: "Describe a task to begin",
         detail: "Editable agent work will be isolated from this checkout.", state: .waiting),
     ]
     plan = []
     status = "Discovering"
-    Task { await loadRepository() }
+    repositoryLoadTask = Task {
+      _ = try? await runtime.request(method: "devserver.stop")
+      await runtime.stop()
+      guard !Task.isCancelled, repositoryLoadID == loadID,
+        repository == openedRepository
+      else { return }
+      await loadRepository(openedRepository, loadID: loadID)
+    }
   }
 
   func selectContainer(_ url: URL) {
+    resetPreviewInteraction()
     selectedContainer = url
+    selectedTarget = nil
+    selectedElement = nil
+    hierarchyElements = []
+    setCurrentScreenshot(nil)
     Task { await refreshProjectSelection() }
   }
 
   func selectScheme(_ scheme: String) {
+    resetPreviewInteraction()
     selectedScheme = scheme
     selectedTarget = nil
+    selectedElement = nil
+    hierarchyElements = []
+    setCurrentScreenshot(nil)
   }
 
   func selectDestination(_ id: String) {
+    resetPreviewInteraction()
     selectedDestinationID = id
     selectedTarget = nil
     refreshWDAStatus()
@@ -285,6 +433,13 @@ public final class AppModel: ObservableObject {
 
   func refreshSimulators() {
     Task { await refreshDestinations() }
+  }
+
+  public func toggleTerminal() { isTerminalExpanded.toggle() }
+
+  func clearTerminal() {
+    guard !terminalEntries.contains(where: { $0.state == .running }) else { return }
+    terminalEntries = []
   }
 
   func prepareExpoProject() {
@@ -312,9 +467,13 @@ public final class AppModel: ObservableObject {
         if !FileManager.default.fileExists(atPath: repository.appending(path: "node_modules").path)
         {
           status = "Installing JavaScript dependencies"
+          let terminalID = beginTerminal(
+            executable: npm.path, arguments: ["ci"], workingDirectory: repository)
           let install = try await runner.run(
             executable: npm, arguments: ["ci"], workingDirectory: repository,
             environment: environment, maximumOutputBytes: 24 * 1_024 * 1_024)
+          finishTerminal(
+            terminalID, succeeded: install.succeeded, output: install.stdout + install.stderr)
           guard install.succeeded else {
             throw RPCError(
               code: -32094, message: "npm ci failed", data: .string(install.stderr))
@@ -325,11 +484,17 @@ public final class AppModel: ObservableObject {
               detail: "npm ci completed", state: .complete))
         }
         status = "Generating iOS project"
+        let terminalID = beginTerminal(
+          executable: npm.path,
+          arguments: ["exec", "--", "expo", "prebuild", "--platform", "ios"],
+          workingDirectory: repository)
         let prebuild = try await runner.run(
           executable: npm,
           arguments: ["exec", "--", "expo", "prebuild", "--platform", "ios"],
           workingDirectory: repository, environment: environment,
           maximumOutputBytes: 32 * 1_024 * 1_024)
+        finishTerminal(
+          terminalID, succeeded: prebuild.succeeded, output: prebuild.stdout + prebuild.stderr)
         guard prebuild.succeeded else {
           throw RPCError(
             code: -32095, message: "Expo iOS prebuild failed", data: .string(prebuild.stderr))
@@ -526,6 +691,7 @@ public final class AppModel: ObservableObject {
           method: "session/prompt",
           params: try jsonValue(ACPPrompt(sessionID: sessionID, text: prompt)))
         let reason = result.result?["stopReason"]?.stringValue ?? "completed"
+        finishAgentMessage()
         timeline.append(
           .init(
             time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
@@ -534,6 +700,7 @@ public final class AppModel: ObservableObject {
         await refreshEvidence()
         status = "Agent finished · review evidence"
       } catch {
+        finishAgentMessage()
         status = "Agent needs attention"
         notice = error.localizedDescription
         timeline.append(
@@ -550,7 +717,31 @@ public final class AppModel: ObservableObject {
       notice = preflight?.issues.joined(separator: "\n") ?? "Choose a scheme and simulator first."
       return
     }
-    Task { _ = await executeBuild() }
+    guard approveRequiredCocoaPodsInstall() else { return }
+    isBusy = true
+    appOperation = .preparing
+    Task {
+      do {
+        try await installRequiredCocoaPods()
+        guard approveRequiredExpoCompatibilityRepair() else {
+          isBusy = false
+          appOperation = .idle
+          return
+        }
+      } catch {
+        isBusy = false
+        appOperation = .idle
+        status = "Dependency preparation failed"
+        notice = error.localizedDescription
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Dependency preparation failed",
+            detail: error.localizedDescription, state: .warning))
+        return
+      }
+      isBusy = false
+      _ = await executeBuild()
+    }
   }
 
   func run() {
@@ -558,20 +749,34 @@ public final class AppModel: ObservableObject {
       notice = "Choose a buildable scheme and simulator first."
       return
     }
-    guard approveRequiredExpoCompatibilityRepair() else { return }
+    guard approveRequiredCocoaPodsInstall() else { return }
+    resetPreviewInteraction()
+    selectedTarget = nil
+    selectedElement = nil
+    hierarchyElements = []
+    setCurrentScreenshot(nil)
     isBusy = true
     appOperation = isExpoRepository && startDevServerOnRun ? .preparing : .building
     Task {
       do {
-        if isExpoRepository && startDevServerOnRun { try await ensureMetro() }
+        try await installRequiredCocoaPods()
+        guard approveRequiredExpoCompatibilityRepair() else {
+          isBusy = false
+          appOperation = .idle
+          return
+        }
+        if isExpoRepository && startDevServerOnRun {
+          metroShouldStayRunning = true
+          try await ensureMetro()
+        }
       } catch {
         isBusy = false
         appOperation = .idle
-        status = "Metro failed"
+        status = "Preparation failed"
         notice = error.localizedDescription
         timeline.append(
           .init(
-            time: Self.now(), title: "Metro failed to start",
+            time: Self.now(), title: "Run preparation failed",
             detail: error.localizedDescription, state: .warning))
         return
       }
@@ -594,22 +799,32 @@ public final class AppModel: ObservableObject {
     status = "Refreshing app"
     Task {
       do {
-        if isExpoRepository && startDevServerOnRun { try await ensureMetro() }
+        if isExpoRepository && startDevServerOnRun {
+          metroShouldStayRunning = true
+          try await ensureMetro()
+        }
         try await ensureRuntime()
         _ = try? await runtime.request(
           method: "app.terminate",
           params: .object([
             "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
           ]))
-        _ = try await runtime.request(
+        let refreshed = try await runtime.request(
           method: "app.install_launch",
           params: .object([
             "udid": .string(destination.udid), "appPath": .string(productPath.path),
             "bundleID": .string(target.bundleID),
+            "startDevServer": .bool(false),
+            "useDevServer": .bool(isExpoRepository && startDevServerOnRun),
           ]))
-        await captureScreenshot()
+        guard refreshed["launched"]?.boolValue == true else {
+          throw RPCError(code: -32053, message: "The refreshed app did not launch")
+        }
+        status = "Waiting for app to settle"
+        await captureScreenshot(settleDelayMS: isExpoRepository ? 2_500 : 900)
         await refreshEvidence()
         status = "Running"
+        warmPreviewInteraction(destination: destination, target: target)
         timeline.append(
           .init(
             time: Self.now(), title: "Application refreshed",
@@ -636,6 +851,7 @@ public final class AppModel: ObservableObject {
       }
       resolveAgentPermission(optionID: nil)
       _ = try? await runtime.request(method: "build.cancel")
+      disableMetroPersistence()
       await stopOwnedMetro()
       status = "Cancelled"
       isBusy = false
@@ -749,30 +965,122 @@ public final class AppModel: ObservableObject {
       return
     }
     guard !isBusy else { return }
-    status = "Sending preview tap"
-    Task {
-      do {
-        try await ensureRuntime()
+    let x = min(max(normalizedX, 0), 1)
+    let y = min(max(normalizedY, 0), 1)
+    let feedback = PreviewTapFeedback(x: x, y: y)
+    previewTapFeedback = feedback
+    previewFeedbackTask?.cancel()
+    previewFeedbackTask = Task {
+      try? await Task.sleep(for: .milliseconds(140))
+      guard !Task.isCancelled, previewTapFeedback?.id == feedback.id else { return }
+      previewTapFeedback = nil
+    }
+    pendingPreviewTaps.append(
+      PreviewTapRequest(x: x, y: y, sessionID: previewSessionID))
+    previewInteractionState = .sending
+    guard previewTapWorker == nil else { return }
+    previewTapWorker = Task { await processPreviewTaps(destination: destination, target: target) }
+  }
+
+  private func processPreviewTaps(destination: Destination, target: AppTarget) async {
+    do {
+      try await ensureRuntime()
+      while let request = pendingPreviewTaps.first {
+        pendingPreviewTaps.removeFirst()
+        guard request.sessionID == previewSessionID,
+          selectedDestinationID == destination.udid,
+          selectedTarget?.bundleID == target.bundleID
+        else { continue }
+
+        let started = DispatchTime.now().uptimeNanoseconds
         _ = try await runtime.request(
           method: "ui.perform",
           params: .object([
             "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
             "selector": .object([
               "coordinate": .object([
-                "x": .number(normalizedX), "y": .number(normalizedY),
+                "x": .number(request.x), "y": .number(request.y),
               ])
             ]),
             "action": .string("tap"),
           ]))
-        status = "Preview tap sent"
-        try await Task.sleep(for: .milliseconds(250))
-        await captureScreenshot()
-        await refreshEvidence()
-      } catch {
-        status = "Preview tap failed"
-        notice = error.localizedDescription
+
+        // Rapid taps are delivered without waiting for an intermediate screenshot. Once the
+        // queue drains, one cheap frame replaces the preview without running verification.
+        guard pendingPreviewTaps.isEmpty else { continue }
+        try? await Task.sleep(for: .milliseconds(80))
+        let frame = try await runtime.request(
+          method: "preview.capture",
+          params: .object(["udid": .string(destination.udid)]))
+        guard request.sessionID == previewSessionID,
+          selectedDestinationID == destination.udid,
+          selectedTarget?.bundleID == target.bundleID,
+          let path = frame["path"]?.stringValue
+        else { continue }
+        setCurrentScreenshot(URL(fileURLWithPath: path))
+        previewLatencyMS = Int(
+          (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+      }
+      if selectedDestinationID == destination.udid, selectedTarget?.bundleID == target.bundleID {
+        previewInteractionState = .ready
+      }
+    } catch {
+      if selectedDestinationID == destination.udid, selectedTarget?.bundleID == target.bundleID {
+        previewInteractionState = .unavailable
+        notice = "Preview interaction failed: \(error.localizedDescription)"
       }
     }
+    previewTapWorker = nil
+    if !pendingPreviewTaps.isEmpty, let destination = selectedDestination,
+      let target = selectedTarget
+    {
+      previewInteractionState = .sending
+      previewTapWorker = Task {
+        await processPreviewTaps(destination: destination, target: target)
+      }
+    }
+  }
+
+  private func warmPreviewInteraction(destination: Destination, target: AppTarget) {
+    guard wdaStatus.availability == .ready else {
+      previewInteractionState = .unavailable
+      return
+    }
+    previewWarmupTask?.cancel()
+    let sessionID = previewSessionID
+    previewInteractionState = .warming
+    previewWarmupTask = Task {
+      do {
+        try await ensureRuntime()
+        _ = try await runtime.request(
+          method: "ui.prepare",
+          params: .object([
+            "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
+          ]))
+        guard !Task.isCancelled, sessionID == previewSessionID,
+          selectedDestinationID == destination.udid,
+          selectedTarget?.bundleID == target.bundleID
+        else { return }
+        previewInteractionState = .ready
+      } catch {
+        guard !Task.isCancelled, sessionID == previewSessionID else { return }
+        previewInteractionState = .unavailable
+      }
+    }
+  }
+
+  private func resetPreviewInteraction() {
+    previewTapWorker?.cancel()
+    previewWarmupTask?.cancel()
+    previewFeedbackTask?.cancel()
+    previewTapWorker = nil
+    previewWarmupTask = nil
+    previewFeedbackTask = nil
+    pendingPreviewTaps = []
+    previewTapFeedback = nil
+    previewLatencyMS = nil
+    previewSessionID = UUID()
+    previewInteractionState = .unavailable
   }
 
   func assertSelectedElement() {
@@ -856,11 +1164,13 @@ public final class AppModel: ObservableObject {
     guard let activeWorktree, let repository else { return }
     Task {
       do {
+        disableMetroPersistence()
         await stopOwnedMetro()
         activeACPClient?.cancel()
         activeACPClient = nil
         activeACPSessionID = nil
         resolveAgentPermission(optionID: nil)
+        resetAgentPresentation()
         await runtime.stop()
         try await workspaceManager.discard(
           worktree: activeWorktree, repository: repository, taskRoot: taskRoot)
@@ -879,6 +1189,9 @@ public final class AppModel: ObservableObject {
   }
 
   func resume(_ recovered: RecoverableWorkspace) {
+    repositoryLoadTask?.cancel()
+    repositoryLoadID = UUID()
+    let loadID = repositoryLoadID
     let original = URL(fileURLWithPath: recovered.manifest.repositoryRoot)
     repository = original
     activeWorktree = recovered.worktree
@@ -902,7 +1215,7 @@ public final class AppModel: ObservableObject {
     Task {
       do {
         try await startRuntime(workspace: recovered.worktree)
-        await loadRepository()
+        await loadRepository(original, loadID: loadID)
         try await refreshProposedChanges()
         recoverableWorkspaces.removeAll { $0.id == recovered.id }
         status = "Recovered · review required"
@@ -960,6 +1273,14 @@ public final class AppModel: ObservableObject {
     status = "Verifying"
     isBusy = true
     generation = 2
+    terminalEntries = [
+      TerminalEntry(
+        command:
+          "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace /Synthetic/TravelApp.xcworkspace -scheme TravelApp build",
+        workingDirectory: "/Synthetic/TravelApp", state: .succeeded)
+    ]
+    terminalEntries[0].output = "** BUILD SUCCEEDED **\n"
+    isTerminalExpanded = ProcessInfo.processInfo.environment["IOSDEV_SNAPSHOT_TERMINAL"] == "1"
     taskTitle =
       "Add dark mode support to the Profile screen and verify it on small and large iPhones."
     selectedScheme = "TravelApp"
@@ -1035,7 +1356,7 @@ public final class AppModel: ObservableObject {
 
   public func loadDesignBuildPreview() {
     loadDesignPreview()
-    currentScreenshot = nil
+    setCurrentScreenshot(nil)
     appOperation = .building
     isBusy = true
     status = "Building"
@@ -1043,6 +1364,27 @@ public final class AppModel: ObservableObject {
       .init(
         time: "10:49", title: "Build started", detail: "TravelApp · iPhone 16 Pro",
         state: .active))
+  }
+
+  public func loadPermissionPreview() {
+    loadDesignPreview()
+    status = "Awaiting permission"
+    pendingAgentPermission = .init(
+      toolCallID: "synthetic-command", title: "Run this command?",
+      detail: "Codex wants to run the command below. Review it before continuing.",
+      scopeLabel: "Isolated task",
+      scopeDetail: "/Synthetic/Tasks/profile-dark-mode",
+      command: "npm install @testing-library/react-native --save-dev",
+      options: [
+        .init(id: "allow-once", name: "Allow Once", kind: "allow_once"),
+        .init(id: "allow-task", name: "Allow For This Session", kind: "allow_always"),
+        .init(id: "reject-once", name: "Reject", kind: "reject_once"),
+        .init(id: "reject-always", name: "Reject Always", kind: "reject_always"),
+      ])
+    timeline.append(
+      .init(
+        time: "10:48", title: "Install test dependency",
+        detail: "Waiting for your approval", state: .active, category: .tool))
   }
 
   public func loadSettingsPreview() {
@@ -1063,26 +1405,33 @@ public final class AppModel: ObservableObject {
     refreshWDAStatus()
   }
 
-  private func loadRepository() async {
-    guard let repository else { return }
+  private func loadRepository(_ repository: URL, loadID: UUID) async {
     let git = URL(fileURLWithPath: "/usr/bin/git")
-    if let inside = try? await runner.run(
+    let inside = try? await runner.run(
       executable: git, arguments: ["-C", repository.path, "rev-parse", "--is-inside-work-tree"])
-    {
-      isGitRepository = inside.succeeded
+    guard !Task.isCancelled, repositoryLoadID == loadID, self.repository == repository else {
+      return
     }
-    if isGitRepository,
+    let gitRepository = inside?.succeeded == true
+    var discoveredBranch = "read-only"
+    if gitRepository,
       let branch = try? await runner.run(
         executable: git, arguments: ["-C", repository.path, "branch", "--show-current"])
     {
       let value = branch.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-      branchName = value.isEmpty ? "detached" : value
-    } else {
-      branchName = "read-only"
+      discoveredBranch = value.isEmpty ? "detached" : value
     }
+    guard !Task.isCancelled, repositoryLoadID == loadID, self.repository == repository else {
+      return
+    }
+    isGitRepository = gitRepository
+    branchName = discoveredBranch
     await refreshProjectSelection()
+    guard !Task.isCancelled, repositoryLoadID == loadID, self.repository == repository else {
+      return
+    }
     status =
-      !isGitRepository ? "Browse only" : needsExpoPreparation ? "Expo setup required" : "Ready"
+      !gitRepository ? "Browse only" : needsExpoPreparation ? "Expo setup required" : "Ready"
   }
 
   private func refreshToolchain() async {
@@ -1126,9 +1475,11 @@ public final class AppModel: ObservableObject {
         let applicationSchemes = listing.schemes.filter(localSchemes.contains)
         if !applicationSchemes.isEmpty { discoveredSchemes = applicationSchemes }
       }
+      guard selectedContainer?.standardizedFileURL == container.standardizedFileURL else { return }
       schemes = ToolchainDiscovery.prioritizeSchemes(discoveredSchemes, for: container)
       if !schemes.contains(selectedScheme) { selectedScheme = schemes.first ?? "" }
     } catch {
+      guard selectedContainer?.standardizedFileURL == container.standardizedFileURL else { return }
       notice = error.localizedDescription
       schemes = []
     }
@@ -1220,8 +1571,8 @@ public final class AppModel: ObservableObject {
     status = "Agent working"
     timeline.append(
       .init(
-        time: Self.now(), title: "(adapter.displayName) connected",
-        detail: "ACP v1 session (sessionID)", state: .complete))
+        time: Self.now(), title: "\(adapter.displayName) connected",
+        detail: "ACP v1 session \(sessionID)", state: .complete))
 
     let context = """
       \(prompt)
@@ -1232,6 +1583,7 @@ public final class AppModel: ObservableObject {
       method: "session/prompt",
       params: try jsonValue(ACPPrompt(sessionID: sessionID, text: context)))
     let reason = result.result?["stopReason"]?.stringValue ?? "completed"
+    finishAgentMessage()
     timeline.append(
       .init(
         time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
@@ -1257,19 +1609,15 @@ public final class AppModel: ObservableObject {
     switch kind {
     case "agent_message_chunk":
       guard let text = update["content"]?["text"]?.stringValue, !text.isEmpty else { return }
-      timeline.append(.init(time: Self.now(), title: "Agent", detail: text, state: .active))
+      consumeAgentMessageChunk(
+        text, messageID: update["messageId"]?.stringValue
+          ?? update["content"]?["messageId"]?.stringValue)
     case "tool_call", "tool_call_update":
-      let title = update["title"]?.stringValue ?? update["name"]?.stringValue ?? "Tool call"
-      let state = update["status"]?.stringValue == "failed" ? TimelineItem.State.warning : .active
-      timeline.append(
-        .init(
-          time: Self.now(), title: title,
-          detail: update["status"]?.stringValue ?? "In progress", state: state))
+      finishAgentMessage()
+      consumeAgentToolUpdate(update)
     case "plan":
-      timeline.append(
-        .init(
-          time: Self.now(), title: "Agent plan updated", detail: "Structured ACP plan received",
-          state: .active))
+      finishAgentMessage()
+      consumeAgentPlan(update)
     default: break
     }
   }
@@ -1282,14 +1630,36 @@ public final class AppModel: ObservableObject {
       }
       return .init(id: id, name: name, kind: value["kind"]?.stringValue ?? "allow_once")
     }
-    let title = request.params?["toolCall"]?["title"]?.stringValue ?? "Agent permission"
-    let detail =
-      request.params?["toolCall"]?["name"]?.stringValue
-      ?? "Review this operation before allowing it."
+    let toolCall = request.params?["toolCall"]
+    let toolCallID = toolCall?["toolCallId"]?.stringValue
+    let context = mergedToolContext(toolCall: toolCall, toolCallID: toolCallID)
+    let fingerprint = permissionFingerprint(for: context)
+
+    if let remembered = persistentPermissionChoices[fingerprint],
+      options.contains(where: { $0.id == remembered })
+    {
+      return permissionResponse(id: request.id, optionID: remembered)
+    }
+    if isRoutineTestingTool(context),
+      let option = options.first(where: { $0.kind == "allow_always" })
+        ?? options.first(where: { $0.kind == "allow_once" })
+    {
+      if option.isPersistent { persistentPermissionChoices[fingerprint] = option.id }
+      recordRoutineTestingPermissionIfNeeded()
+      updateToolPermissionState(toolCallID: toolCallID, detail: "Approved for this task")
+      return permissionResponse(id: request.id, optionID: option.id)
+    }
+
+    let presentation = permissionPresentation(for: context)
+    updateToolPermissionState(toolCallID: toolCallID, detail: "Waiting for your approval")
     return await withCheckedContinuation { continuation in
       permissionContinuation = continuation
       pendingPermissionRPCID = request.id
-      pendingAgentPermission = .init(title: title, detail: detail, options: options)
+      pendingPermissionFingerprint = fingerprint
+      pendingAgentPermission = .init(
+        toolCallID: toolCallID, title: presentation.title, detail: presentation.detail,
+        scopeLabel: presentation.scopeLabel, scopeDetail: presentation.scopeDetail,
+        command: presentation.command, options: options)
       status = "Awaiting permission"
     }
   }
@@ -1301,17 +1671,355 @@ public final class AppModel: ObservableObject {
     }
     permissionContinuation = nil
     let requestID = pendingPermissionRPCID
+    let request = pendingAgentPermission
+    if let optionID,
+      let option = request?.options.first(where: { $0.id == optionID }), option.isPersistent,
+      let fingerprint = pendingPermissionFingerprint
+    {
+      persistentPermissionChoices[fingerprint] = optionID
+    }
     pendingPermissionRPCID = nil
+    pendingPermissionFingerprint = nil
     pendingAgentPermission = nil
     status = "Agent working"
-    let outcome: JSONValue =
-      optionID.map {
-        .object(["outcome": .string("selected"), "optionId": .string($0)])
-      } ?? .object(["outcome": .string("cancelled")])
-    continuation.resume(returning: .init(id: requestID, result: .object(["outcome": outcome])))
+    if let request {
+      let option = request.options.first(where: { $0.id == optionID })
+      timeline.append(
+        .init(
+          time: Self.now(), title: option?.isAllow == true ? "Permission granted" : "Permission denied",
+          detail: option?.displayName ?? "The action was cancelled", state: option?.isAllow == true ? .complete : .warning,
+          category: .permission))
+      updateToolPermissionState(
+        toolCallID: request.toolCallID,
+        detail: option?.isAllow == true ? "Approved" : "Denied")
+    }
+    continuation.resume(returning: permissionResponse(id: requestID, optionID: optionID))
   }
 
+  private func consumeAgentMessageChunk(_ text: String, messageID: String?) {
+    if let messageID, let current = agentMessageProtocolID, current != messageID {
+      finishAgentMessage()
+    }
+    if agentMessageTimelineID == nil {
+      agentMessageProtocolID = messageID
+      timeline.append(
+        .init(
+          time: Self.now(), title: selectedAgentDisplayName, detail: "", state: .active,
+          category: .agent))
+      agentMessageTimelineID = timeline.last?.id
+    }
+    agentMessageBuffer += text
+    guard agentMessageFlushTask == nil else { return }
+    agentMessageFlushTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(75))
+      guard !Task.isCancelled else { return }
+      self?.flushAgentMessageBuffer()
+    }
+  }
+
+  private func flushAgentMessageBuffer() {
+    agentMessageFlushTask = nil
+    guard !agentMessageBuffer.isEmpty, let id = agentMessageTimelineID,
+      let index = timeline.firstIndex(where: { $0.id == id })
+    else { return }
+    timeline[index].detail += agentMessageBuffer
+    agentMessageBuffer = ""
+  }
+
+  private func finishAgentMessage() {
+    agentMessageFlushTask?.cancel()
+    agentMessageFlushTask = nil
+    flushAgentMessageBuffer()
+    if let id = agentMessageTimelineID,
+      let index = timeline.firstIndex(where: { $0.id == id })
+    {
+      timeline[index].state = .complete
+    }
+    agentMessageTimelineID = nil
+    agentMessageProtocolID = nil
+  }
+
+  private func consumeAgentToolUpdate(_ update: JSONValue) {
+    guard let toolCallID = update["toolCallId"]?.stringValue else { return }
+    var context = agentToolContexts[toolCallID]
+      ?? AgentToolContext(toolCallID: toolCallID)
+    context.title = update["title"]?.stringValue ?? context.title
+    context.name = update["name"]?.stringValue ?? context.name
+    context.kind = update["kind"]?.stringValue ?? context.kind
+    context.status = update["status"]?.stringValue ?? context.status
+    context.rawInput = update["rawInput"] ?? context.rawInput
+    context.rawOutput = update["rawOutput"] ?? context.rawOutput
+    let newLocations = locationStrings(from: update["locations"])
+    if !newLocations.isEmpty { context.locations = newLocations }
+    agentToolContexts[toolCallID] = context
+
+    let status = context.status ?? "in_progress"
+    let state: TimelineItem.State = switch status {
+    case "completed": .complete
+    case "failed": .warning
+    case "pending": .waiting
+    default: .active
+    }
+    let detail: String = switch status {
+    case "completed": "Completed"
+    case "failed": conciseToolFailure(context.rawOutput) ?? "Failed"
+    case "pending": "Waiting"
+    default: "In progress"
+    }
+    let title = humanizedToolTitle(context)
+    if let timelineID = agentToolTimelineIDs[toolCallID],
+      let index = timeline.firstIndex(where: { $0.id == timelineID })
+    {
+      timeline[index].title = title
+      timeline[index].detail = detail
+      timeline[index].state = state
+    } else {
+      timeline.append(
+        .init(
+          time: Self.now(), title: title, detail: detail, state: state, category: .tool))
+      agentToolTimelineIDs[toolCallID] = timeline.last?.id
+    }
+  }
+
+  private func consumeAgentPlan(_ update: JSONValue) {
+    let entries = update["entries"]?.arrayValue ?? update["plan"]?["entries"]?.arrayValue ?? []
+    guard !entries.isEmpty else { return }
+    plan = entries.compactMap { entry in
+      guard let title = entry["content"]?.stringValue ?? entry["title"]?.stringValue,
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else { return nil }
+      let state: TaskPlanItem.State = switch entry["status"]?.stringValue {
+      case "completed": .complete
+      case "in_progress": .active
+      case "blocked": .blocked
+      default: .waiting
+      }
+      return .init(title: title, state: state)
+    }
+  }
+
+  private func mergedToolContext(toolCall: JSONValue?, toolCallID: String?) -> AgentToolContext {
+    let identifier = toolCallID ?? UUID().uuidString
+    var context = agentToolContexts[identifier]
+      ?? AgentToolContext(toolCallID: identifier)
+    context.title = toolCall?["title"]?.stringValue ?? context.title
+    context.name = toolCall?["name"]?.stringValue ?? context.name
+    context.kind = toolCall?["kind"]?.stringValue ?? context.kind
+    context.status = toolCall?["status"]?.stringValue ?? context.status
+    context.rawInput = toolCall?["rawInput"] ?? context.rawInput
+    context.rawOutput = toolCall?["rawOutput"] ?? context.rawOutput
+    let locations = locationStrings(from: toolCall?["locations"])
+    if !locations.isEmpty { context.locations = locations }
+    if toolCallID != nil { agentToolContexts[identifier] = context }
+    return context
+  }
+
+  private func permissionPresentation(for context: AgentToolContext) -> (
+    title: String, detail: String, scopeLabel: String, scopeDetail: String?, command: String?
+  ) {
+    let command = commandText(from: context.rawInput)
+    let workingDirectory = context.rawInput?["cwd"]?.stringValue
+      ?? context.rawInput?["workingDirectory"]?.stringValue
+    let firstLocation = context.locations.first
+    let isInsideTask = [workingDirectory, firstLocation].compactMap { $0 }.contains {
+      guard let taskWorkspace else { return false }
+      let path = URL(fileURLWithPath: $0).standardizedFileURL.path
+      let root = taskWorkspace.standardizedFileURL.path
+      return path == root || path.hasPrefix(root + "/")
+    }
+    let scopeLabel = runtimeToolKey(context) != nil
+      ? (selectedDestination?.name ?? "Selected Simulator")
+      : isInsideTask ? "Isolated task" : context.kind == "fetch" ? "Network" : "Agent process"
+    let scopeDetail = workingDirectory ?? firstLocation
+
+    if let key = runtimeToolKey(context) {
+      let action = Self.runtimeToolTitles[key] ?? humanizedToolTitle(context)
+      if key == "app.reset_data" {
+        return (
+          "Reset the app's data?",
+          "\(selectedAgentDisplayName) wants to erase this app's data on the selected Simulator. This cannot be undone.",
+          scopeLabel, scopeDetail, nil)
+      }
+      return (
+        "Allow app testing?",
+        "\(selectedAgentDisplayName) wants to \(action.lowercased()) using Operate's iOS runtime.",
+        scopeLabel, scopeDetail, nil)
+    }
+
+    switch context.kind {
+    case "execute":
+      return (
+        "Run this command?",
+        "\(selectedAgentDisplayName) wants to run the command below. Review it before continuing.",
+        scopeLabel, scopeDetail, command)
+    case "edit", "move":
+      return (
+        "Change files in this task?",
+        "Changes stay in the isolated task worktree. Your original checkout is unchanged until review.",
+        scopeLabel, scopeDetail, command)
+    case "delete":
+      return (
+        "Delete files from this task?",
+        "The agent wants to remove files from the isolated task. Review the affected location before continuing.",
+        scopeLabel, scopeDetail, command)
+    case "fetch":
+      return (
+        "Allow network access?",
+        "\(selectedAgentDisplayName) wants to access an external resource.", scopeLabel,
+        scopeDetail, command)
+    default:
+      let meaningful = [context.title, context.name]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .first { !$0.isEmpty && !Self.looksLikeMachineToolName($0) }
+      return (
+        "Allow this agent action?", meaningful ?? "Review this action before continuing.",
+        scopeLabel, scopeDetail, command)
+    }
+  }
+
+  private func isRoutineTestingTool(_ context: AgentToolContext) -> Bool {
+    guard let key = runtimeToolKey(context) else { return false }
+    return Self.routineTestingTools.contains(key)
+  }
+
+  private func permissionFingerprint(for context: AgentToolContext) -> String {
+    if let key = runtimeToolKey(context) { return "ios-runtime:\(key)" }
+    return [context.kind ?? "other", commandText(from: context.rawInput) ?? "", context.name ?? ""]
+      .joined(separator: ":")
+  }
+
+  private func permissionResponse(id: RPCID?, optionID: String?) -> RPCEnvelope {
+    let outcome: JSONValue = optionID.map {
+      .object(["outcome": .string("selected"), "optionId": .string($0)])
+    } ?? .object(["outcome": .string("cancelled")])
+    return .init(id: id, result: .object(["outcome": outcome]))
+  }
+
+  private func updateToolPermissionState(toolCallID: String?, detail: String) {
+    guard let toolCallID, let timelineID = agentToolTimelineIDs[toolCallID],
+      let index = timeline.firstIndex(where: { $0.id == timelineID })
+    else { return }
+    timeline[index].detail = detail
+    timeline[index].state = detail == "Denied" ? .warning : .active
+  }
+
+  private func recordRoutineTestingPermissionIfNeeded() {
+    guard !didRecordRoutineTestingPermission else { return }
+    didRecordRoutineTestingPermission = true
+    timeline.append(
+      .init(
+        time: Self.now(), title: "App testing access ready",
+        detail: "Routine build, Simulator, UI, screenshot, and log tools are allowed for this task.",
+        state: .complete, category: .permission))
+  }
+
+  private func resetAgentPresentation() {
+    agentMessageFlushTask?.cancel()
+    agentMessageFlushTask = nil
+    agentMessageTimelineID = nil
+    agentMessageProtocolID = nil
+    agentMessageBuffer = ""
+    agentToolContexts = [:]
+    agentToolTimelineIDs = [:]
+    persistentPermissionChoices = [:]
+    pendingPermissionFingerprint = nil
+    didRecordRoutineTestingPermission = false
+  }
+
+  private var selectedAgentDisplayName: String {
+    adapters.first(where: { $0.id == selectedAdapterID })?.displayName ?? "Agent"
+  }
+
+  private func humanizedToolTitle(_ context: AgentToolContext) -> String {
+    if let key = runtimeToolKey(context), let title = Self.runtimeToolTitles[key] { return title }
+    for value in [context.title, context.name].compactMap({ $0 }) {
+      let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !clean.isEmpty && !Self.looksLikeMachineToolName(clean) { return clean }
+    }
+    return "Using a tool"
+  }
+
+  private func runtimeToolKey(_ context: AgentToolContext) -> String? {
+    let candidates = [context.title, context.name].compactMap { $0 }
+    guard candidates.contains(where: {
+      let value = $0.lowercased()
+      return value.contains("ios_development_runtime")
+        || value.contains("ios development runtime")
+    }) else { return nil }
+    let combined = candidates.joined(separator: " ").lowercased()
+    return Self.runtimeToolTitles.keys.first { combined.contains($0.lowercased()) }
+  }
+
+  private func commandText(from input: JSONValue?) -> String? {
+    guard let command = input?["command"] else { return nil }
+    if let string = command.stringValue { return string }
+    if let arguments = command.arrayValue {
+      return arguments.compactMap(\.stringValue).joined(separator: " ")
+    }
+    return renderJSON(command)
+  }
+
+  private func locationStrings(from value: JSONValue?) -> [String] {
+    value?.arrayValue?.compactMap {
+      $0["path"]?.stringValue ?? $0["uri"]?.stringValue ?? $0.stringValue
+    } ?? []
+  }
+
+  private func conciseToolFailure(_ value: JSONValue?) -> String? {
+    guard let value else { return nil }
+    let text = value.stringValue ?? renderJSON(value)
+    let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+    return line.count > 120 ? String(line.prefix(117)) + "…" : line
+  }
+
+  private func renderJSON(_ value: JSONValue) -> String {
+    guard let data = try? JSONEncoder().encode(value),
+      let text = String(data: data, encoding: .utf8)
+    else { return "" }
+    return text
+  }
+
+  private static func looksLikeMachineToolName(_ value: String) -> Bool {
+    value.hasPrefix("mcp.") || value.contains("_Runtime.") || value.contains("tool_call")
+  }
+
+  private static let runtimeToolTitles: [String: String] = [
+    "workspace.describe": "Inspecting the task workspace",
+    "build.run": "Building the app",
+    "build.cancel": "Stopping the build",
+    "test.list": "Finding tests",
+    "test.run": "Running tests",
+    "simulator.list": "Finding Simulators",
+    "simulator.boot": "Starting the Simulator",
+    "simulator.configure": "Configuring the Simulator",
+    "devserver.start": "Starting the development server",
+    "devserver.status": "Checking the development server",
+    "devserver.stop": "Stopping the development server",
+    "app.install_launch": "Installing and launching the app",
+    "app.terminate": "Stopping the app",
+    "app.reset_data": "Resetting app data",
+    "ui.snapshot": "Inspecting the app",
+    "ui.find": "Finding an interface element",
+    "ui.perform": "Interacting with the app",
+    "ui.wait": "Waiting for the app",
+    "ui.assert": "Checking the interface",
+    "ui.navigate": "Navigating the app",
+    "screenshot.capture": "Capturing a screenshot",
+    "logs.query": "Checking app logs",
+    "verification.status": "Checking verification",
+    "verification.submit": "Submitting verification",
+  ]
+
+  private static let routineTestingTools: Set<String> = [
+    "workspace.describe", "build.run", "build.cancel", "test.list", "test.run",
+    "simulator.list", "simulator.boot", "simulator.configure", "devserver.start",
+    "devserver.status", "devserver.stop", "app.install_launch", "app.terminate",
+    "ui.snapshot", "ui.find", "ui.perform", "ui.wait", "ui.assert", "ui.navigate",
+    "screenshot.capture", "logs.query", "verification.status", "verification.submit",
+  ]
+
   private func startRuntime(workspace: URL) async throws {
+    _ = try? await runtime.request(method: "devserver.stop")
     try await runtime.start(
       executable: try runtimeExecutable(), workspace: workspace, stateRoot: runtimeRoot,
       developerDirectory: developerDirectory)
@@ -1320,7 +2028,11 @@ public final class AppModel: ObservableObject {
   private func ensureRuntime() async throws {
     guard let workspace = taskWorkspace else { throw RuntimeControllerError.notRunning }
     do {
-      _ = try await runtime.request(method: "workspace.describe")
+      let description = try await runtime.request(method: "workspace.describe")
+      guard description["root"]?.stringValue == workspace.standardizedFileURL.path else {
+        try await startRuntime(workspace: workspace)
+        return
+      }
     } catch {
       try await startRuntime(workspace: workspace)
     }
@@ -1337,6 +2049,16 @@ public final class AppModel: ObservableObject {
       .init(
         time: Self.now(), title: "Build started",
         detail: "\(selectedScheme) · \(destination.name)", state: .active))
+    let buildArguments = [
+      container.pathExtension == "xcworkspace" ? "-workspace" : "-project", container.path,
+      "-scheme", selectedScheme, "-configuration", "Debug", "-destination",
+      "platform=iOS Simulator,id=\(destination.udid)", "-derivedDataPath",
+      taskWorkspace?.appending(path: ".iosdev/cache/DerivedData").path ?? "<derived-data>",
+      "build",
+    ]
+    let terminalID = beginTerminal(
+      executable: preflight?.xcodebuildPath ?? "xcodebuild", arguments: buildArguments,
+      workingDirectory: taskWorkspace ?? container.deletingLastPathComponent())
     do {
       try await ensureRuntime()
       let result = try await runtime.request(
@@ -1347,6 +2069,9 @@ public final class AppModel: ObservableObject {
           "destination": .string("platform=iOS Simulator,id=\(destination.udid)"),
         ]))
       let passed = result["succeeded"]?.boolValue == true
+      finishTerminal(
+        terminalID, succeeded: passed,
+        output: result["log"]?.stringValue ?? (passed ? "Build completed." : "Build failed."))
       status = passed ? "Build succeeded" : "Build failed"
       timeline.append(
         .init(
@@ -1360,6 +2085,7 @@ public final class AppModel: ObservableObject {
       if !passed || !continuingToLaunch { appOperation = .idle }
       return passed
     } catch {
+      finishTerminal(terminalID, succeeded: false, output: error.localizedDescription)
       isBusy = false
       appOperation = .idle
       status = "Build blocked"
@@ -1378,8 +2104,14 @@ public final class AppModel: ObservableObject {
     appOperation = .launching
     status = "Preparing launch"
     do {
-      _ = try await runtime.request(
+      // A build can take long enough for a development server to exit. Revalidate immediately
+      // before installation so we never launch an Expo client against a dead port.
+      if isExpoRepository && startDevServerOnRun { try await ensureMetro() }
+      let booted = try await runtime.request(
         method: "simulator.boot", params: .object(["udid": .string(destination.udid)]))
+      guard booted["succeeded"]?.boolValue == true else {
+        throw RPCError(code: -32054, message: "The selected Simulator did not become ready")
+      }
       let targets: [AppTarget] = try await runtime.request(
         [AppTarget].self, method: "target.discover",
         params: .object([
@@ -1395,19 +2127,50 @@ public final class AppModel: ObservableObject {
         )
       }
       selectedTarget = target
-      _ = try await runtime.request(
+      let launched = try await runtime.request(
         method: "app.install_launch",
         params: .object([
           "udid": .string(destination.udid), "appPath": .string(productPath.path),
           "bundleID": .string(target.bundleID),
+          "startDevServer": .bool(false),
+          "useDevServer": .bool(isExpoRepository && startDevServerOnRun),
         ]))
+      guard launched["launched"]?.boolValue == true else {
+        throw RPCError(code: -32053, message: "The selected app did not launch")
+      }
       status = "Running"
       timeline.append(
         .init(
           time: Self.now(), title: "Application launched",
           detail: "\(target.bundleID) on \(destination.name)", state: .complete))
-      await captureScreenshot()
+      status = "Waiting for app to settle"
+      await captureScreenshot(settleDelayMS: isExpoRepository ? 2_500 : 900)
+      let shouldVerifyMetro = isExpoRepository && startDevServerOnRun
+      var metroStillReady = true
+      if shouldVerifyMetro { metroStillReady = await isMetroReady() }
+      if shouldVerifyMetro && !metroStillReady {
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Metro stopped during launch",
+            detail: metroExitDiagnostic ?? "Restarting before presenting the app.",
+            state: .warning))
+        metroRecoveryTask?.cancel()
+        metroRecoveryTask = nil
+        try await ensureMetro()
+        let retry = try await runtime.request(
+          method: "app.install_launch",
+          params: .object([
+            "udid": .string(destination.udid), "appPath": .string(productPath.path),
+            "bundleID": .string(target.bundleID), "startDevServer": .bool(false),
+            "useDevServer": .bool(true),
+          ]))
+        guard retry["launched"]?.boolValue == true else {
+          throw RPCError(code: -32053, message: "The app did not relaunch after Metro restarted")
+        }
+        await captureScreenshot(settleDelayMS: 1_500)
+      }
       await refreshEvidence()
+      warmPreviewInteraction(destination: destination, target: target)
     } catch {
       status = "Launch failed"
       notice = error.localizedDescription
@@ -1420,11 +2183,15 @@ public final class AppModel: ObservableObject {
     isBusy = false
   }
 
-  private func captureScreenshot() async {
+  private func captureScreenshot(settleDelayMS: Int = 0) async {
     guard let destination = selectedDestination else { return }
     do {
       _ = try await runtime.request(
-        method: "screenshot.capture", params: .object(["udid": .string(destination.udid)]))
+        method: "screenshot.capture",
+        params: .object([
+          "udid": .string(destination.udid),
+          "settleDelayMS": .number(Double(settleDelayMS)),
+        ]))
       await refreshEvidence()
     } catch { notice = error.localizedDescription }
   }
@@ -1432,13 +2199,16 @@ public final class AppModel: ObservableObject {
   private func refreshEvidence() async {
     do {
       evidence = try await runtime.request([Evidence].self, method: "evidence.list")
-      currentScreenshot = evidence.reversed().first(where: { $0.kind == .screenshot }).flatMap {
-        $0.artifactPaths.first.map(URL.init(fileURLWithPath:))
-      }
+      setCurrentScreenshot(
+        evidence.reversed().first(where: {
+          $0.kind == .screenshot && $0.status == .passed && $0.taskGeneration == generation
+        }).flatMap { $0.artifactPaths.first.map(URL.init(fileURLWithPath:)) })
       verificationReport = try await runtime.request(
         VerificationReport.self, method: "verification.status",
         params: .object([
-          "codeChanged": .bool(activeWorktree != nil), "uiChanged": .bool(requiresUIVerification),
+          "codeChanged": .bool(
+            activeWorktree != nil || evidence.contains(where: { $0.kind == .build })),
+          "uiChanged": .bool(requiresUIVerification),
           "testsChanged": .bool(false),
         ]))
     } catch {
@@ -1498,6 +2268,128 @@ public final class AppModel: ObservableObject {
       .first { FileManager.default.isExecutableFile(atPath: $0.path) }
   }
 
+  private func podExecutable() -> URL? {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    return [
+      URL(fileURLWithPath: "/opt/homebrew/bin/pod"),
+      URL(fileURLWithPath: "/usr/local/bin/pod"),
+      home.appending(path: ".rbenv/shims/pod"),
+      home.appending(path: ".asdf/shims/pod"),
+    ].first { FileManager.default.isExecutableFile(atPath: $0.path) }
+  }
+
+  private var requiredCocoaPodsInstall: CocoaPodsRequirement? {
+    taskContainer().flatMap(CocoaPodsSupport.missingInstallation(for:))
+  }
+
+  private func approveRequiredCocoaPodsInstall() -> Bool {
+    guard let requirement = requiredCocoaPodsInstall else { return true }
+    let command = "pod \(requirement.installArguments.joined(separator: " "))"
+    let confirmation = NSAlert()
+    confirmation.messageText = "Install CocoaPods dependencies?"
+    confirmation.informativeText =
+      "The selected app cannot build because \(requirement.reason) Operate will run `\(command)` in \(requirement.projectDirectory.path). This executes the Podfile and may access the network."
+    confirmation.addButton(withTitle: "Install Pods and Continue")
+    confirmation.addButton(withTitle: "Cancel")
+    return confirmation.runModal() == .alertFirstButtonReturn
+  }
+
+  private func installRequiredCocoaPods() async throws {
+    guard let requirement = requiredCocoaPodsInstall else { return }
+    guard let pod = podExecutable() else {
+      throw RPCError(
+        code: -32059,
+        message:
+          "CocoaPods is required for this project but `pod` was not found. Install CocoaPods, then Run again."
+      )
+    }
+
+    status = "Installing CocoaPods dependencies"
+    appOperation = .preparing
+    timeline.append(
+      .init(
+        time: Self.now(), title: "Installing CocoaPods dependencies",
+        detail: requirement.projectDirectory.path, state: .active))
+    var environment = [
+      "PATH": executableSearchPath(),
+      "LANG": ProcessInfo.processInfo.environment["LANG"] ?? "en_US.UTF-8",
+    ]
+    if let locale = ProcessInfo.processInfo.environment["LC_ALL"] {
+      environment["LC_ALL"] = locale
+    }
+
+    var outcome = try await runCocoaPods(
+      executable: pod, arguments: requirement.installArguments,
+      directory: requirement.projectDirectory, environment: environment)
+    var detail = (outcome.stderr + outcome.stdout).trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    if !outcome.succeeded, requirement.installArguments.contains("--deployment"),
+      detail.contains("changes to the lockfile")
+    {
+      guard approveCocoaPodsLockfileUpdate(in: requirement.projectDirectory) else {
+        throw RPCError(
+          code: -32059,
+          message:
+            "Podfile.lock is out of date. Update it with `pod install`, review the resulting Git diff, then Run again."
+        )
+      }
+      outcome = try await runCocoaPods(
+        executable: pod, arguments: ["install"], directory: requirement.projectDirectory,
+        environment: environment)
+      detail = (outcome.stderr + outcome.stdout).trimmingCharacters(
+        in: .whitespacesAndNewlines)
+    }
+    guard outcome.succeeded else {
+      throw RPCError(
+        code: -32059, message: "CocoaPods installation failed",
+        data: .string(detail.isEmpty ? "See the Terminal transcript." : detail))
+    }
+    if let remaining = CocoaPodsSupport.missingInstallation(in: requirement.projectDirectory) {
+      throw RPCError(
+        code: -32059,
+        message: "CocoaPods finished, but the installation is incomplete: \(remaining.reason)")
+    }
+    timeline.append(
+      .init(
+        time: Self.now(), title: "CocoaPods dependencies ready",
+        detail:
+          "Installed the locked dependencies for \(requirement.projectDirectory.lastPathComponent).",
+        state: .complete))
+  }
+
+  private func approveCocoaPodsLockfileUpdate(in directory: URL) -> Bool {
+    let confirmation = NSAlert()
+    confirmation.messageText = "Update Podfile.lock?"
+    confirmation.informativeText =
+      "CocoaPods refused the locked installation because the Podfile or CocoaPods version changed. Operate can run `pod install` in \(directory.path). This may modify the tracked Podfile.lock and generated support files; review the Git diff afterward."
+    confirmation.addButton(withTitle: "Update Lockfile and Continue")
+    confirmation.addButton(withTitle: "Cancel")
+    return confirmation.runModal() == .alertFirstButtonReturn
+  }
+
+  private func runCocoaPods(
+    executable: URL, arguments: [String], directory: URL, environment: [String: String]
+  ) async throws -> ProcessOutcome {
+    let terminalID = beginTerminal(
+      executable: executable.path, arguments: arguments, workingDirectory: directory)
+    do {
+      let outcome = try await runner.run(
+        executable: executable, arguments: arguments, workingDirectory: directory,
+        environment: environment, maximumOutputBytes: 32 * 1_024 * 1_024,
+        onEvent: { [weak self] event in
+          guard event.stream != .lifecycle else { return }
+          Task { @MainActor [weak self] in
+            self?.appendTerminalOutput(terminalID, text: event.text)
+          }
+        })
+      finishTerminal(terminalID, succeeded: outcome.succeeded, output: "", append: true)
+      return outcome
+    } catch {
+      finishTerminal(terminalID, succeeded: false, output: error.localizedDescription, append: true)
+      throw error
+    }
+  }
+
   private func approveRequiredExpoCompatibilityRepair() -> Bool {
     guard isExpoRepository, let container = taskContainer() else { return true }
     let fmtHeader = ExpoCompatibility.fmtHeader(for: container)
@@ -1528,7 +2420,7 @@ public final class AppModel: ObservableObject {
   }
 
   private func ensureMetro() async throws {
-    guard let workspace = taskWorkspace, let npm = npmExecutable() else {
+    guard let workspace = expoProjectRoot, let npm = npmExecutable() else {
       throw RPCError(
         code: -32096,
         message: "npm was not found. Install Node.js, then reopen Operate.")
@@ -1537,7 +2429,24 @@ public final class AppModel: ObservableObject {
     if metroTask != nil, metroWorkspace?.standardizedFileURL != workspace.standardizedFileURL {
       await stopOwnedMetro()
     }
+    if metroTask != nil, let previousExit = metroExitDiagnostic {
+      cancelOwnedMetro()
+      timeline.append(
+        .init(
+          time: Self.now(), title: "Restarting Metro",
+          detail: previousExit, state: .warning))
+    }
     if await isMetroReady() {
+      if metroTask == nil {
+        let owner = await metroOwnerWorkspace()
+        guard owner?.standardizedFileURL == workspace.standardizedFileURL else {
+          throw RPCError(
+            code: -32099,
+            message:
+              "Port 8081 is serving a different project\(owner.map { " at \($0.path)" } ?? ""). Stop that Metro server, then Run again."
+          )
+        }
+      }
       timeline.append(
         .init(
           time: Self.now(), title: "Metro ready",
@@ -1552,14 +2461,26 @@ public final class AppModel: ObservableObject {
       metroWorkspace = workspace
       let runID = UUID()
       metroRunID = runID
-      let task = Task {
-        try await runner.run(
-          executable: npm, arguments: ["start"], workingDirectory: workspace,
+      let terminalID = beginTerminal(
+        executable: npm.path, arguments: ["start", "--", "--port", "8081"],
+        workingDirectory: workspace)
+      metroTerminalID = terminalID
+      let searchPath = executableSearchPath()
+      let task = Task.detached { [metroRunner] in
+        try await metroRunner.run(
+          executable: npm, arguments: ["start", "--", "--port", "8081"],
+          workingDirectory: workspace,
           environment: [
-            "PATH": executableSearchPath(),
+            "PATH": searchPath,
             "BROWSER": "none",
             "CI": "1",
-          ], maximumOutputBytes: 8 * 1_024 * 1_024)
+          ], maximumOutputBytes: 8 * 1_024 * 1_024,
+          onEvent: { [weak self] event in
+            guard event.stream != .lifecycle else { return }
+            Task { @MainActor [weak self] in
+              self?.appendTerminalOutput(terminalID, text: event.text)
+            }
+          })
       }
       metroTask = task
       timeline.append(
@@ -1575,9 +2496,13 @@ public final class AppModel: ObservableObject {
           self.metroExitDiagnostic =
             detail.isEmpty
             ? "Metro exited with status \(outcome.terminationStatus)." : detail
+          self.finishTerminal(terminalID, succeeded: outcome.succeeded, output: "", append: true)
         case .failure(let error):
           self.metroExitDiagnostic = error.localizedDescription
+          self.finishTerminal(
+            terminalID, succeeded: false, output: error.localizedDescription, append: true)
         }
+        self.scheduleMetroRecovery(afterExitFrom: workspace, runID: runID)
       }
     }
 
@@ -1620,12 +2545,102 @@ public final class AppModel: ObservableObject {
     }
   }
 
+  private func metroOwnerWorkspace() async -> URL? {
+    let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
+    guard FileManager.default.isExecutableFile(atPath: lsof.path),
+      let listener = try? await runner.run(
+        executable: lsof,
+        arguments: ["-nP", "-tiTCP:8081", "-sTCP:LISTEN"],
+        maximumOutputBytes: 64 * 1_024),
+      let pid = listener.stdout.split(whereSeparator: \.isNewline).first
+    else { return nil }
+    guard
+      let details = try? await runner.run(
+        executable: lsof, arguments: ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+        maximumOutputBytes: 64 * 1_024)
+    else { return nil }
+    guard
+      let path = details.stdout.split(whereSeparator: \.isNewline)
+        .map(String.init).first(where: { $0.hasPrefix("n/") })
+    else { return nil }
+    return URL(fileURLWithPath: String(path.dropFirst()))
+  }
+
   private func cancelOwnedMetro() {
     metroRunID = nil
     metroWorkspace = nil
     metroExitDiagnostic = nil
+    if let metroTerminalID,
+      let index = terminalEntries.firstIndex(where: { $0.id == metroTerminalID }),
+      terminalEntries[index].state == .running
+    {
+      terminalEntries[index].state = .cancelled
+    }
+    metroTerminalID = nil
     metroTask?.cancel()
     metroTask = nil
+  }
+
+  private func disableMetroPersistence() {
+    metroShouldStayRunning = false
+    metroRecoveryTask?.cancel()
+    metroRecoveryTask = nil
+  }
+
+  private func scheduleMetroRecovery(afterExitFrom workspace: URL, runID: UUID) {
+    guard metroShouldStayRunning, metroRunID == runID, metroRecoveryTask == nil else { return }
+    metroRecoveryTask = Task { [weak self] in
+      guard let self else { return }
+      defer { self.metroRecoveryTask = nil }
+      try? await Task.sleep(for: .milliseconds(600))
+      while self.isBusy && !Task.isCancelled {
+        try? await Task.sleep(for: .milliseconds(250))
+      }
+      guard !Task.isCancelled, self.metroShouldStayRunning,
+        self.expoProjectRoot?.standardizedFileURL == workspace.standardizedFileURL
+      else {
+        return
+      }
+      self.timeline.append(
+        .init(
+          time: Self.now(), title: "Metro stopped unexpectedly",
+          detail: self.metroExitDiagnostic ?? "Restarting the development server.",
+          state: .warning))
+      do {
+        try await self.ensureMetro()
+        guard self.metroShouldStayRunning else { return }
+        try await self.relaunchAfterMetroRecovery()
+        self.status = "Running · Metro recovered"
+        self.timeline.append(
+          .init(
+            time: Self.now(), title: "Metro recovered",
+            detail: "The development server restarted and the app was relaunched.",
+            state: .complete))
+      } catch {
+        self.status = "Metro stopped"
+        self.notice =
+          "The development server stopped and could not be restarted. \(error.localizedDescription)"
+      }
+    }
+  }
+
+  private func relaunchAfterMetroRecovery() async throws {
+    guard let destination = selectedDestination, let target = selectedTarget,
+      let productPath = target.productPath
+    else { return }
+    try await ensureRuntime()
+    let relaunched = try await runtime.request(
+      method: "app.install_launch",
+      params: .object([
+        "udid": .string(destination.udid), "appPath": .string(productPath.path),
+        "bundleID": .string(target.bundleID), "startDevServer": .bool(false),
+        "useDevServer": .bool(true),
+      ]))
+    guard relaunched["launched"]?.boolValue == true else {
+      throw RPCError(code: -32053, message: "The app did not relaunch after Metro restarted")
+    }
+    await captureScreenshot(settleDelayMS: 1_500)
+    warmPreviewInteraction(destination: destination, target: target)
   }
 
   private func stopOwnedMetro() async {
@@ -1650,6 +2665,99 @@ public final class AppModel: ObservableObject {
       .joined(separator: ":")
   }
 
+  @discardableResult private func beginTerminal(
+    executable: String, arguments: [String], workingDirectory: URL
+  ) -> UUID {
+    let command = ([executable] + arguments).map(Self.displayArgument).joined(separator: " ")
+    let entry = TerminalEntry(command: command, workingDirectory: workingDirectory.path)
+    terminalEntries.append(entry)
+    if terminalEntries.count > 40 { terminalEntries.removeFirst(terminalEntries.count - 40) }
+    return entry.id
+  }
+
+  private func appendTerminalOutput(_ id: UUID, text: String) {
+    guard terminalEntries.contains(where: { $0.id == id }), !text.isEmpty else { return }
+    terminalOutputBuffers[id, default: ""].append(text)
+    scheduleTerminalFlush()
+  }
+
+  private func finishTerminal(
+    _ id: UUID, succeeded: Bool, output: String, append: Bool = false
+  ) {
+    flushTerminalOutput(id: id)
+    guard let index = terminalEntries.firstIndex(where: { $0.id == id }) else { return }
+    if append {
+      appendTerminalOutputImmediately(id: id, text: output)
+    } else {
+      terminalEntries[index].output = output
+    }
+    terminalEntries[index].state = succeeded ? .succeeded : .failed
+    if !succeeded { isTerminalExpanded = true }
+  }
+
+  private func scheduleTerminalFlush() {
+    guard terminalFlushTask == nil else { return }
+    terminalFlushTask = Task {
+      try? await Task.sleep(for: .milliseconds(80))
+      guard !Task.isCancelled else { return }
+      flushTerminalOutput()
+      terminalFlushTask = nil
+      if !terminalOutputBuffers.isEmpty { scheduleTerminalFlush() }
+    }
+  }
+
+  private func flushTerminalOutput(id: UUID? = nil) {
+    let pending: [UUID: String]
+    if let id {
+      guard let text = terminalOutputBuffers.removeValue(forKey: id) else { return }
+      pending = [id: text]
+    } else {
+      pending = terminalOutputBuffers
+      terminalOutputBuffers = [:]
+    }
+    guard !pending.isEmpty else { return }
+    var updated = terminalEntries
+    for (entryID, text) in pending {
+      guard let index = updated.firstIndex(where: { $0.id == entryID }) else { continue }
+      updated[index].output.append(text)
+      truncateTerminalOutput(&updated[index].output)
+    }
+    terminalEntries = updated
+  }
+
+  private func appendTerminalOutputImmediately(id: UUID, text: String) {
+    guard !text.isEmpty, let index = terminalEntries.firstIndex(where: { $0.id == id }) else {
+      return
+    }
+    terminalEntries[index].output.append(text)
+    truncateTerminalOutput(&terminalEntries[index].output)
+  }
+
+  private func truncateTerminalOutput(_ output: inout String) {
+    let limit = 1_000_000
+    if output.utf8.count > limit {
+      output = "[earlier output truncated]\n" + String(output.suffix(limit))
+    }
+  }
+
+  private func setCurrentScreenshot(_ url: URL?) {
+    currentScreenshot = url
+    guard let url else {
+      currentScreenshotImage = nil
+      return
+    }
+    let image = NSImage(contentsOf: url)
+    image?.cacheMode = .always
+    currentScreenshotImage = image
+  }
+
+  private static func displayArgument(_ value: String) -> String {
+    guard !value.isEmpty else { return "''" }
+    let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._/:=,"))
+    if value.unicodeScalars.allSatisfy(safe.contains) { return value }
+    return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+  }
+
   private static func children(of url: URL, depth: Int) -> [FileNode] {
     guard depth < 4,
       let urls = try? FileManager.default.contentsOfDirectory(
@@ -1663,6 +2771,15 @@ public final class AppModel: ObservableObject {
         let directory = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         return FileNode(url: item, children: directory ? children(of: item, depth: depth + 1) : nil)
       }
+  }
+
+  private static func packageUsesExpo(at directory: URL) -> Bool {
+    guard let data = try? Data(contentsOf: directory.appending(path: "package.json")),
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return false }
+    let dependencies = root["dependencies"] as? [String: Any]
+    let development = root["devDependencies"] as? [String: Any]
+    return dependencies?["expo"] != nil || development?["expo"] != nil
   }
 
   private static func now() -> String {

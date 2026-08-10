@@ -19,6 +19,8 @@ public actor WDAController {
   private var process: Process?
   private var activeUDID: String?
   private var sessionID: String?
+  private var sessionBundleID: String?
+  private var cachedWindowSize: (width: Double, height: Double)?
   private let baseURL = URL(string: "http://127.0.0.1:8100")!
 
   public init(stateRoot: URL) { self.stateRoot = stateRoot }
@@ -28,6 +30,15 @@ public actor WDAController {
     process = nil
     activeUDID = nil
     sessionID = nil
+    sessionBundleID = nil
+    cachedWindowSize = nil
+  }
+
+  public func prepare(
+    udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight
+  ) async throws {
+    try await ensureSession(
+      udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
   }
 
   public func snapshot(
@@ -98,13 +109,22 @@ public actor WDAController {
     try await ensureSession(
       udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
     guard let sessionID else { throw RPCError(code: -32077, message: "WDA session is missing") }
-    let response = try await request(path: "/session/\(sessionID)/window/rect")
-    guard let value = response["value"] as? [String: Any],
-      let width = numeric(value["width"]), let height = numeric(value["height"]),
-      width > 0, height > 0
-    else { throw RPCError(code: -32077, message: "WDA returned an invalid Simulator window size") }
+    let windowSize: (width: Double, height: Double)
+    if let cachedWindowSize {
+      windowSize = cachedWindowSize
+    } else {
+      let response = try await request(path: "/session/\(sessionID)/window/rect")
+      guard let value = response["value"] as? [String: Any],
+        let width = numeric(value["width"]), let height = numeric(value["height"]),
+        width > 0, height > 0
+      else {
+        throw RPCError(code: -32077, message: "WDA returned an invalid Simulator window size")
+      }
+      windowSize = (width, height)
+      cachedWindowSize = windowSize
+    }
     let point = WDANormalizedPoint(x: normalizedX, y: normalizedY).scaled(
-      width: width, height: height)
+      width: windowSize.width, height: windowSize.height)
     _ = try await request(
       method: "POST", path: "/session/\(sessionID)/actions",
       body: [
@@ -130,7 +150,13 @@ public actor WDAController {
     udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight
   ) async throws {
     try await ensureRunning(udid: udid, runtime: runtime, preflight: preflight)
-    if sessionID != nil { return }
+    if sessionID != nil, sessionBundleID == bundleID { return }
+    if let sessionID {
+      _ = try? await request(method: "DELETE", path: "/session/\(sessionID)")
+      self.sessionID = nil
+      sessionBundleID = nil
+      cachedWindowSize = nil
+    }
     let response = try await request(
       method: "POST", path: "/session",
       body: [
@@ -152,6 +178,8 @@ public actor WDAController {
     guard sessionID != nil else {
       throw RPCError(code: -32077, message: "WDA could not create an application session")
     }
+    sessionBundleID = bundleID
+    cachedWindowSize = nil
   }
 
   private func ensureRunning(

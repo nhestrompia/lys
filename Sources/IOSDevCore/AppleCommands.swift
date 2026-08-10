@@ -18,6 +18,9 @@ public enum AppleCommandBuilder {
   public static func boot(simctl: URL, udid: String) -> CommandSpec {
     .init(executable: simctl, arguments: ["boot", udid])
   }
+  public static func bootStatus(simctl: URL, udid: String) -> CommandSpec {
+    .init(executable: simctl, arguments: ["bootstatus", udid, "-b"])
+  }
   public static func shutdown(simctl: URL, udid: String) -> CommandSpec {
     .init(executable: simctl, arguments: ["shutdown", udid])
   }
@@ -27,6 +30,21 @@ public enum AppleCommandBuilder {
   public static func launch(simctl: URL, udid: String, bundleID: String, arguments: [String] = [])
     -> CommandSpec
   { .init(executable: simctl, arguments: ["launch", udid, bundleID] + arguments) }
+  public static func configureMetro(
+    simctl: URL, udid: String, bundleID: String, host: String = "127.0.0.1", port: Int = 8081
+  ) -> [CommandSpec] {
+    let domain = bundleID
+    return [
+      .init(
+        executable: simctl,
+        arguments: [
+          "spawn", udid, "defaults", "write", domain, "RCT_jsLocation", "\(host):\(port)",
+        ]),
+      .init(
+        executable: simctl,
+        arguments: ["spawn", udid, "defaults", "write", domain, "RCT_enableDev", "-bool", "YES"]),
+    ]
+  }
   public static func terminate(simctl: URL, udid: String, bundleID: String) -> CommandSpec {
     .init(executable: simctl, arguments: ["terminate", udid, bundleID])
   }

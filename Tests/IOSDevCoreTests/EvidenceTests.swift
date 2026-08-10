@@ -43,6 +43,9 @@ import Testing
     await ledger.verify(
       .init(codeChanged: true, uiChanged: true, testsChanged: false, criterionIDs: ["profile"])
     ).status == .failed)
+  #expect(
+    await ledger.verify(.init(codeChanged: true, uiChanged: false, testsChanged: false)).status
+      == .failed)
 }
 
 @Test func failedOptionalEvidenceDoesNotFailRequiredBuild() async throws {

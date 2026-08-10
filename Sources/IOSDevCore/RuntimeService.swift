@@ -1,15 +1,26 @@
 import Foundation
 
+private struct DevelopmentLaunchContext: Sendable {
+  var udid: String
+  var appPath: String
+  var bundleID: String
+}
+
 public actor RuntimeService {
   public let workspace: URL
   public let token: String
   private let runner = ProcessRunner()
+  private let devServerRunner = ProcessRunner()
   private let ledger = EvidenceLedger()
   private let wda: WDAController
   private var lastLaunchedBundleID: String?
   private var devServerTask: Task<ProcessOutcome, Error>?
   private var devServerRunID: UUID?
   private var devServerExitDiagnostic: String?
+  private var devServerProjectRoot: URL?
+  private var devServerShouldStayRunning = false
+  private var devServerRecoveryTask: Task<Void, Never>?
+  private var lastDevelopmentLaunch: DevelopmentLaunchContext?
   public init(workspace: URL, token: String) {
     self.workspace = workspace.standardizedFileURL
     self.token = token
@@ -64,9 +75,7 @@ public actor RuntimeService {
         guard let udid = request.params?["udid"]?.stringValue else {
           return failure(request.id, -32602, "udid is required")
         }
-        return await runSimulator(
-          request, make: { AppleCommandBuilder.boot(simctl: $0, udid: udid) },
-          evidenceKind: .runtimeLog)
+        return await bootSimulator(request, udid: udid)
       case "simulator.shutdown":
         guard let udid = request.params?["udid"]?.stringValue else {
           return failure(request.id, -32602, "udid is required")
@@ -115,13 +124,12 @@ public actor RuntimeService {
         guard let udid = request.params?["udid"]?.stringValue else {
           return failure(request.id, -32602, "udid is required")
         }
-        let output = workspace.appending(
-          path: ".iosdev/artifacts/screenshot-\(UUID().uuidString).png")
-        try FileManager.default.createDirectory(
-          at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-        return await runSimulator(
-          request, make: { AppleCommandBuilder.screenshot(simctl: $0, udid: udid, output: output) },
-          evidenceKind: .screenshot, artifact: output.path)
+        return await captureStableScreenshot(request, udid: udid)
+      case "preview.capture":
+        guard let udid = request.params?["udid"]?.stringValue else {
+          return failure(request.id, -32602, "udid is required")
+        }
+        return await capturePreviewFrame(request, udid: udid)
       case "build.run":
         return await build(request)
       case "build.cancel":
@@ -141,6 +149,7 @@ public actor RuntimeService {
       case "verification.submit":
         return await submitVerification(request)
       case "ui.snapshot": return await uiSnapshot(request)
+      case "ui.prepare": return await uiPrepare(request)
       case "ui.find": return await uiFind(request)
       case "ui.perform": return await uiPerform(request)
       case "ui.wait": return await uiWait(request)
@@ -170,6 +179,14 @@ public actor RuntimeService {
       let scheme = request.params?["scheme"]?.stringValue,
       let destination = request.params?["destination"]?.stringValue
     else { return failure(request.id, -32602, "container, scheme, and destination are required") }
+    if let requirement = CocoaPodsSupport.missingInstallation(
+      for: URL(fileURLWithPath: container))
+    {
+      return failure(
+        request.id, -32059,
+        "CocoaPods dependencies are not installed for \(requirement.projectDirectory.path). \(requirement.reason) Approve CocoaPods installation in Operate, or run `pod \(requirement.installArguments.joined(separator: " "))` in that directory."
+      )
+    }
     do {
       let generation = await ledger.generation
       let resultPath = workspace.appending(
@@ -216,6 +233,20 @@ public actor RuntimeService {
             ScreenFingerprint.make(elements: elements, modal: false, navigationTitle: nil)),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32077, error.localizedDescription)
+    }
+  }
+
+  private func uiPrepare(_ request: RPCEnvelope) async -> RPCEnvelope {
+    do {
+      let context = try await automationContext(request)
+      try await wda.prepare(
+        udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+        preflight: context.preflight)
+      return success(request.id, .object(["ready": .bool(true)]))
+    } catch let error as RPCError {
+      return failure(request.id, error.code, error.message)
+    } catch {
       return failure(request.id, -32077, error.localizedDescription)
     }
   }
@@ -548,9 +579,17 @@ public actor RuntimeService {
       let appPath = request.params?["appPath"]?.stringValue,
       let bundleID = request.params?["bundleID"]?.stringValue
     else { return failure(request.id, -32602, "udid, appPath, and bundleID are required") }
-    if request.params?["startDevServer"]?.boolValue ?? isExpoWorkspace {
+    let shouldStartDevServer = request.params?["startDevServer"]?.boolValue ?? isExpoWorkspace
+    let shouldUseDevServer = request.params?["useDevServer"]?.boolValue ?? shouldStartDevServer
+    if shouldStartDevServer {
       let started = await startDevelopmentServer(request)
       if let error = started.error { return failure(request.id, error.code, error.message) }
+    }
+    if shouldUseDevServer, !(await isDevelopmentServerReady(port: 8081)) {
+      return failure(
+        request.id, -32099,
+        "Metro is not reachable on port 8081. Start the selected project's development server and try Run again."
+      )
     }
     let preflight = await ToolchainDiscovery.preflight()
     guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
@@ -565,7 +604,25 @@ public actor RuntimeService {
         executable: install.executable, arguments: install.arguments, workingDirectory: workspace,
         environment: environment)
       guard installed.succeeded else { return failure(request.id, -32053, installed.stderr) }
-      let launch = AppleCommandBuilder.launch(simctl: simctl, udid: udid, bundleID: bundleID)
+      if shouldUseDevServer {
+        for command in AppleCommandBuilder.configureMetro(
+          simctl: simctl, udid: udid, bundleID: bundleID)
+        {
+          let configured = try await runner.run(
+            executable: command.executable, arguments: command.arguments,
+            workingDirectory: workspace, environment: environment)
+          guard configured.succeeded else {
+            return failure(
+              request.id, -32053,
+              "Could not configure the app's Metro endpoint: \(configured.stderr)")
+          }
+        }
+      }
+      let launchArguments =
+        shouldUseDevServer
+        ? ["-RCT_jsLocation", "127.0.0.1:8081", "-RCT_enableDev", "YES"] : []
+      let launch = AppleCommandBuilder.launch(
+        simctl: simctl, udid: udid, bundleID: bundleID, arguments: launchArguments)
       let launched = try await runner.run(
         executable: launch.executable, arguments: launch.arguments, workingDirectory: workspace,
         environment: environment)
@@ -575,6 +632,9 @@ public actor RuntimeService {
         diagnosticSummary: launched.succeeded ? launched.stdout : launched.stderr)
       try await ledger.record(item)
       if launched.succeeded { lastLaunchedBundleID = bundleID }
+      if launched.succeeded, shouldUseDevServer {
+        lastDevelopmentLaunch = .init(udid: udid, appPath: appPath, bundleID: bundleID)
+      }
       return success(
         request.id,
         .object([
@@ -589,10 +649,24 @@ public actor RuntimeService {
     guard port == 8081 else {
       return failure(request.id, -32602, "The public alpha currently supports Metro on port 8081")
     }
-    guard isExpoWorkspace else {
+    guard let projectRoot = expoProjectRoot(from: request.params) else {
       return failure(request.id, -32096, "This workspace is not an Expo project")
     }
+    if devServerTask != nil,
+      devServerProjectRoot?.standardizedFileURL != projectRoot.standardizedFileURL
+    {
+      await stopDevelopmentServer()
+    }
+    devServerShouldStayRunning = true
     if await isDevelopmentServerReady(port: port) {
+      if devServerTask == nil {
+        let owner = await developmentServerOwnerWorkspace(port: port)
+        guard owner?.standardizedFileURL == projectRoot.standardizedFileURL else {
+          return failure(
+            request.id, -32099,
+            "Port 8081 is serving a different project\(owner.map { " at \($0.path)" } ?? "")")
+        }
+      }
       return success(
         request.id,
         .object([
@@ -601,7 +675,7 @@ public actor RuntimeService {
           "detail": .string(
             devServerTask == nil
               ? "Reusing a development server already listening on port 8081"
-              : "Metro is ready for this task workspace"),
+              : "Metro is ready for \(projectRoot.lastPathComponent)"),
         ]))
     }
     guard let npm = npmExecutable else {
@@ -610,13 +684,15 @@ public actor RuntimeService {
 
     if devServerTask == nil {
       devServerExitDiagnostic = nil
+      devServerProjectRoot = projectRoot
       let runID = UUID()
       devServerRunID = runID
-      let task = Task {
-        try await runner.run(
+      let searchPath = executableSearchPath
+      let task = Task.detached { [devServerRunner] in
+        try await devServerRunner.run(
           executable: npm, arguments: ["start", "--", "--port", String(port)],
-          workingDirectory: workspace,
-          environment: ["PATH": executableSearchPath, "BROWSER": "none", "CI": "1"],
+          workingDirectory: projectRoot,
+          environment: ["PATH": searchPath, "BROWSER": "none", "CI": "1"],
           maximumOutputBytes: 8 * 1_024 * 1_024)
       }
       devServerTask = task
@@ -633,18 +709,18 @@ public actor RuntimeService {
           .object([
             "running": .bool(true), "managed": .bool(true),
             "port": .number(Double(port)),
-            "detail": .string("Metro is serving \(workspace.lastPathComponent)"),
+            "detail": .string("Metro is serving \(projectRoot.lastPathComponent)"),
           ]))
       }
       if let devServerExitDiagnostic {
-        await stopDevelopmentServer()
+        await stopDevelopmentServer(resetIntent: false)
         return failure(
           request.id, -32098,
           "Metro exited before it became ready: \(devServerExitDiagnostic)")
       }
       try? await Task.sleep(for: .milliseconds(250))
     }
-    await stopDevelopmentServer()
+    await stopDevelopmentServer(resetIntent: false)
     return failure(request.id, -32099, "Metro did not become ready within 30 seconds")
   }
 
@@ -658,15 +734,23 @@ public actor RuntimeService {
     ])
   }
 
-  private func stopDevelopmentServer() async {
+  private func stopDevelopmentServer(resetIntent: Bool = true) async {
+    if resetIntent {
+      devServerShouldStayRunning = false
+      devServerRecoveryTask?.cancel()
+      devServerRecoveryTask = nil
+      lastDevelopmentLaunch = nil
+    }
     guard let task = devServerTask else {
       devServerRunID = nil
       devServerExitDiagnostic = nil
+      devServerProjectRoot = nil
       return
     }
     devServerTask = nil
     devServerRunID = nil
     devServerExitDiagnostic = nil
+    devServerProjectRoot = nil
     task.cancel()
     _ = await task.result
   }
@@ -683,6 +767,48 @@ public actor RuntimeService {
         ? "process exited with status \(outcome.terminationStatus)" : diagnostic
     case .failure(let error):
       devServerExitDiagnostic = error.localizedDescription
+    }
+    scheduleDevelopmentServerRecovery(runID: runID)
+  }
+
+  private func scheduleDevelopmentServerRecovery(runID: UUID) {
+    guard devServerShouldStayRunning, devServerRunID == runID,
+      devServerRecoveryTask == nil, let projectRoot = devServerProjectRoot
+    else { return }
+    devServerRecoveryTask = Task { [weak self] in
+      await self?.recoverDevelopmentServer(projectRoot: projectRoot, runID: runID)
+    }
+  }
+
+  private func recoverDevelopmentServer(projectRoot: URL, runID: UUID) async {
+    defer { devServerRecoveryTask = nil }
+    try? await Task.sleep(for: .milliseconds(600))
+    guard !Task.isCancelled, devServerShouldStayRunning, devServerRunID == runID else { return }
+    devServerTask = nil
+    devServerRunID = nil
+    devServerExitDiagnostic = nil
+
+    for attempt in 1...3 where devServerShouldStayRunning && !Task.isCancelled {
+      let restarted = await startDevelopmentServer(
+        .init(
+          id: nil, method: "devserver.start",
+          params: .object([
+            "projectPath": .string(projectRoot.path), "port": .number(8081),
+          ])))
+      if restarted.error == nil {
+        if let launch = lastDevelopmentLaunch {
+          _ = await installLaunch(
+            .init(
+              id: nil, method: "app.install_launch",
+              params: .object([
+                "udid": .string(launch.udid), "appPath": .string(launch.appPath),
+                "bundleID": .string(launch.bundleID), "startDevServer": .bool(false),
+                "useDevServer": .bool(true),
+              ])))
+        }
+        return
+      }
+      try? await Task.sleep(for: .seconds(attempt))
     }
   }
 
@@ -701,13 +827,64 @@ public actor RuntimeService {
     }
   }
 
-  private var isExpoWorkspace: Bool {
-    guard let data = try? Data(contentsOf: workspace.appending(path: "package.json")),
+  private var isExpoWorkspace: Bool { discoverExpoProject() != nil }
+
+  private func expoProjectRoot(from params: JSONValue?) -> URL? {
+    if let requested = params?["projectPath"]?.stringValue {
+      let candidate = URL(fileURLWithPath: requested).standardizedFileURL
+      guard candidate.path == workspace.path || candidate.path.hasPrefix(workspace.path + "/"),
+        Self.packageUsesExpo(at: candidate)
+      else { return nil }
+      return candidate
+    }
+    return discoverExpoProject()
+  }
+
+  private func discoverExpoProject() -> URL? {
+    if Self.packageUsesExpo(at: workspace) { return workspace }
+    guard
+      let enumerator = FileManager.default.enumerator(
+        at: workspace, includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles])
+    else { return nil }
+    while let url = enumerator.nextObject() as? URL {
+      if ["node_modules", "Pods", "DerivedData", ".build"].contains(url.lastPathComponent) {
+        enumerator.skipDescendants()
+        continue
+      }
+      if url.lastPathComponent == "package.json",
+        Self.packageUsesExpo(at: url.deletingLastPathComponent())
+      {
+        return url.deletingLastPathComponent().standardizedFileURL
+      }
+    }
+    return nil
+  }
+
+  private static func packageUsesExpo(at directory: URL) -> Bool {
+    guard let data = try? Data(contentsOf: directory.appending(path: "package.json")),
       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return false }
     let dependencies = root["dependencies"] as? [String: Any]
     let development = root["devDependencies"] as? [String: Any]
     return dependencies?["expo"] != nil || development?["expo"] != nil
+  }
+
+  private func developmentServerOwnerWorkspace(port: Int) async -> URL? {
+    let lsof = URL(fileURLWithPath: "/usr/sbin/lsof")
+    guard FileManager.default.isExecutableFile(atPath: lsof.path),
+      let listener = try? await runner.run(
+        executable: lsof,
+        arguments: ["-nP", "-tiTCP:\(port)", "-sTCP:LISTEN"],
+        maximumOutputBytes: 64 * 1_024),
+      let pid = listener.stdout.split(whereSeparator: \.isNewline).first,
+      let details = try? await runner.run(
+        executable: lsof, arguments: ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+        maximumOutputBytes: 64 * 1_024),
+      let path = details.stdout.split(whereSeparator: \.isNewline).map(String.init)
+        .first(where: { $0.hasPrefix("n/") })
+    else { return nil }
+    return URL(fileURLWithPath: String(path.dropFirst()))
   }
 
   private var npmExecutable: URL? {
@@ -758,6 +935,175 @@ public actor RuntimeService {
           "diagnostics": .string(outcome.stdout + outcome.stderr),
         ]))
     } catch { return failure(request.id, -32054, error.localizedDescription) }
+  }
+
+  private func bootSimulator(_ request: RPCEnvelope, udid: String) async -> RPCEnvelope {
+    let preflight = await ToolchainDiscovery.preflight()
+    guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
+      return failure(request.id, -32050, "Full Xcode is unavailable")
+    }
+    let simctl = URL(fileURLWithPath: path)
+    let environment = ["DEVELOPER_DIR": developer]
+    do {
+      let boot = AppleCommandBuilder.boot(simctl: simctl, udid: udid)
+      let booted = try await runner.run(
+        executable: boot.executable, arguments: boot.arguments, workingDirectory: workspace,
+        environment: environment)
+      let status = AppleCommandBuilder.bootStatus(simctl: simctl, udid: udid)
+      let ready = try await runner.run(
+        executable: status.executable, arguments: status.arguments, workingDirectory: workspace,
+        environment: environment)
+      let succeeded = ready.succeeded
+      let detail =
+        succeeded
+        ? (booted.succeeded
+          ? "Simulator booted and ready." : "Simulator was already booted and is ready.")
+        : ready.stderr
+      let item = Evidence(
+        kind: .runtimeLog, status: succeeded ? .passed : .failed,
+        taskGeneration: await ledger.generation, destinationUDID: udid,
+        diagnosticSummary: detail)
+      try await ledger.record(item)
+      return success(
+        request.id,
+        .object([
+          "succeeded": .bool(succeeded),
+          "alreadyBooted": .bool(!booted.succeeded && succeeded),
+          "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "diagnostics": .string(detail),
+        ]))
+    } catch { return failure(request.id, -32054, error.localizedDescription) }
+  }
+
+  private func captureStableScreenshot(_ request: RPCEnvelope, udid: String) async -> RPCEnvelope {
+    let preflight = await ToolchainDiscovery.preflight()
+    guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
+      return failure(request.id, -32050, "Full Xcode is unavailable")
+    }
+    let simctl = URL(fileURLWithPath: path)
+    let environment = ["DEVELOPER_DIR": developer]
+    let artifacts = workspace.appending(path: ".iosdev/artifacts", directoryHint: .isDirectory)
+    let output = artifacts.appending(path: "screenshot-\(UUID().uuidString).png")
+    let settleDelay = min(max(Int(request.params?["settleDelayMS"]?.numberValue ?? 0), 0), 10_000)
+    var temporaryFiles: [URL] = []
+    defer {
+      for file in temporaryFiles { try? FileManager.default.removeItem(at: file) }
+    }
+
+    do {
+      try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+      if settleDelay > 0 { try await Task.sleep(for: .milliseconds(settleDelay)) }
+
+      var previousHash: String?
+      var finalCapture: URL?
+      var stable = false
+      var frameCount = 0
+      for attempt in 0..<8 {
+        if attempt > 0 { try await Task.sleep(for: .milliseconds(350)) }
+        let capture = artifacts.appending(path: ".capture-\(UUID().uuidString).png")
+        temporaryFiles.append(capture)
+        let command = AppleCommandBuilder.screenshot(
+          simctl: simctl, udid: udid, output: capture)
+        let outcome = try await runner.run(
+          executable: command.executable, arguments: command.arguments,
+          workingDirectory: workspace, environment: environment)
+        guard outcome.succeeded else {
+          let item = Evidence(
+            kind: .screenshot, status: .failed, taskGeneration: await ledger.generation,
+            destinationUDID: udid, diagnosticSummary: outcome.stderr)
+          try await ledger.record(item)
+          return success(
+            request.id,
+            .object([
+              "succeeded": .bool(false),
+              "evidenceIDs": .array([.string(item.id.uuidString)]),
+              "diagnostics": .string(outcome.stderr),
+            ]))
+        }
+        frameCount += 1
+        finalCapture = capture
+        let hash = try ArchiveValidator.sha256(of: capture)
+        if hash == previousHash {
+          stable = true
+          break
+        }
+        previousHash = hash
+      }
+
+      guard let finalCapture else {
+        return failure(request.id, -32054, "Simulator did not produce a screenshot")
+      }
+      try? FileManager.default.removeItem(at: output)
+      try FileManager.default.copyItem(at: finalCapture, to: output)
+      let summary =
+        stable
+        ? "Simulator settled after \(frameCount) captured frames."
+        : "Captured the latest frame after the Simulator stability timeout."
+      let item = Evidence(
+        kind: .screenshot, status: .passed, taskGeneration: await ledger.generation,
+        destinationUDID: udid, artifactPaths: [output.path], diagnosticSummary: summary)
+      try await ledger.record(item)
+      return success(
+        request.id,
+        .object([
+          "succeeded": .bool(true), "stable": .bool(stable),
+          "frames": .number(Double(frameCount)),
+          "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "diagnostics": .string(summary),
+        ]))
+    } catch { return failure(request.id, -32054, error.localizedDescription) }
+  }
+
+  /// Captures one frame for the live preview. Unlike `screenshot.capture`, this deliberately
+  /// creates no evidence and performs no stability wait; verification uses the slower path.
+  private func capturePreviewFrame(_ request: RPCEnvelope, udid: String) async -> RPCEnvelope {
+    let preflight = await ToolchainDiscovery.preflight()
+    guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
+      return failure(request.id, -32050, "Full Xcode is unavailable")
+    }
+    let previewDirectory = workspace.appending(
+      path: ".iosdev/cache/Preview", directoryHint: .isDirectory)
+    let output = previewDirectory.appending(path: "preview-\(UUID().uuidString).png")
+    let started = DispatchTime.now().uptimeNanoseconds
+    do {
+      try FileManager.default.createDirectory(
+        at: previewDirectory, withIntermediateDirectories: true)
+      let command = AppleCommandBuilder.screenshot(
+        simctl: URL(fileURLWithPath: path), udid: udid, output: output)
+      let outcome = try await runner.run(
+        executable: command.executable, arguments: command.arguments,
+        workingDirectory: workspace, environment: ["DEVELOPER_DIR": developer])
+      guard outcome.succeeded else {
+        return failure(request.id, -32054, outcome.stderr)
+      }
+      trimPreviewFrames(in: previewDirectory, keeping: 12)
+      let elapsed = (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+      return success(
+        request.id,
+        .object([
+          "path": .string(output.path), "elapsedMS": .number(Double(elapsed)),
+        ]))
+    } catch {
+      return failure(request.id, -32054, error.localizedDescription)
+    }
+  }
+
+  private func trimPreviewFrames(in directory: URL, keeping limit: Int) {
+    guard
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
+        options: [.skipsHiddenFiles])
+    else { return }
+    let frames = files.filter { $0.lastPathComponent.hasPrefix("preview-") }.sorted {
+      let left =
+        (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?
+        .contentModificationDate ?? .distantPast
+      let right =
+        (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?
+        .contentModificationDate ?? .distantPast
+      return left > right
+    }
+    for file in frames.dropFirst(limit) { try? FileManager.default.removeItem(at: file) }
   }
 }
 

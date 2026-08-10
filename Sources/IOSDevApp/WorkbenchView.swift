@@ -36,6 +36,9 @@ public struct WorkbenchView: View {
         .clipped()
         .layoutPriority(0)
         Divider().overlay(Studio.separator)
+        TerminalDrawer()
+          .layoutPriority(2)
+        Divider().overlay(Studio.separator)
         TaskActionBar()
           .layoutPriority(2)
       }
@@ -53,26 +56,6 @@ public struct WorkbenchView: View {
       Button("OK") { model.notice = nil }
     } message: {
       Text(model.notice ?? "")
-    }
-    .confirmationDialog(
-      model.pendingAgentPermission?.title ?? "Agent permission",
-      isPresented: Binding(
-        get: { model.pendingAgentPermission != nil },
-        set: {
-          if !$0, model.pendingAgentPermission != nil {
-            model.resolveAgentPermission(optionID: nil)
-          }
-        }),
-      titleVisibility: .visible
-    ) {
-      ForEach(model.pendingAgentPermission?.options ?? []) { option in
-        Button(option.name, role: option.kind.hasPrefix("reject") ? .destructive : nil) {
-          model.resolveAgentPermission(optionID: option.id)
-        }
-      }
-      Button("Cancel", role: .cancel) { model.resolveAgentPermission(optionID: nil) }
-    } message: {
-      Text(model.pendingAgentPermission?.detail ?? "Review this operation before allowing it.")
     }
   }
 
@@ -95,6 +78,97 @@ public struct WorkbenchView: View {
     case .settings:
       SettingsWorkspace()
     }
+  }
+}
+
+private struct TerminalDrawer: View {
+  @EnvironmentObject var model: AppModel
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 10) {
+        Button(action: model.toggleTerminal) {
+          HStack(spacing: 8) {
+            Image(systemName: "terminal")
+              .font(.system(size: 12, weight: .medium))
+            Text("Terminal")
+              .font(.system(size: 11.5, weight: .semibold))
+            Text("⌘J")
+              .font(.system(size: 9.5, weight: .medium).monospaced())
+              .foregroundStyle(Studio.tertiary)
+            if let latest = model.terminalEntries.last {
+              Circle().fill(stateColor(latest.state)).frame(width: 7, height: 7)
+              Text(latestSummary(latest))
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(Studio.secondary)
+                .lineLimit(1)
+            } else {
+              Text("Commands and output appear here")
+                .font(.system(size: 10))
+                .foregroundStyle(Studio.secondary)
+            }
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        Spacer()
+        if !model.terminalEntries.isEmpty {
+          Button("Copy Latest", action: copyLatest)
+            .buttonStyle(.plain)
+            .font(.system(size: 10.5, weight: .medium))
+          Button("Clear", action: model.clearTerminal)
+            .buttonStyle(.plain)
+            .font(.system(size: 10.5, weight: .medium))
+            .disabled(model.terminalEntries.contains(where: { $0.state == .running }))
+        }
+        Button(action: model.toggleTerminal) {
+          Image(systemName: model.isTerminalExpanded ? "chevron.down" : "chevron.up")
+            .font(.system(size: 10, weight: .semibold))
+            .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(model.isTerminalExpanded ? "Collapse terminal" : "Expand terminal")
+      }
+      .padding(.leading, 104).padding(.trailing, 18)
+      .frame(height: 36)
+      .background(Studio.surface)
+
+      if model.isTerminalExpanded {
+        Divider().overlay(Color.white.opacity(0.1))
+        terminalTranscript
+          .frame(height: 190)
+          .transition(.opacity)
+      }
+    }
+  }
+
+  private var terminalTranscript: some View {
+    TerminalTranscriptView(entries: model.terminalEntries)
+  }
+
+  private func latestSummary(_ entry: TerminalEntry) -> String {
+    switch entry.state {
+    case .running: "Running"
+    case .succeeded: "Last command passed"
+    case .failed: "Last command failed"
+    case .cancelled: "Last command cancelled"
+    }
+  }
+
+  private func stateColor(_ state: TerminalEntry.State) -> Color {
+    switch state {
+    case .running: Studio.accent
+    case .succeeded: Studio.success
+    case .failed: .red
+    case .cancelled: Studio.secondary
+    }
+  }
+
+  private func copyLatest() {
+    guard let entry = model.terminalEntries.last else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(
+      "\(entry.workingDirectory) % \(entry.command)\n\(entry.output)", forType: .string)
   }
 }
 
@@ -365,6 +439,13 @@ private struct AgentPanel: View {
         .padding(.vertical, 18)
       }
 
+      if let permission = model.pendingAgentPermission {
+        Divider().overlay(Studio.separator)
+        AgentPermissionCard(permission: permission)
+          .padding(.horizontal, 16)
+          .padding(.vertical, 14)
+      }
+
       Divider().overlay(Studio.separator)
       VStack(alignment: .leading, spacing: 7) {
         HStack(alignment: .bottom, spacing: 8) {
@@ -543,11 +624,12 @@ private struct AppStage: View {
           }
           Spacer()
           Button(action: model.openSimulator) {
-            Label("Open in Simulator", systemImage: "arrow.up.right.square")
+            Label("Live Simulator", systemImage: "arrow.up.right.square")
               .font(.system(size: 11, weight: .medium))
           }
           .buttonStyle(.plain)
           .disabled(model.preflight?.isFullXcode != true)
+          .help("Open Apple's Simulator for native real-time interaction")
           Button(action: model.refreshApp) {
             Label("Refresh", systemImage: "arrow.clockwise")
               .font(.system(size: 11, weight: .medium))
@@ -597,8 +679,10 @@ private struct AppStage: View {
           appearanceControls
           Divider().frame(height: 22).padding(.horizontal, 10)
           zoomControls
+          Spacer(minLength: 10)
+          previewInteractionStatus
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 14)
         .frame(height: 64)
       }
     }
@@ -614,8 +698,9 @@ private struct AppStage: View {
       appearanceButton(.dark, title: "Dark")
       Divider().frame(height: 20).padding(.horizontal, 6)
       Image(systemName: "iphone").foregroundStyle(Studio.secondary)
-      Text("Portrait").font(.system(size: 11, weight: .medium))
+      Text("Portrait").font(.system(size: 11, weight: .medium)).fixedSize()
     }
+    .fixedSize()
   }
 
   private var zoomControls: some View {
@@ -652,6 +737,31 @@ private struct AppStage: View {
       .keyboardShortcut("+", modifiers: .command)
       .help("Zoom in")
     }
+    .fixedSize()
+  }
+
+  private var previewInteractionStatus: some View {
+    HStack(spacing: 6) {
+      if model.previewInteractionState == .warming || model.previewInteractionState == .sending {
+        ProgressView().controlSize(.mini)
+      } else {
+        Circle()
+          .fill(
+            model.previewInteractionState == .ready ? Studio.success : Studio.secondary.opacity(0.6)
+          )
+          .frame(width: 7, height: 7)
+      }
+      Text(model.previewInteractionState.label)
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(Studio.secondary)
+      if let latency = model.previewLatencyMS {
+        Text("\(latency) ms")
+          .font(.system(size: 9.5).monospacedDigit())
+          .foregroundStyle(Studio.tertiary)
+      }
+    }
+    .fixedSize()
+    .help("Preview taps are remote. Use Live Simulator for native real-time interaction.")
   }
 
   private func adjustZoom(by amount: CGFloat) {
@@ -692,7 +802,7 @@ private struct DevicePreview: View {
         SyntheticProfilePreview()
           .clipShape(RoundedRectangle(cornerRadius: 45 * scale, style: .continuous))
           .padding(8 * scale)
-      } else if let url = model.currentScreenshot, let image = NSImage(contentsOf: url) {
+      } else if let image = model.currentScreenshotImage {
         ZStack {
           Image(nsImage: image)
             .resizable()
@@ -713,6 +823,22 @@ private struct DevicePreview: View {
                 })
           }
           .help(previewInteractionHelp)
+          if let tap = model.previewTapFeedback {
+            GeometryReader { screen in
+              ZStack {
+                Circle()
+                  .fill(Color.white.opacity(0.28))
+                  .frame(width: max(18, 24 * scale), height: max(18, 24 * scale))
+                Circle()
+                  .stroke(Color.white, lineWidth: max(1.5, 2 * scale))
+                  .frame(width: max(12, 16 * scale), height: max(12, 16 * scale))
+              }
+              .position(
+                x: CGFloat(tap.x) * screen.size.width,
+                y: CGFloat(tap.y) * screen.size.height)
+            }
+            .allowsHitTesting(false)
+          }
           if !model.isSemanticAutomationReady {
             VStack {
               Spacer()
@@ -789,7 +915,7 @@ private struct DevicePreview: View {
 
   private var previewInteractionHelp: String {
     model.isSemanticAutomationReady
-      ? "Click to send a manual coordinate tap. Manual taps do not count as deterministic verification."
+      ? "Click for a remote tap. Use Live Simulator for native real-time interaction. Manual taps do not count as deterministic verification."
       : "Click to set up WebDriverAgent interaction."
   }
 
@@ -1825,9 +1951,12 @@ private struct ActivityRow: View {
         Text(item.title).font(
           .system(size: 11, weight: item.state == .active ? .semibold : .regular)
         )
-        .foregroundStyle(item.state == .complete ? Studio.success : Color.primary)
+        .foregroundStyle(
+          item.state == .complete && item.category != .agent ? Studio.success : Color.primary)
         if !item.detail.isEmpty {
-          Text(item.detail).font(.system(size: 10)).foregroundStyle(Studio.secondary).lineLimit(2)
+          Text(item.detail).font(.system(size: 10)).foregroundStyle(Studio.secondary)
+            .lineLimit(item.category == .agent ? 6 : 2)
+            .textSelection(.enabled)
         }
       }
       Spacer(minLength: 0)
@@ -1841,6 +1970,135 @@ private struct ActivityRow: View {
     case .waiting: Studio.tertiary
     case .warning: Studio.warning
     }
+  }
+}
+
+private struct AgentPermissionCard: View {
+  @EnvironmentObject var model: AppModel
+  let permission: AgentPermissionRequest
+
+  private var primaryAllow: AgentPermissionOption? {
+    permission.options.first(where: { $0.kind == "allow_once" })
+      ?? permission.options.first(where: \.isAllow)
+  }
+
+  private var deny: AgentPermissionOption? {
+    permission.options.first(where: { $0.kind == "reject_once" })
+      ?? permission.options.first(where: { !$0.isAllow })
+  }
+
+  private var taskAllow: AgentPermissionOption? {
+    permission.options.first(where: { $0.kind == "allow_always" })
+  }
+
+  private var moreOptions: [AgentPermissionOption] {
+    permission.options.filter {
+      $0.id != primaryAllow?.id && $0.id != taskAllow?.id && $0.id != deny?.id
+    }
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 11) {
+      HStack(alignment: .top, spacing: 9) {
+        Image(systemName: "shield.lefthalf.filled")
+          .font(.system(size: 16, weight: .semibold))
+          .foregroundStyle(Studio.accent)
+          .frame(width: 24, height: 24)
+          .background(Studio.surface.opacity(0.8))
+          .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        VStack(alignment: .leading, spacing: 3) {
+          Text(permission.title)
+            .font(.system(size: 13, weight: .semibold))
+            .fixedSize(horizontal: false, vertical: true)
+          Label(permission.scopeLabel, systemImage: "scope")
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer(minLength: 0)
+      }
+
+      Text(permission.detail)
+        .font(.system(size: 11))
+        .foregroundStyle(Studio.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+
+      if let command = permission.command, !command.isEmpty {
+        Text(command)
+          .font(.system(size: 10, design: .monospaced))
+          .textSelection(.enabled)
+          .fixedSize(horizontal: false, vertical: true)
+          .lineLimit(3)
+          .padding(9)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .accessibilityLabel("Command to approve")
+      }
+
+      if let scopeDetail = permission.scopeDetail, !scopeDetail.isEmpty {
+        Text(scopeDetail)
+          .font(.system(size: 9.5, design: .monospaced))
+          .foregroundStyle(Studio.tertiary)
+          .lineLimit(2)
+          .truncationMode(.middle)
+          .textSelection(.enabled)
+      }
+
+      HStack(spacing: 8) {
+        if let deny {
+          Button(deny.displayName) { model.resolveAgentPermission(optionID: deny.id) }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Stop this action and continue reviewing the task")
+        } else {
+          Button("Deny") { model.resolveAgentPermission(optionID: nil) }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        Spacer(minLength: 4)
+        if !moreOptions.isEmpty {
+          Menu {
+            ForEach(moreOptions) { option in
+              Button(option.displayName, role: option.isAllow ? nil : .destructive) {
+                model.resolveAgentPermission(optionID: option.id)
+              }
+            }
+          } label: {
+            Image(systemName: "ellipsis.circle")
+              .frame(width: 22, height: 22)
+              .accessibilityLabel("More permission choices")
+          }
+          .menuStyle(.borderlessButton)
+          .fixedSize()
+          .help("Task-scoped permission choices")
+        }
+        if let taskAllow, taskAllow.id != primaryAllow?.id {
+          Button(taskAllow.displayName) {
+            model.resolveAgentPermission(optionID: taskAllow.id)
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .help("Remember this choice for the current isolated task")
+        }
+        if let primaryAllow {
+          Button(primaryAllow.displayName) {
+            model.resolveAgentPermission(optionID: primaryAllow.id)
+          }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
+          .keyboardShortcut(.return, modifiers: [])
+        }
+      }
+    }
+    .padding(12)
+    .background(Studio.accentSoft.opacity(0.72))
+    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 11, style: .continuous)
+        .stroke(Studio.accent.opacity(0.16), lineWidth: 1)
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Agent permission request")
   }
 }
 

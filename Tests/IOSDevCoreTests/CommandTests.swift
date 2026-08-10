@@ -7,12 +7,23 @@ import Testing
   let simctl = URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/simctl")
   let app = URL(fileURLWithPath: "/tmp/My App; touch nope.app")
   #expect(
+    AppleCommandBuilder.bootStatus(simctl: simctl, udid: "DEVICE").arguments == [
+      "bootstatus", "DEVICE", "-b",
+    ])
+  #expect(
     AppleCommandBuilder.install(simctl: simctl, udid: "DEVICE", app: app).arguments == [
       "install", "DEVICE", app.path,
     ])
   #expect(
     AppleCommandBuilder.launch(simctl: simctl, udid: "DEVICE", bundleID: "com.example.app")
       .arguments == ["launch", "DEVICE", "com.example.app"])
+  #expect(
+    AppleCommandBuilder.launch(
+      simctl: simctl, udid: "DEVICE", bundleID: "com.example.app",
+      arguments: ["-RCT_jsLocation", "127.0.0.1:8081"]
+    ).arguments == [
+      "launch", "DEVICE", "com.example.app", "-RCT_jsLocation", "127.0.0.1:8081",
+    ])
   #expect(
     AppleCommandBuilder.statusBar(simctl: simctl, udid: "DEVICE", overrides: ["time": "09:41"])
       .arguments == ["status_bar", "DEVICE", "override", "--time", "09:41"])
@@ -23,6 +34,18 @@ import Testing
       "spawn", "DEVICE", "log", "show", "--style", "compact", "--last", "300s",
       "--predicate", "process == \"App; harmless\"",
     ])
+  let metro = AppleCommandBuilder.configureMetro(
+    simctl: simctl, udid: "DEVICE", bundleID: "com.example.app")
+  #expect(
+    metro[0].arguments == [
+      "spawn", "DEVICE", "defaults", "write", "com.example.app", "RCT_jsLocation",
+      "127.0.0.1:8081",
+    ])
+  #expect(
+    metro[1].arguments == [
+      "spawn", "DEVICE", "defaults", "write", "com.example.app", "RCT_enableDev", "-bool",
+      "YES",
+    ])
 }
 
 @Test func processOutputIsBoundedAndMarked() async throws {
@@ -32,6 +55,28 @@ import Testing
     arguments: ["1234567890"], maximumOutputBytes: 5)
   #expect(result.stdout.hasPrefix("12345"))
   #expect(result.stdout.contains("output truncated"))
+}
+
+@Test func cocoaPodsPreflightRequiresLockedInstallation() throws {
+  let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  try Data("platform :ios, '17.0'\n".utf8).write(to: directory.appending(path: "Podfile"))
+  try Data("PODS:\n  - Example\n".utf8).write(to: directory.appending(path: "Podfile.lock"))
+  let container = directory.appending(path: "Example.xcworkspace")
+
+  let missing = try #require(CocoaPodsSupport.missingInstallation(for: container))
+  #expect(missing.installArguments == ["install", "--deployment"])
+  #expect(missing.reason.contains("Manifest.lock"))
+
+  let support = directory.appending(path: "Pods/Target Support Files")
+  try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+  try Data("different\n".utf8).write(to: directory.appending(path: "Pods/Manifest.lock"))
+  #expect(
+    CocoaPodsSupport.missingInstallation(for: container)?.reason.contains("do not match") == true)
+
+  try Data("PODS:\n  - Example\n".utf8).write(to: directory.appending(path: "Pods/Manifest.lock"))
+  #expect(CocoaPodsSupport.missingInstallation(for: container) == nil)
 }
 
 @Test func archiveChecksumValidationRejectsMismatch() throws {
