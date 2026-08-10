@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "xcodeBuild": "17F113",
+      "xcodeVersion": "26.6",
+      "commit": "1449d94fb612a4e92857e7f37092dd1276b483e4",
+      "patchSet": "xctestrun-loopback-v1",
+      "archiveURL": "https://github.com/appium/WebDriverAgent/archive/refs/tags/v16.1.3.tar.gz",
+      "sourceSHA256": "fb7f147b57bc1a66c3cada4c979844ad2ea5901b5b0d6439ef724b06fdd862e8",
+      "validatedRuntimes": ["com.apple.CoreSimulator.SimRuntime.iOS-26-5"],
+      "integrationResult": "passed"
+    }
+  ]
+}

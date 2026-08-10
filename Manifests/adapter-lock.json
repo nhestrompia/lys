@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "signature": null,
+  "entries": [],
+  "releaseState": "unpromoted",
+  "note": "Discovery is enabled, but optional adapter installation remains blocked until exact assets, checksums, licenses, ACP conformance results, and the release signature are promoted together."
+}

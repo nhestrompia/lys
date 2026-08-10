@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-10T15:26:34Z",
+  "title": "Design System: iOS Development Workbench",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Workbench Blue",
+        "canonical": "#0A63F2",
+        "tonalRamp": ["oklch(15% 0.20 260)", "oklch(27% 0.20 260)", "oklch(39% 0.20 260)", "oklch(51% 0.20 260)", "oklch(63% 0.20 260)", "oklch(75% 0.20 260)", "oklch(87% 0.20 260)", "oklch(95% 0.20 260)"]
+      },
+      "primary-soft": {
+        "role": "primary",
+        "displayName": "Selection Mist",
+        "canonical": "#E8F2FF",
+        "tonalRamp": ["oklch(15% 0.03 255)", "oklch(27% 0.03 255)", "oklch(39% 0.03 255)", "oklch(51% 0.03 255)", "oklch(63% 0.03 255)", "oklch(75% 0.03 255)", "oklch(87% 0.03 255)", "oklch(95% 0.03 255)"]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Studio Canvas",
+        "canonical": "#F6F7F8",
+        "tonalRamp": ["oklch(15% 0.005 255)", "oklch(27% 0.005 255)", "oklch(39% 0.005 255)", "oklch(51% 0.005 255)", "oklch(63% 0.005 255)", "oklch(75% 0.005 255)", "oklch(87% 0.005 255)", "oklch(95% 0.005 255)"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Working White",
+        "canonical": "#FFFFFF",
+        "tonalRamp": ["oklch(15% 0 0)", "oklch(27% 0 0)", "oklch(39% 0 0)", "oklch(51% 0 0)", "oklch(63% 0 0)", "oklch(75% 0 0)", "oklch(87% 0 0)", "oklch(95% 0 0)"]
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "Raised Control",
+        "canonical": "#F4F5F7",
+        "tonalRamp": ["oklch(15% 0.006 255)", "oklch(27% 0.006 255)", "oklch(39% 0.006 255)", "oklch(51% 0.006 255)", "oklch(63% 0.006 255)", "oklch(75% 0.006 255)", "oklch(87% 0.006 255)", "oklch(95% 0.006 255)"]
+      },
+      "label": {
+        "role": "neutral",
+        "displayName": "Primary Label",
+        "canonical": "rgba(0, 0, 0, 0.85)",
+        "tonalRamp": ["oklch(15% 0 0)", "oklch(27% 0 0)", "oklch(39% 0 0)", "oklch(51% 0 0)", "oklch(63% 0 0)", "oklch(75% 0 0)", "oklch(87% 0 0)", "oklch(95% 0 0)"]
+      },
+      "label-secondary": {
+        "role": "neutral",
+        "displayName": "Secondary Label",
+        "canonical": "#6E6E73",
+        "tonalRamp": ["oklch(15% 0.008 270)", "oklch(27% 0.008 270)", "oklch(39% 0.008 270)", "oklch(51% 0.008 270)", "oklch(63% 0.008 270)", "oklch(75% 0.008 270)", "oklch(87% 0.008 270)", "oklch(95% 0.008 270)"]
+      },
+      "label-tertiary": {
+        "role": "neutral",
+        "displayName": "Tertiary Label",
+        "canonical": "#98989D",
+        "tonalRamp": ["oklch(15% 0.008 270)", "oklch(27% 0.008 270)", "oklch(39% 0.008 270)", "oklch(51% 0.008 270)", "oklch(63% 0.008 270)", "oklch(75% 0.008 270)", "oklch(87% 0.008 270)", "oklch(95% 0.008 270)"]
+      },
+      "separator": {
+        "role": "neutral",
+        "displayName": "Hairline Separator",
+        "canonical": "rgba(0, 0, 0, 0.085)",
+        "tonalRamp": ["oklch(15% 0 0)", "oklch(27% 0 0)", "oklch(39% 0 0)", "oklch(51% 0 0)", "oklch(63% 0 0)", "oklch(75% 0 0)", "oklch(87% 0 0)", "oklch(95% 0 0)"]
+      },
+      "success": {
+        "role": "secondary",
+        "displayName": "Recorded Green",
+        "canonical": "#52B361",
+        "tonalRamp": ["oklch(15% 0.14 145)", "oklch(27% 0.14 145)", "oklch(39% 0.14 145)", "oklch(51% 0.14 145)", "oklch(63% 0.14 145)", "oklch(75% 0.14 145)", "oklch(87% 0.14 145)", "oklch(95% 0.14 145)"]
+      },
+      "warning": {
+        "role": "tertiary",
+        "displayName": "System Orange",
+        "canonical": "#FF9500",
+        "tonalRamp": ["oklch(15% 0.17 70)", "oklch(27% 0.17 70)", "oklch(39% 0.17 70)", "oklch(51% 0.17 70)", "oklch(63% 0.17 70)", "oklch(75% 0.17 70)", "oklch(87% 0.17 70)", "oklch(95% 0.17 70)"]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "System Red",
+        "canonical": "#FF3B30",
+        "tonalRamp": ["oklch(15% 0.20 28)", "oklch(27% 0.20 28)", "oklch(39% 0.20 28)", "oklch(51% 0.20 28)", "oklch(63% 0.20 28)", "oklch(75% 0.20 28)", "oklch(87% 0.20 28)", "oklch(95% 0.20 28)"]
+      },
+      "device-shell": {
+        "role": "neutral",
+        "displayName": "Device Shell",
+        "canonical": "#141618",
+        "tonalRamp": ["oklch(15% 0.006 255)", "oklch(27% 0.006 255)", "oklch(39% 0.006 255)", "oklch(51% 0.006 255)", "oklch(63% 0.006 255)", "oklch(75% 0.006 255)", "oklch(87% 0.006 255)", "oklch(95% 0.006 255)"]
+      }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Task Headline", "purpose": "Primary Agent prompt or empty-state question." },
+      "title": { "displayName": "Workbench Title", "purpose": "Window identity, verification summary, and review heading." },
+      "body": { "displayName": "Operational Body", "purpose": "Most descriptions, values, and activity copy." },
+      "label": { "displayName": "Compact Label", "purpose": "Section names, controls, statuses, and row headings." },
+      "mono": { "displayName": "Evidence Mono", "purpose": "Code, paths, identifiers, generations, times, and tabular counts only." }
+    },
+    "shadows": [
+      { "name": "control-lift", "value": "0 2px 5px rgba(0, 0, 0, 0.035)", "purpose": "Toolbar selectors and compact raised controls." },
+      { "name": "panel-lift", "value": "0 7px 16px rgba(0, 0, 0, 0.04)", "purpose": "Primary studio panels and grouped Settings surfaces." },
+      { "name": "floating-tool-lift", "value": "0 5px 12px rgba(0, 0, 0, 0.07)", "purpose": "Appearance controls and the adjacent interaction palette." },
+      { "name": "device-lift", "value": "0 9px 18px rgba(0, 0, 0, 0.22)", "purpose": "The iPhone shell only." }
+    ],
+    "breakpoints": [
+      { "name": "minimum-workbench", "value": "1180px" },
+      { "name": "default-workbench", "value": "1440px" },
+      { "name": "macbook-14-height", "value": "884px" }
+    ],
+    "layout": {
+      "devicePreview": {
+        "width": "proportional up to 306pt",
+        "height": "350–650pt",
+        "aspectRatio": "306 / 650",
+        "compactViewportExample": "approximately 264 × 560pt at 1512 × 884pt",
+        "horizontalAlignment": "center",
+        "verticalAlignment": "top",
+        "anchor": "directly beneath the app-stage toolbar",
+        "scalePriority": "scale the device before compressing the top toolbar or bottom review bar"
+      },
+      "window": {
+        "minimumSize": "1180 × 680pt",
+        "defaultSize": "1440 × 860pt",
+        "restorationRule": "clamp restored frames to the active display's visible frame"
+      },
+      "evidenceOverflow": "scroll evidence rows within the ledger"
+    },
+    "provenance": {
+      "form": {
+        "kind": "user-supplied approved Operate reference",
+        "path": "/var/folders/nx/yjq006696mz0bdbbjl96t8g00000gn/T/codex-clipboard-41a70dfc-90f7-44b2-97b1-2a75e13ab85e.png",
+        "viewport": { "width": 1536, "height": 1024 },
+        "sha256": "a0147fa507a0f01639a54b67801528fefdf4ea7090895348237d795d6b1981ab"
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Review Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Forward action at the task decision boundary.",
+      "html": "<button class=\"ds-btn-primary\"><span>Review Changes</span><span class=\"ds-btn-primary-divider\" aria-hidden=\"true\"></span><span class=\"ds-btn-primary-arrow\" aria-hidden=\"true\">→</span></button>",
+      "css": ".ds-btn-primary { height: 44px; display: inline-flex; align-items: center; gap: 18px; padding: 0 14px 0 18px; border: 0; border-radius: 8px; background: #0A63F2; color: #FFFFFF; font: 600 12px/1.25 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; transition: filter 120ms ease, opacity 120ms ease; } .ds-btn-primary:hover { filter: brightness(0.96); } .ds-btn-primary:active { filter: brightness(0.90); } .ds-btn-primary:focus-visible { outline: 3px solid rgba(10, 99, 242, 0.32); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.5; } .ds-btn-primary-divider { width: 1px; height: 42px; background: rgba(255,255,255,0.25); } .ds-btn-primary-arrow { font-size: 16px; }"
+    },
+    {
+      "name": "Toolbar Control",
+      "kind": "button",
+      "refersTo": "toolbar-control",
+      "description": "Compact native selector for repository, branch, Simulator, and scheme context.",
+      "html": "<button class=\"ds-toolbar-control\"><span class=\"ds-toolbar-symbol\" aria-hidden=\"true\">◇</span><span>Open Project</span><span class=\"ds-toolbar-chevron\" aria-hidden=\"true\">⌄</span></button>",
+      "css": ".ds-toolbar-control { min-width: 122px; max-width: 232px; height: 36px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px; border: 0; border-radius: 8px; background: #F4F5F7; color: rgba(0,0,0,0.85); box-shadow: 0 2px 5px rgba(0,0,0,0.035); font: 500 12px/1.25 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; transition: background 120ms ease; } .ds-toolbar-control:hover { background: #ECEEF2; } .ds-toolbar-control:active { background: #E4E7EC; } .ds-toolbar-control:focus-visible { outline: 3px solid rgba(10,99,242,0.28); outline-offset: 2px; } .ds-toolbar-chevron { margin-left: auto; color: #6E6E73; }"
+    },
+    {
+      "name": "Active Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "Persistent rail item with a stable label and a blue selected icon well.",
+      "html": "<button class=\"ds-nav-item\" aria-current=\"page\"><span class=\"ds-nav-icon\" aria-hidden=\"true\">✦</span><span>Agent</span></button>",
+      "css": ".ds-nav-item { width: 68px; height: 66px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 0; background: transparent; color: #0A63F2; font: 500 10px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-nav-icon { width: 38px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #E8F2FF; font-size: 19px; } .ds-nav-item:hover .ds-nav-icon { filter: brightness(0.98); } .ds-nav-item:active .ds-nav-icon { filter: brightness(0.94); } .ds-nav-item:focus-visible { outline: 3px solid rgba(10,99,242,0.28); outline-offset: 1px; border-radius: 9px; }"
+    },
+    {
+      "name": "Agent Prompt Field",
+      "kind": "input",
+      "refersTo": "prompt-field",
+      "description": "Borderless compact task prompt with an in-field send action.",
+      "html": "<label class=\"ds-prompt\"><span class=\"ds-visually-hidden\">Agent task</span><input class=\"ds-prompt-input\" placeholder=\"Ask the agent anything…\"><button class=\"ds-prompt-send\" aria-label=\"Send task\">➤</button></label>",
+      "css": ".ds-prompt { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; border-radius: 10px; background: #F4F5F7; color: rgba(0,0,0,0.85); } .ds-prompt:focus-within { box-shadow: 0 0 0 3px rgba(10,99,242,0.24); } .ds-prompt-input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: inherit; font: 400 12px/1.35 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-prompt-input::placeholder { color: #6E6E73; } .ds-prompt-send { width: 28px; height: 28px; border: 0; background: transparent; color: #0A63F2; border-radius: 8px; } .ds-prompt-send:hover { background: #E8F2FF; } .ds-prompt-send:active { filter: brightness(0.92); } .ds-prompt-send:focus-visible { outline: 2px solid rgba(10,99,242,0.35); } .ds-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }"
+    },
+    {
+      "name": "Studio Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "Opaque structural surface for Agent, App, Verify, Evidence, and grouped settings.",
+      "html": "<section class=\"ds-panel\"><header class=\"ds-panel-header\">Verify <span>Generation 3</span></header><div class=\"ds-panel-body\">Machine-recorded evidence stays adjacent to the app.</div></section>",
+      "css": ".ds-panel { overflow: hidden; border-radius: 14px; background: #FFFFFF; color: rgba(0,0,0,0.85); box-shadow: 0 7px 16px rgba(0,0,0,0.04); font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-panel-header { height: 48px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid rgba(0,0,0,0.085); color: #0A63F2; font-size: 12px; font-weight: 600; } .ds-panel-header span { color: #6E6E73; font-size: 10px; font-weight: 400; font-variant-numeric: tabular-nums; } .ds-panel-body { padding: 20px; font-size: 12px; line-height: 1.35; }"
+    },
+    {
+      "name": "Verification Row",
+      "kind": "custom",
+      "description": "A text-complete evidence state row that distinguishes waiting, blocked, failed, stale, and fresh states.",
+      "html": "<div class=\"ds-verify-row\"><span class=\"ds-verify-glyph\" aria-hidden=\"true\">✓</span><span class=\"ds-verify-copy\"><strong>Build</strong><small>Build succeeded for generation 3</small></span><span class=\"ds-verify-state\">Fresh</span></div>",
+      "css": ".ds-verify-row { min-height: 70px; display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid rgba(0,0,0,0.085); background: #FFFFFF; color: rgba(0,0,0,0.85); font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-verify-glyph { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 22px; border-radius: 50%; background: #52B361; color: #FFFFFF; font-size: 11px; font-weight: 700; } .ds-verify-copy { display: grid; gap: 4px; flex: 1; } .ds-verify-copy strong { font-size: 13px; font-weight: 600; } .ds-verify-copy small { color: #6E6E73; font-size: 11px; } .ds-verify-state { color: #52B361; font-size: 10px; font-weight: 500; }"
+    },
+    {
+      "name": "Task Status Badge",
+      "kind": "chip",
+      "description": "Compact state badge pairing a semantic dot with explicit status text.",
+      "html": "<span class=\"ds-status-badge\"><span class=\"ds-status-dot\" aria-hidden=\"true\"></span>Building</span>",
+      "css": ".ds-status-badge { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 999px; background: rgba(10,99,242,0.11); color: #0A63F2; font: 600 10px/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Luminous Native Studio",
+    "overview": "The workbench is a bright, exacting macOS instrument built around one thesis: the running iOS app is the center of work, while agent intent and verification remain visibly adjacent. It should feel like a first-party desktop utility—quiet, crisp, and operational—not an IDE-dark dashboard, a chat window with tools attached, or a decorative card canvas.\n\nWhite working surfaces sit on a cool luminous canvas. System blue identifies selection, control, and forward action; green is deliberately scarce and appears only when the machine has recorded success. Density is compact but never cramped: hierarchy comes from stable regions, grouped lists, hairline separators, and disciplined type rather than oversized headings or ornamental chrome.\n\nThe signature composition keeps the developer's causal story legible without changing views: open a repository, delegate in an isolated worktree, watch the app, inspect fresh generation-scoped evidence, then review and apply or discard. The interface stays transparent and recoverable at every boundary.\n\nFORM provenance. The shipped form is a direct native reproduction of the user-supplied approved Operate reference at `/var/folders/nx/yjq006696mz0bdbbjl96t8g00000gn/T/codex-clipboard-41a70dfc-90f7-44b2-97b1-2a75e13ab85e.png` (1536 × 1024 viewport; SHA-256 `a0147fa507a0f01639a54b67801528fefdf4ea7090895348237d795d6b1981ab`). This exact reference is the visual authority for composition and form when documentation or derivative screens drift.",
+    "keyCharacteristics": [
+      "Luminous light-only native macOS surfaces with restrained cool-gray tonal layering.",
+      "A central app stage with the phone top-weighted beneath its toolbar, flanked by agent intent on the left and verification truth on the right.",
+      "Compact San Francisco typography and SF Symbols throughout the interface.",
+      "Fourteen-point structural corners, smaller continuous corners for controls, and capsule geometry only for compact state selectors.",
+      "System blue for interaction; green only for fresh machine-recorded success.",
+      "Quiet one-pixel separators and low ambient shadows rather than gradients, glass, or decorative texture."
+    ],
+    "rules": [
+      { "name": "The Blue Means Agency Rule", "body": "Blue means the user can act, a control is selected, or work is currently active; it is not decorative fill.", "section": "colors" },
+      { "name": "The Green Is Recorded Truth Rule", "body": "Green appears only after a machine-observed success. Agent prose, optimistic status, and mere availability never earn it.", "section": "colors" },
+      { "name": "The Semantic Neutral Rule", "body": "Native label roles remain semantic in SwiftUI so contrast and accessibility behavior come from AppKit; the portable frontmatter values describe the shipped light appearance.", "section": "colors" },
+      { "name": "The Compact Hierarchy Rule", "body": "Create hierarchy with weight, semantic color, and placement before increasing type size; operational UI should not compete with the app under test.", "section": "typography" },
+      { "name": "The Monospace Earns Its Place Rule", "body": "Use monospaced treatment only when alignment or literal identity matters, never as a broad developer-aesthetic texture.", "section": "typography" },
+      { "name": "The Center-of-Work Rule", "body": "The running app occupies the horizontal center and starts directly beneath the stage toolbar; agent activity and evidence flank it in the same viewport.", "section": "layout" },
+      { "name": "The Decision-Boundary Rule", "body": "Changed-file count, discard, review, and apply stay in the persistent bottom bar so the transition from work to acceptance is always visible.", "section": "layout" },
+      { "name": "The Quiet Layering Rule", "body": "Use tonal contrast and separators first; add one ambient shadow only when a surface must lift from the canvas.", "section": "elevation" },
+      { "name": "The Device Gets the Weight Rule", "body": "The strongest shadow belongs to the app under test, never to surrounding dashboards or calls to action.", "section": "elevation" },
+      { "name": "The Fourteen-Point Structure Rule", "body": "Use 14pt continuous corners for the primary studio panels and floating tool palette; smaller controls step down instead of inheriting the structural radius.", "section": "shapes" },
+      { "name": "The Capsule Is a State Rule", "body": "Capsule geometry signals a compact status or segmented choice, never a generic container or large action.", "section": "shapes" }
+    ],
+    "dos": [
+      "Do keep the running iOS app centered while agent intent and verification remain visible beside it.",
+      "Do preserve the 88pt rail, 380pt Agent panel, flexible app stage, 420pt Verify panel, 12pt work-area gaps, and 76pt review bar in the primary desktop viewport.",
+      "Do use native SwiftUI controls, AppKit semantic label colors, SF Symbols, native menus, focus behavior, and accessibility labels.",
+      "Do tie verification presentation to the current mutation generation and label stale, waiting, blocked, failed, and fresh states in text.",
+      "Do reserve green for machine-recorded success and blue for selection, action, and active work.",
+      "Do keep advanced toolchain details available in secondary workspaces and status copy rather than crowding the primary operating path."
+    ],
+    "donts": [
+      "Don't revive the blueprint-blue selected workspace, graphite chrome, dark IDE framing, or segmented top-level dashboard from the superseded direction.",
+      "Don't turn agent prose, an idle-ready state, or an available integration into green success.",
+      "Don't hide verification behind a tab, modal, or drawer while the agent is working.",
+      "Don't embed or imitate Simulator chrome as if it were live control; keep the adjacent device preview and explicit Open in Simulator action truthful.",
+      "Don't use gradients, glass effects, decorative texture, floating-card grids, or multiple competing shadows.",
+      "Don't replace grouped native lists with oversized cards, or use pill geometry for ordinary buttons and containers."
+    ]
+  }
+}
