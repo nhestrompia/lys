@@ -16,7 +16,13 @@ enum IOSDevSnapshotMain {
       .flatMap(parseSize)
     let size = requestedSize ?? CGSize(width: 1536, height: 1024)
     let model = AppModel()
-    if arguments.contains("--settings") {
+    if arguments.contains("--code") {
+      model.loadCodePreview()
+    } else if arguments.contains("--files") {
+      model.loadFilesPreview()
+    } else if arguments.contains("--changes") {
+      model.loadChangesPreview()
+    } else if arguments.contains("--settings") {
       model.loadSettingsPreview()
     } else if arguments.contains("--permission") {
       model.loadPermissionPreview()

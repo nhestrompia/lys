@@ -1,5 +1,5 @@
 ---
-name: "iOS Development Workbench"
+name: "Lys"
 description: "A luminous native macOS studio that keeps agent intent, the running app, and machine-recorded proof in one view."
 colors:
   primary: "#0A63F2"
@@ -96,7 +96,7 @@ components:
     size: "38px 34px"
 ---
 
-# Design System: iOS Development Workbench
+# Design System: Lys
 
 ## Overview
 
@@ -108,7 +108,7 @@ White working surfaces sit on a cool luminous canvas. System blue identifies sel
 
 The signature composition keeps the developer's causal story legible without changing views: open a repository, delegate in an isolated worktree, watch the app, inspect fresh generation-scoped evidence, then review and apply or discard. The interface stays transparent and recoverable at every boundary.
 
-**FORM provenance.** The shipped form is a direct native reproduction of the user-supplied approved Operate reference at `/var/folders/nx/yjq006696mz0bdbbjl96t8g00000gn/T/codex-clipboard-41a70dfc-90f7-44b2-97b1-2a75e13ab85e.png` (1536 × 1024 viewport; SHA-256 `a0147fa507a0f01639a54b67801528fefdf4ea7090895348237d795d6b1981ab`). This exact reference is the visual authority for composition and form when documentation or derivative screens drift.
+**FORM provenance.** The shipped form is a direct native reproduction of the user-supplied approved reference at `/var/folders/nx/yjq006696mz0bdbbjl96t8g00000gn/T/codex-clipboard-41a70dfc-90f7-44b2-97b1-2a75e13ab85e.png` (1536 × 1024 viewport; SHA-256 `a0147fa507a0f01639a54b67801528fefdf4ea7090895348237d795d6b1981ab`). This exact reference is the visual authority for composition and form when documentation or derivative screens drift.
 
 **Key Characteristics:**
 

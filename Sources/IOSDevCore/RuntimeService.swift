@@ -585,7 +585,7 @@ public actor RuntimeService {
     {
       return failure(
         request.id, -32059,
-        "CocoaPods dependencies are not installed for \(requirement.projectDirectory.path). \(requirement.reason) Approve CocoaPods installation in Operate, or run `pod \(requirement.installArguments.joined(separator: " "))` in that directory."
+        "CocoaPods dependencies are not installed for \(requirement.projectDirectory.path). \(requirement.reason) Approve CocoaPods installation in Lys, or run `pod \(requirement.installArguments.joined(separator: " "))` in that directory."
       )
     }
     do {
