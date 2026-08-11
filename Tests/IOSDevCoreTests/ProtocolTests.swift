@@ -3,6 +3,17 @@ import Testing
 
 @testable import IOSDevCore
 
+private final class ACPUpdateRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var methods: [String] = []
+
+  func append(_ envelope: RPCEnvelope) {
+    lock.withLock { methods.append(envelope.method ?? "") }
+  }
+
+  var snapshot: [String] { lock.withLock { methods } }
+}
+
 @Test func jsonRPCRoundTripAndFraming() throws {
   let message = RPCEnvelope(
     id: .int(42), method: "build.run", params: .object(["scheme": .string("Demo")]))
@@ -103,4 +114,35 @@ import Testing
   let url = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   try Data(#"{"schemaVersion":2,"scheme":"Demo"}"#.utf8).write(to: url)
   #expect(throws: (any Error).self) { try IOSDevConfiguration.load(from: url) }
+}
+
+@Test func modelAgnosticACPAdapterCompletesAFullSessionOverStdio() async throws {
+  let workspace = URL(fileURLWithPath: NSTemporaryDirectory())
+  let script = try #require(
+    Bundle.module.url(forResource: "fake_acp", withExtension: "py", subdirectory: "Fixtures"))
+  let updates = ACPUpdateRecorder()
+  let client = try ACPClient(
+    executable: URL(fileURLWithPath: "/usr/bin/python3"), arguments: [script.path],
+    workspace: workspace,
+    onUpdate: { updates.append($0) })
+
+  let initialized = try await client.request(
+    method: "initialize", params: try jsonValue(ACPInitialize(clientVersion: "test", allowWrites: false)))
+  #expect(initialized.result?["protocolVersion"] == .number(1))
+
+  let session = try await client.request(
+    method: "session/new", params: .object(["cwd": .string(workspace.path)]))
+  #expect(session.result?["sessionId"] == .string("fake-session"))
+
+  let prompt = try await client.request(
+    method: "session/prompt",
+    params: .object([
+      "sessionId": .string("fake-session"),
+      "prompt": .array([
+        .object(["type": .string("text"), "text": .string("Test the quiz")])
+      ]),
+    ]))
+  #expect(prompt.result?["stopReason"] == .string("end_turn"))
+  #expect(updates.snapshot.contains("session/update"))
+  client.cancel()
 }

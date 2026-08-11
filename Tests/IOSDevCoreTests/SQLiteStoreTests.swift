@@ -16,3 +16,13 @@ import Testing
   #expect(try await store.events(taskID: taskID).map(\.id) == [event.id])
   #expect(try await store.evidence(taskID: taskID).map(\.id) == [item.id])
 }
+
+@Test func sqliteStorePersistsAppGraphSnapshots() async throws {
+  let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let store = try SQLiteStore(url: root.appending(path: "metadata.sqlite3"))
+  let fingerprint = ScreenFingerprint(digest: "home", owningApplication: "com.example.app")
+  let snapshot = AppGraphSnapshot(nodes: [.init(fingerprint: fingerprint, name: "Home")])
+  try await store.saveAppGraph(snapshot, key: "com.example.app|Debug")
+  let loaded = try await store.appGraph(key: "com.example.app|Debug")
+  #expect(loaded?.nodes.map(\.id) == ["home"])
+}

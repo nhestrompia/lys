@@ -85,6 +85,22 @@ public actor SQLiteStore {
       kind: evidence.kind.rawValue, date: evidence.createdAt, payload: evidence)
   }
 
+  public func saveAppGraph(_ snapshot: AppGraphSnapshot, key: String, taskID: UUID? = nil) throws {
+    try write(
+      table: "app_graph", id: key, taskID: taskID?.uuidString, kind: "snapshot", date: Date(),
+      payload: snapshot)
+  }
+
+  public func appGraph(key: String) throws -> AppGraphSnapshot? {
+    let statement = try prepare("SELECT payload FROM app_graph WHERE id = ? LIMIT 1")
+    defer { sqlite3_finalize(statement) }
+    try bind(key, at: 1, statement: statement)
+    guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else {
+      return nil
+    }
+    return try decoder.decode(AppGraphSnapshot.self, from: Data(String(cString: text).utf8))
+  }
+
   public func events(taskID: UUID) throws -> [StoredEvent] {
     let sql = "SELECT payload FROM events WHERE task_id = ? ORDER BY created_at, id"
     let statement = try prepare(sql)

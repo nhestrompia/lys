@@ -15,7 +15,9 @@ enum IOSDevRuntimeMain {
     }
     do {
       let server = try UnixSocketServer(path: socketPath)
-      let service = RuntimeService(workspace: URL(fileURLWithPath: workspacePath), token: token)
+      let service = RuntimeService(
+        workspace: URL(fileURLWithPath: workspacePath), token: token,
+        stateRoot: URL(fileURLWithPath: socketPath).deletingLastPathComponent())
       while true {
         let connection = try server.accept()
         Task.detached { await serve(connection, using: service) }

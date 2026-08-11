@@ -406,6 +406,10 @@ private struct AgentPanel: View {
             }
           }
 
+          if let journey = model.activeJourney {
+            JourneyProgressSection(journey: journey)
+          }
+
           Divider().overlay(Studio.separator)
           HStack {
             Text("Agent activity").font(.system(size: 12, weight: .semibold))
@@ -446,8 +450,8 @@ private struct AgentPanel: View {
           ZStack(alignment: .topLeading) {
             if model.taskPrompt.isEmpty {
               Text(
-                model.activeWorktree == nil
-                  ? "Ask the agent to change something…" : "Continue the conversation…"
+                model.hasAgentSession
+                  ? "Continue the conversation…" : "Ask the agent to test or change something…"
               )
               .font(.system(size: 12))
               .foregroundStyle(Studio.tertiary)
@@ -539,11 +543,14 @@ private struct AgentPanel: View {
       return "Open an existing Git repository. Every editable task starts in an isolated worktree."
     }
     if !model.isGitRepository {
-      return "This folder is browse-only because editable tasks require Git."
+      return "App inspection and testing are available. Source editing requires Git."
     }
     if model.taskTitle.isEmpty {
       return
         "Describe one outcome. Build and verification evidence will stay tied to the current mutation generation."
+    }
+    if model.activeTaskIntent?.allowsSourceWrites == false {
+      return "Current app preserved · Source read-only · Generation \(model.generation)"
     }
     return "Original checkout protected · Generation \(model.generation)"
   }
@@ -560,6 +567,100 @@ private struct AgentPanel: View {
     }
     return adapter.executable == nil
       ? "\(adapter.displayName) needs setup" : adapter.displayName
+  }
+}
+
+private struct JourneyProgressSection: View {
+  let journey: JourneyRecord
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Divider().overlay(Studio.separator)
+      HStack(spacing: 8) {
+        Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(statusColor)
+        Text("App journey").font(.system(size: 12, weight: .semibold))
+        Spacer()
+        Text(progressLabel)
+          .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+          .foregroundStyle(statusColor)
+      }
+      Text(journey.goal)
+        .font(.system(size: 11))
+        .foregroundStyle(Studio.secondary)
+        .lineLimit(2)
+      if journey.steps.isEmpty {
+        HStack(spacing: 8) {
+          ProgressView().controlSize(.mini)
+          Text(
+            journey.status == .ready
+              ? "Reading the current interface and choosing semantic actions."
+              : "Attaching to the selected running app."
+          )
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+        }
+      } else {
+        VStack(spacing: 8) {
+          ForEach(journey.steps) { result in
+            HStack(alignment: .top, spacing: 9) {
+              JourneyStepMark(status: result.status)
+              VStack(alignment: .leading, spacing: 2) {
+                Text(result.step.title).font(.system(size: 11, weight: .medium)).lineLimit(2)
+                if !result.detail.isEmpty {
+                  Text(result.detail).font(.system(size: 9.5)).foregroundStyle(Studio.secondary)
+                    .lineLimit(2)
+                }
+              }
+              Spacer(minLength: 0)
+            }
+          }
+        }
+      }
+      if let fingerprint = journey.currentFingerprint {
+        Text("Screen \(String(fingerprint.digest.prefix(10)))")
+          .font(.system(size: 9).monospaced())
+          .foregroundStyle(Studio.tertiary)
+          .help("Current automatically observed App Graph state")
+      }
+    }
+  }
+
+  private var completedCount: Int {
+    journey.steps.filter { $0.status == .passed }.count
+  }
+  private var progressLabel: String {
+    if journey.steps.isEmpty { return journey.status.rawValue.replacingOccurrences(of: "CurrentApp", with: "") }
+    return "\(completedCount)/\(journey.steps.count) · \(journey.status.rawValue)"
+  }
+  private var statusColor: Color {
+    switch journey.status {
+    case .passed: Studio.success
+    case .failed, .cancelled: Studio.warning
+    case .preparing, .ready, .running: Studio.accent
+    }
+  }
+}
+
+private struct JourneyStepMark: View {
+  let status: JourneyStepStatus
+
+  var body: some View {
+    Group {
+      switch status {
+      case .waiting:
+        Circle().stroke(Studio.tertiary, lineWidth: 1).frame(width: 11, height: 11)
+      case .running:
+        ProgressView().controlSize(.mini).frame(width: 11, height: 11)
+      case .passed:
+        Image(systemName: "checkmark.circle.fill").foregroundStyle(Studio.success)
+      case .failed:
+        Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Studio.warning)
+      }
+    }
+    .font(.system(size: 12, weight: .semibold))
+    .padding(.top, 1)
   }
 }
 
@@ -705,6 +806,25 @@ private struct AppStage: View {
             }
             .buttonStyle(.plain)
             .help("Choose whether Run starts the Expo development server")
+          }
+          if let journey = model.activeJourney {
+            let completed = journey.steps.filter { $0.status == .passed }.count
+            Label {
+              Text(
+                journey.steps.isEmpty
+                  ? "Agent testing"
+                  : "Agent testing \(completed)/\(journey.steps.count)"
+              )
+            } icon: {
+              Image(systemName: journey.status == .passed ? "checkmark.circle.fill" : "scope")
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(journey.status == .failed ? Studio.warning : Studio.accent)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Studio.accentSoft)
+            .clipShape(Capsule())
+            .help(journey.goal)
           }
           Spacer()
           Button(action: model.openSimulator) {

@@ -12,6 +12,8 @@ public actor RuntimeService {
   private let runner = ProcessRunner()
   private let devServerRunner = ProcessRunner()
   private let ledger = EvidenceLedger()
+  private let appGraph = AppGraph()
+  private let store: SQLiteStore?
   private let wda: WDAController
   private var cachedToolchainPreflight: ToolchainPreflight?
   private var cachedSimulatorRuntimes: [String: String] = [:]
@@ -23,7 +25,14 @@ public actor RuntimeService {
   private var devServerShouldStayRunning = false
   private var devServerRecoveryTask: Task<Void, Never>?
   private var lastDevelopmentLaunch: DevelopmentLaunchContext?
-  public init(workspace: URL, token: String) {
+  private var sessionConfiguration: RuntimeSessionConfiguration?
+  private var activeJourney: JourneyRecord?
+  private var runtimeEvents: [RuntimeEvent] = []
+  private var nextEventSequence = 1
+  private var lastBuiltGeneration: Int?
+  private var developmentServerPort = 8081
+
+  public init(workspace: URL, token: String, stateRoot: URL? = nil) {
     self.workspace = workspace.standardizedFileURL
     self.token = token
     let support =
@@ -33,6 +42,9 @@ public actor RuntimeService {
     wda = WDAController(
       stateRoot: support.appending(
         path: "IOSDevWorkbench/WebDriverAgent", directoryHint: .isDirectory))
+    store = try? SQLiteStore(
+      url: (stateRoot ?? support.appending(path: "IOSDevWorkbench/Runtime"))
+        .appending(path: "metadata.sqlite3"))
   }
 
   public func handle(_ request: RPCEnvelope, authenticated: inout Bool) async -> RPCEnvelope {
@@ -49,7 +61,19 @@ public actor RuntimeService {
       switch method {
       case "workspace.describe":
         return success(
-          request.id, .object(["root": .string(workspace.path), "writable": .bool(true)]))
+          request.id,
+          .object([
+            "root": .string(workspace.path),
+            "writable": .bool(sessionConfiguration?.intent.allowsSourceWrites ?? true),
+            "intent": sessionConfiguration.flatMap { try? jsonValue($0.intent) } ?? .null,
+            "message": .string("Using the host-selected workspace and runtime policy."),
+          ]))
+      case "session.configure":
+        return await configureSession(request)
+      case "session.status":
+        return success(request.id, await sessionStatus())
+      case "runtime.events":
+        return success(request.id, runtimeEventPage(after: request.params?["after"]?.numberValue))
       case "workspace.mutated":
         return success(request.id, .object(["generation": .number(Double(await ledger.mutate()))]))
       case "toolchain.preflight":
@@ -123,7 +147,9 @@ public actor RuntimeService {
           make: { AppleCommandBuilder.resetAppData(simctl: $0, udid: udid, bundleID: bundleID) },
           evidenceKind: .runtimeLog)
       case "screenshot.capture":
-        guard let udid = request.params?["udid"]?.stringValue else {
+        guard let udid = request.params?["udid"]?.stringValue
+          ?? sessionConfiguration?.destination?.udid
+        else {
           return failure(request.id, -32602, "udid is required")
         }
         return await captureStableScreenshot(request, udid: udid)
@@ -150,6 +176,9 @@ public actor RuntimeService {
         return success(request.id, try jsonValue(await ledger.allEvidence()))
       case "verification.submit":
         return await submitVerification(request)
+      case "journey.run": return await runJourney(request)
+      case "journey.status": return await journeyStatus(request)
+      case "journey.cancel": return await cancelJourney(request)
       case "ui.snapshot": return await uiSnapshot(request)
       case "ui.prepare": return await uiPrepare(request)
       case "ui.find": return await uiFind(request)
@@ -157,10 +186,379 @@ public actor RuntimeService {
       case "ui.wait": return await uiWait(request)
       case "ui.assert": return await uiAssert(request)
       case "ui.navigate":
-        return failure(request.id, -32081, "No currently valid App Graph path is available")
+        return await uiNavigate(request)
       default: return failure(request.id, -32601, "Unknown runtime method: \(method)")
       }
     } catch { return failure(request.id, -32603, error.localizedDescription) }
+  }
+
+  private func configureSession(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let params = request.params else {
+      return failure(request.id, -32602, "A host session configuration is required")
+    }
+    do {
+      let configuration: RuntimeSessionConfiguration = try decode(params)
+      sessionConfiguration = configuration
+      if let destination = configuration.destination {
+        cachedSimulatorRuntimes[destination.udid] = destination.runtime
+      }
+      if let target = configuration.target { lastLaunchedBundleID = target.bundleID }
+      if let snapshot = try await store?.appGraph(key: configuration.buildFingerprint) {
+        await appGraph.replace(with: snapshot)
+      } else {
+        await appGraph.replace(with: .init())
+      }
+      emit(
+        .sessionConfigured,
+        message: "\(configuration.intent.kind.rawValue) · \(configuration.scheme)",
+        target: configuration.target, destinationUDID: configuration.destination?.udid)
+      return success(
+        request.id,
+        .object([
+          "configured": .bool(true), "intent": try jsonValue(configuration.intent),
+          "message": .string("Host testing policy configured."),
+        ]))
+    } catch {
+      return failure(request.id, -32602, "Invalid host session configuration: \(error)")
+    }
+  }
+
+  private func sessionStatus() async -> JSONValue {
+    .object([
+      "configured": .bool(sessionConfiguration != nil),
+      "configuration": sessionConfiguration.flatMap { try? jsonValue($0) } ?? .null,
+      "target": sessionConfiguration?.target.flatMap { try? jsonValue($0) } ?? .null,
+      "journey": activeJourney.flatMap { try? jsonValue($0) } ?? .null,
+      "developmentServerPort": .number(Double(developmentServerPort)),
+      "message": .string(activeJourney.map { "Journey \($0.status.rawValue)." } ?? "Session ready."),
+    ])
+  }
+
+  private func runtimeEventPage(after rawSequence: Double?) -> JSONValue {
+    let after = Int(rawSequence ?? 0)
+    let values = runtimeEvents.filter { $0.sequence > after }.prefix(200)
+    return .object([
+      "events": (try? jsonValue(Array(values))) ?? .array([]),
+      "latestSequence": .number(Double(runtimeEvents.last?.sequence ?? after)),
+    ])
+  }
+
+  private func emit(
+    _ kind: RuntimeEventKind, message: String, journeyID: UUID? = nil, stepID: String? = nil,
+    target: AppTarget? = nil, destinationUDID: String? = nil, artifactPath: String? = nil
+  ) {
+    runtimeEvents.append(
+      .init(
+        sequence: nextEventSequence, kind: kind, message: message, journeyID: journeyID,
+        stepID: stepID, target: target, destinationUDID: destinationUDID,
+        artifactPath: artifactPath))
+    nextEventSequence += 1
+    if runtimeEvents.count > 1_000 { runtimeEvents.removeFirst(runtimeEvents.count - 1_000) }
+  }
+
+  private func runJourney(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard var configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let goal = request.params?["goal"]?.stringValue?.trimmingCharacters(
+      in: .whitespacesAndNewlines) ?? ""
+    guard !goal.isEmpty else { return failure(request.id, -32602, "goal is required") }
+    let requestedID = request.params?["journeyID"]?.stringValue.flatMap(UUID.init(uuidString:))
+    if let requestedID, activeJourney?.id != requestedID {
+      return failure(request.id, -32084, "The requested journey is no longer active")
+    }
+    if requestedID == nil, let current = activeJourney,
+      [.passed, .failed, .cancelled].contains(current.status), current.goal != goal
+    {
+      activeJourney = nil
+    }
+    if activeJourney == nil {
+      activeJourney = JourneyRecord(goal: goal)
+      emit(.journeyStarted, message: goal, journeyID: activeJourney?.id)
+    }
+    guard var journey = activeJourney else {
+      return failure(request.id, -32084, "Could not create the journey")
+    }
+
+    do {
+      if configuration.intent.requiresRunningApp {
+        let ready = try await ensureJourneyApp(configuration: &configuration, journeyID: journey.id)
+        sessionConfiguration = configuration
+        journey.currentFingerprint = ready.fingerprint
+        journey.status = .ready
+        journey.updatedAt = Date()
+        activeJourney = journey
+        emit(
+          .journeyReady, message: "Attached to \(configuration.target?.bundleID ?? "app").",
+          journeyID: journey.id, target: configuration.target,
+          destinationUDID: configuration.destination?.udid)
+      }
+
+      let steps: [JourneyStep] = try decodeOptionalArray(request.params?["steps"]) ?? []
+      if !steps.isEmpty {
+        journey.status = .running
+        for step in steps {
+          if let existing = journey.steps.firstIndex(where: { $0.step.id == step.id }) {
+            journey.steps.remove(at: existing)
+          }
+          var result = JourneyStepResult(step: step, status: .running)
+          journey.steps.append(result)
+          activeJourney = journey
+          emit(
+            .journeyStepStarted, message: step.title, journeyID: journey.id, stepID: step.id)
+          result = await executeJourneyStep(step, journeyID: journey.id)
+          if let index = journey.steps.firstIndex(where: { $0.step.id == step.id }) {
+            journey.steps[index] = result
+          }
+          journey.updatedAt = Date()
+          activeJourney = journey
+          emit(
+            .journeyStepFinished, message: result.detail, journeyID: journey.id, stepID: step.id)
+          if result.status == .failed {
+            journey.status = .failed
+            activeJourney = journey
+            emit(.journeyFinished, message: "Journey failed at \(step.title).", journeyID: journey.id)
+            return success(request.id, try jsonValue(journey))
+          }
+        }
+      }
+
+      if request.params?["complete"]?.boolValue == true {
+        if configuration.intent.requiresRunningApp, let udid = configuration.destination?.udid {
+          _ = await captureStableScreenshot(
+            .init(id: nil, method: "screenshot.capture", params: .object(["udid": .string(udid)])),
+            udid: udid)
+        }
+        let requirement = VerificationRequirement(
+          codeChanged: configuration.intent.allowsSourceWrites,
+          uiChanged: configuration.intent.requiresRunningApp, testsChanged: false,
+          criterionIDs: journey.steps.compactMap { $0.step.criterionID })
+        let report = await ledger.verify(requirement)
+        journey.status = report.status == .verified ? .passed : .failed
+        journey.updatedAt = Date()
+        activeJourney = journey
+        emit(
+          .journeyFinished,
+          message: journey.status == .passed ? "Journey verified." : report.missing.joined(separator: "; "),
+          journeyID: journey.id)
+      }
+
+      let snapshot = configuration.intent.requiresRunningApp
+        ? await uiSnapshot(.init(id: nil, method: "ui.snapshot")) : nil
+      var result = (try? jsonValue(journey)) ?? .object([:])
+      if case .object(var object) = result {
+        object["message"] = .string(
+          journey.status == .ready
+            ? "App attached. Continue this journey with semantic steps; no rebuild was needed."
+            : "Journey \(journey.status.rawValue).")
+        if let currentUI = snapshot?.result { object["currentUI"] = currentUI }
+        result = .object(object)
+      }
+      return success(request.id, result)
+    } catch let error as RPCError {
+      journey.status = .failed
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(.journeyFinished, message: error.message, journeyID: journey.id)
+      return failure(request.id, error.code, error.message)
+    } catch {
+      journey.status = .failed
+      activeJourney = journey
+      emit(.journeyFinished, message: error.localizedDescription, journeyID: journey.id)
+      return failure(request.id, -32085, error.localizedDescription)
+    }
+  }
+
+  private func journeyStatus(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let journey = activeJourney else {
+      return failure(request.id, -32084, "No testing journey is active")
+    }
+    if let id = request.params?["journeyID"]?.stringValue, id != journey.id.uuidString {
+      return failure(request.id, -32084, "The requested journey is no longer active")
+    }
+    return success(request.id, try! jsonValue(journey))
+  }
+
+  private func cancelJourney(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard var journey = activeJourney else {
+      return success(
+        request.id,
+        .object(["cancelled": .bool(false), "message": .string("No journey was active.")]))
+    }
+    journey.status = .cancelled
+    journey.updatedAt = Date()
+    activeJourney = journey
+    emit(
+      .journeyFinished,
+      message: "Journey cancelled; the app and development server remain available.",
+      journeyID: journey.id)
+    return success(
+      request.id,
+      .object([
+        "cancelled": .bool(true),
+        "message": .string("Journey cancelled; the running app was preserved."),
+      ]))
+  }
+
+  private func ensureJourneyApp(
+    configuration: inout RuntimeSessionConfiguration, journeyID: UUID
+  ) async throws -> (elements: [UIElement], fingerprint: ScreenFingerprint) {
+    guard let destination = configuration.destination else {
+      throw RPCError(code: -32051, message: "Choose a Simulator before testing the app")
+    }
+    cachedSimulatorRuntimes[destination.udid] = destination.runtime
+    let booted = await bootSimulator(
+      .init(
+        id: nil, method: "simulator.boot",
+        params: .object(["udid": .string(destination.udid)])), udid: destination.udid)
+    if let error = booted.error { throw error }
+
+    let generation = await ledger.generation
+    let targetPathExists = configuration.target?.productPath.map {
+      FileManager.default.fileExists(atPath: $0.path)
+    } ?? false
+    let mutationNeedsBuild =
+      configuration.intent.allowsSourceWrites && lastBuiltGeneration != generation
+    let missingTargetNeedsBuild = configuration.target == nil || !targetPathExists
+    let shouldBuild = mutationNeedsBuild || missingTargetNeedsBuild
+
+    if !shouldBuild, let target = configuration.target {
+      lastLaunchedBundleID = target.bundleID
+      do {
+        let elements = try await wda.snapshot(
+          udid: destination.udid, runtime: destination.runtime, bundleID: target.bundleID,
+          preflight: await resolvedToolchainPreflight())
+        let fingerprint = ScreenFingerprint.make(
+          elements: elements, modal: false, navigationTitle: nil)
+        let attached = Evidence(
+          kind: .launch, status: .passed, taskGeneration: generation,
+          destinationUDID: destination.udid,
+          diagnosticSummary: "Attached to the compatible running app without rebuilding")
+        try await ledger.record(attached)
+        emit(
+          .sessionAttached, message: attached.diagnosticSummary, journeyID: journeyID,
+          target: target, destinationUDID: destination.udid)
+        return (elements, fingerprint)
+      } catch {
+        // The selected product is compatible but not currently automatable; relaunch it below.
+      }
+    }
+
+    if shouldBuild {
+      guard configuration.intent.buildPolicy != .never else {
+        throw RPCError(code: -32052, message: "No compatible built app is available for this session")
+      }
+      emit(.buildStarted, message: "Building because no compatible current app is available.", journeyID: journeyID)
+      let built = await build(.init(id: nil, method: "build.run"))
+      if let error = built.error { throw error }
+      guard built.result?["succeeded"]?.boolValue == true else {
+        throw RPCError(code: -32052, message: "The app build failed")
+      }
+      if let targetsValue = built.result?["appTargets"],
+        let targets: [AppTarget] = try? decode(targetsValue), let target = targets.first
+      {
+        configuration.target = target
+      }
+      lastBuiltGeneration = generation
+      emit(.buildFinished, message: "Build completed once for generation \(generation).", journeyID: journeyID)
+    }
+
+    if configuration.target == nil {
+      guard let container = configuration.container,
+        let destinationSpecifier = configuration.destinationSpecifier
+      else { throw RPCError(code: -32056, message: "The selected app target is unavailable") }
+      let discovered = await discoverTargets(
+        .init(
+          id: nil, method: "target.discover",
+          params: .object([
+            "container": .string(container), "scheme": .string(configuration.scheme),
+            "configuration": .string(configuration.configuration),
+            "destination": .string(destinationSpecifier),
+          ])))
+      if let error = discovered.error { throw error }
+      let targets: [AppTarget] = try decode(discovered.result ?? .array([]))
+      configuration.target = targets.first
+    }
+    guard let target = configuration.target, let productPath = target.productPath else {
+      throw RPCError(code: -32056, message: "The selected scheme produced no runnable app")
+    }
+    let launched = await installLaunch(
+      .init(
+        id: nil, method: "app.install_launch",
+        params: .object([
+          "udid": .string(destination.udid), "runtime": .string(destination.runtime),
+          "appPath": .string(productPath.path), "bundleID": .string(target.bundleID),
+          "startDevServer": .bool(configuration.startDevelopmentServer),
+          "useDevServer": .bool(configuration.startDevelopmentServer),
+        ])))
+    if let error = launched.error { throw error }
+    guard launched.result?["launched"]?.boolValue == true else {
+      throw RPCError(code: -32053, message: "The selected app did not launch")
+    }
+    emit(
+      .appLaunched, message: "\(target.bundleID) launched.", journeyID: journeyID,
+      target: target, destinationUDID: destination.udid)
+    let elements = try await wda.snapshot(
+      udid: destination.udid, runtime: destination.runtime, bundleID: target.bundleID,
+      preflight: await resolvedToolchainPreflight())
+    return (
+      elements,
+      ScreenFingerprint.make(elements: elements, modal: false, navigationTitle: nil)
+    )
+  }
+
+  private func executeJourneyStep(_ step: JourneyStep, journeyID: UUID) async -> JourneyStepResult {
+    var evidenceIDs: [UUID] = []
+    guard let selector = step.selector,
+      selector.identifier?.isEmpty == false || selector.label?.isEmpty == false
+    else {
+      return .init(step: step, status: .failed, detail: "A deterministic selector is required.")
+    }
+    let selectorValue = (try? jsonValue(selector)) ?? .object([:])
+    if let action = step.action {
+      var params: [String: JSONValue] = ["selector": selectorValue, "action": .string(action)]
+      if let text = step.text { params["text"] = .string(text) }
+      let performed = await uiPerform(
+        .init(id: nil, method: "ui.perform", params: .object(params)))
+      if let error = performed.error {
+        return .init(step: step, status: .failed, detail: error.message)
+      }
+      evidenceIDs += uuidValues(performed.result?["evidenceIDs"])
+    }
+    if step.assertVisible {
+      let asserted = await uiAssert(
+        .init(
+          id: nil, method: "ui.assert",
+          params: .object([
+            "selector": selectorValue,
+            "criterionID": .string(step.criterionID ?? step.id),
+          ])))
+      if let error = asserted.error {
+        return .init(step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
+      }
+      evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
+      guard asserted.result?["passed"]?.boolValue == true else {
+        return .init(
+          step: step, status: .failed, detail: "The final assertion did not pass.",
+          evidenceIDs: evidenceIDs)
+      }
+    }
+    return .init(
+      step: step, status: .passed, detail: "\(step.title) completed.",
+      evidenceIDs: evidenceIDs)
+  }
+
+  private func decode<T: Decodable>(_ value: JSONValue) throws -> T {
+    try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
+  }
+
+  private func decodeOptionalArray<T: Decodable>(_ value: JSONValue?) throws -> [T]? {
+    guard let value else { return nil }
+    return try decode(value)
+  }
+
+  private func uuidValues(_ value: JSONValue?) -> [UUID] {
+    value?.arrayValue?.compactMap { $0.stringValue.flatMap(UUID.init(uuidString:)) } ?? []
   }
 
   private func build(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -177,9 +575,10 @@ public actor RuntimeService {
     let preflight = await ToolchainDiscovery.preflight()
     guard let xcodebuild = preflight.xcodebuildPath, let developer = preflight.developerDirectory
     else { return failure(request.id, -32050, "Select full Xcode 26.5 before building") }
-    guard let container = request.params?["container"]?.stringValue,
-      let scheme = request.params?["scheme"]?.stringValue,
+    guard let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
+      let scheme = request.params?["scheme"]?.stringValue ?? sessionConfiguration?.scheme,
       let destination = request.params?["destination"]?.stringValue
+        ?? sessionConfiguration?.destinationSpecifier
     else { return failure(request.id, -32602, "container, scheme, and destination are required") }
     if let requirement = CocoaPodsSupport.missingInstallation(
       for: URL(fileURLWithPath: container))
@@ -211,13 +610,25 @@ public actor RuntimeService {
         artifactPaths: [resultPath.path],
         diagnosticSummary: outcome.succeeded ? "xcodebuild \(action) completed" : outcome.stderr)
       try await ledger.record(item)
+      var result: [String: JSONValue] = [
+        "succeeded": .bool(outcome.succeeded),
+        "evidenceIDs": .array([.string(item.id.uuidString)]),
+        "log": .string(outcome.stdout + outcome.stderr),
+        "message": .string(outcome.succeeded ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
+      ]
+      if outcome.succeeded, action == "build" {
+        let targets = try? await ToolchainDiscovery.appTargets(
+          container: URL(fileURLWithPath: container), scheme: scheme,
+          configuration: request.params?["configuration"]?.stringValue
+            ?? sessionConfiguration?.configuration ?? "Debug",
+          destination: destination, xcodebuild: URL(fileURLWithPath: xcodebuild),
+          developerDirectory: URL(fileURLWithPath: developer),
+          derivedData: workspace.appending(path: ".iosdev/cache/DerivedData"))
+        result["appTargets"] = (try? jsonValue(targets ?? [])) ?? .array([])
+      }
       return success(
         request.id,
-        .object([
-          "succeeded": .bool(outcome.succeeded),
-          "evidenceIDs": .array([.string(item.id.uuidString)]),
-          "log": .string(outcome.stdout + outcome.stderr),
-        ]))
+        .object(result))
     } catch { return failure(request.id, -32052, error.localizedDescription) }
   }
 
@@ -227,12 +638,14 @@ public actor RuntimeService {
       let elements = try await wda.snapshot(
         udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
         preflight: context.preflight)
+      let fingerprint = ScreenFingerprint.make(
+        elements: elements, modal: false, navigationTitle: nil)
       return success(
         request.id,
         .object([
           "elements": try jsonValue(elements),
-          "fingerprint": try jsonValue(
-            ScreenFingerprint.make(elements: elements, modal: false, navigationTitle: nil)),
+          "fingerprint": try jsonValue(fingerprint),
+          "message": .string("Captured \(elements.count) semantic UI elements."),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
       return failure(request.id, -32077, error.localizedDescription)
@@ -358,15 +771,32 @@ public actor RuntimeService {
         diagnosticSummary: "Deterministic \(action) using \(selectorSummary)",
         deterministic: true)
       try await ledger.record(item)
+      let beforeFingerprint = ScreenFingerprint.make(
+        elements: before, modal: false, navigationTitle: nil)
+      let afterFingerprint = ScreenFingerprint.make(
+        elements: after, modal: false, navigationTitle: nil)
+      if let selector = graphSelector(identifier: identifier, label: label, type: type) {
+        _ = await appGraph.observe(
+          from: beforeFingerprint, to: afterFingerprint, selector: selector,
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+        await persistAppGraph()
+      }
+      if var journey = activeJourney {
+        journey.currentFingerprint = afterFingerprint
+        journey.updatedAt = Date()
+        activeJourney = journey
+      }
+      emit(
+        .uiAction, message: item.diagnosticSummary, journeyID: activeJourney?.id,
+        destinationUDID: context.udid)
       return success(
         request.id,
         .object([
           "evidenceIDs": .array([.string(item.id.uuidString)]),
-          "beforeFingerprint": try jsonValue(
-            ScreenFingerprint.make(elements: before, modal: false, navigationTitle: nil)),
-          "afterFingerprint": try jsonValue(
-            ScreenFingerprint.make(elements: after, modal: false, navigationTitle: nil)),
+          "beforeFingerprint": try jsonValue(beforeFingerprint),
+          "afterFingerprint": try jsonValue(afterFingerprint),
           "elements": try jsonValue(after),
+          "message": .string(item.diagnosticSummary),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
       return failure(request.id, -32077, error.localizedDescription)
@@ -402,10 +832,14 @@ public actor RuntimeService {
           : (matches.isEmpty ? "Missing \(selectorSummary)" : "Ambiguous \(selectorSummary)"),
         deterministic: true)
       try await ledger.record(item)
+      emit(
+        .assertion, message: item.diagnosticSummary, journeyID: activeJourney?.id,
+        destinationUDID: context.udid)
       return success(
         request.id,
         .object([
           "passed": .bool(found), "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "message": .string(item.diagnosticSummary),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
       return failure(request.id, -32077, error.localizedDescription)
@@ -430,10 +864,14 @@ public actor RuntimeService {
   private func automationContext(_ request: RPCEnvelope) async throws -> (
     udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight
   ) {
-    guard let udid = request.params?["udid"]?.stringValue else {
+    guard let udid = request.params?["udid"]?.stringValue
+      ?? sessionConfiguration?.destination?.udid
+    else {
       throw RPCError(code: -32602, message: "udid is required")
     }
-    guard let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID else {
+    guard let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID
+      ?? sessionConfiguration?.target?.bundleID
+    else {
       throw RPCError(code: -32602, message: "bundleID is required before the first UI session")
     }
     let preflight = await resolvedToolchainPreflight()
@@ -477,6 +915,82 @@ public actor RuntimeService {
     params?["selector"]?["type"]?.stringValue ?? params?["type"]?.stringValue
   }
 
+  private func graphSelector(identifier: String?, label: String?, type: String?) -> ElementSelector? {
+    if let identifier, !identifier.isEmpty { return .accessibilityIdentifier(identifier) }
+    if let label, let type, !label.isEmpty, !type.isEmpty {
+      return .labelType(label: label, type: type)
+    }
+    return nil
+  }
+
+  private func selectorJSON(_ selector: ElementSelector) -> JSONValue? {
+    switch selector {
+    case .accessibilityIdentifier(let identifier):
+      return .object(["identifier": .string(identifier)])
+    case .labelType(let label, let type):
+      return .object(["label": .string(label), "type": .string(type)])
+    case .ancestor(let label, let type, let ancestorIdentifier):
+      return .object([
+        "label": .string(label), "type": .string(type),
+        "ancestorIdentifier": .string(ancestorIdentifier),
+      ])
+    case .hierarchyPath(let path): return .object(["path": .string(path)])
+    case .coordinate: return nil
+    }
+  }
+
+  private func persistAppGraph() async {
+    guard let configuration = sessionConfiguration, let store else { return }
+    let snapshot = await appGraph.codableSnapshot()
+    try? await store.saveAppGraph(snapshot, key: configuration.buildFingerprint)
+  }
+
+  private func uiNavigate(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let destinationDigest = request.params?["screen"]?.stringValue else {
+      return failure(request.id, -32602, "screen is required")
+    }
+    let currentResponse = await uiSnapshot(.init(id: nil, method: "ui.snapshot"))
+    if let error = currentResponse.error { return failure(request.id, error.code, error.message) }
+    guard let currentValue = currentResponse.result?["fingerprint"],
+      let current: ScreenFingerprint = try? decode(currentValue)
+    else { return failure(request.id, -32081, "Could not fingerprint the current app screen") }
+    let snapshot = await appGraph.codableSnapshot()
+    guard let destination = snapshot.nodes.first(where: { $0.id == destinationDigest })?.fingerprint,
+      let path = await appGraph.path(
+        from: current, to: destination,
+        build: sessionConfiguration?.buildFingerprint ?? "unknown")
+    else { return failure(request.id, -32081, "No currently valid App Graph path is available") }
+
+    for edge in path {
+      guard let selector = selectorJSON(edge.selector) else {
+        await appGraph.recordFailure(edge.id)
+        return failure(request.id, -32081, "The graph path contains a non-replayable action")
+      }
+      let performed = await uiPerform(
+        .init(
+          id: nil, method: "ui.perform",
+          params: .object(["selector": selector, "action": .string("tap")])))
+      if let error = performed.error {
+        await appGraph.recordFailure(edge.id)
+        await persistAppGraph()
+        return failure(request.id, error.code, "Graph replay failed: \(error.message)")
+      }
+      guard let afterValue = performed.result?["afterFingerprint"],
+        let after: ScreenFingerprint = try? decode(afterValue), after == edge.to
+      else {
+        await appGraph.recordFailure(edge.id)
+        await persistAppGraph()
+        return failure(request.id, -32081, "The app reached an unexpected screen during replay")
+      }
+    }
+    return success(
+      request.id,
+      .object([
+        "navigated": .bool(true), "edgeCount": .number(Double(path.count)),
+        "message": .string("Replayed \(path.count) deterministic App Graph actions."),
+      ]))
+  }
+
   private func selectorCoordinate(_ params: JSONValue?) -> (x: Double, y: Double)? {
     guard let x = params?["selector"]?["coordinate"]?["x"]?.numberValue,
       let y = params?["selector"]?["coordinate"]?["y"]?.numberValue
@@ -500,8 +1014,8 @@ public actor RuntimeService {
   }
 
   private func listTests(_ request: RPCEnvelope) async -> RPCEnvelope {
-    guard let container = request.params?["container"]?.stringValue,
-      let scheme = request.params?["scheme"]?.stringValue
+    guard let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
+      let scheme = request.params?["scheme"]?.stringValue ?? sessionConfiguration?.scheme
     else { return failure(request.id, -32602, "container and scheme are required") }
     let preflight = await resolvedToolchainPreflight()
     guard let path = preflight.xcodebuildPath, let developer = preflight.developerDirectory else {
@@ -523,8 +1037,10 @@ public actor RuntimeService {
   }
 
   private func queryLogs(_ request: RPCEnvelope) async -> RPCEnvelope {
-    guard let udid = request.params?["udid"]?.stringValue,
-      let process = request.params?["process"]?.stringValue, !process.isEmpty
+    guard let udid = request.params?["udid"]?.stringValue
+      ?? sessionConfiguration?.destination?.udid,
+      let process = request.params?["process"]?.stringValue
+        ?? sessionConfiguration?.target?.bundleID, !process.isEmpty
     else { return failure(request.id, -32602, "udid and process are required") }
     let requested = Int(request.params?["seconds"]?.numberValue ?? 300)
     let seconds = min(max(requested, 1), 3_600)
@@ -620,10 +1136,10 @@ public actor RuntimeService {
       let started = await startDevelopmentServer(request)
       if let error = started.error { return failure(request.id, error.code, error.message) }
     }
-    if shouldUseDevServer, !(await isDevelopmentServerReady(port: 8081)) {
+    if shouldUseDevServer, !(await isDevelopmentServerReady(port: developmentServerPort)) {
       return failure(
         request.id, -32099,
-        "Metro is not reachable on port 8081. Start the selected project's development server and try Run again."
+        "Metro is not reachable on leased port \(developmentServerPort)."
       )
     }
     let preflight = await resolvedToolchainPreflight()
@@ -644,7 +1160,7 @@ public actor RuntimeService {
       guard installed.succeeded else { return failure(request.id, -32053, installed.stderr) }
       if shouldUseDevServer {
         for command in AppleCommandBuilder.configureMetro(
-          simctl: simctl, udid: udid, bundleID: bundleID)
+          simctl: simctl, udid: udid, bundleID: bundleID, port: developmentServerPort)
         {
           let configured = try await runner.run(
             executable: command.executable, arguments: command.arguments,
@@ -658,7 +1174,9 @@ public actor RuntimeService {
       }
       let launchArguments =
         shouldUseDevServer
-        ? ["-RCT_jsLocation", "127.0.0.1:8081", "-RCT_enableDev", "YES"] : []
+        ? [
+          "-RCT_jsLocation", "127.0.0.1:\(developmentServerPort)", "-RCT_enableDev", "YES",
+        ] : []
       let launch = AppleCommandBuilder.launch(
         simctl: simctl, udid: udid, bundleID: bundleID, arguments: launchArguments)
       let launched = try await runner.run(
@@ -673,19 +1191,26 @@ public actor RuntimeService {
       if launched.succeeded, shouldUseDevServer {
         lastDevelopmentLaunch = .init(udid: udid, appPath: appPath, bundleID: bundleID)
       }
+      if launched.succeeded {
+        emit(
+          .appLaunched, message: "Launched \(bundleID) on \(udid).", target: sessionConfiguration?.target,
+          destinationUDID: udid)
+      }
       return success(
         request.id,
         .object([
           "launched": .bool(launched.succeeded),
           "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "developmentServerPort": .number(Double(developmentServerPort)),
+          "message": .string(launched.succeeded ? "Application launched." : "Application launch failed."),
         ]))
     } catch { return failure(request.id, -32053, error.localizedDescription) }
   }
 
   private func startDevelopmentServer(_ request: RPCEnvelope) async -> RPCEnvelope {
-    let port = Int(request.params?["port"]?.numberValue ?? 8081)
-    guard port == 8081 else {
-      return failure(request.id, -32602, "The public alpha currently supports Metro on port 8081")
+    var port = Int(request.params?["port"]?.numberValue ?? Double(developmentServerPort))
+    guard (1...65_535).contains(port) else {
+      return failure(request.id, -32602, "The development-server port is invalid")
     }
     guard let projectRoot = expoProjectRoot(from: request.params) else {
       return failure(request.id, -32096, "This workspace is not an Expo project")
@@ -699,23 +1224,33 @@ public actor RuntimeService {
     if await isDevelopmentServerReady(port: port) {
       if devServerTask == nil {
         let owner = await developmentServerOwnerWorkspace(port: port)
-        guard owner?.standardizedFileURL == projectRoot.standardizedFileURL else {
-          return failure(
-            request.id, -32099,
-            "Port 8081 is serving a different project\(owner.map { " at \($0.path)" } ?? "")")
+        if owner?.standardizedFileURL != projectRoot.standardizedFileURL {
+          guard let leased = await firstAvailableDevelopmentServerPort() else {
+            return failure(request.id, -32099, "No development-server port is available")
+          }
+          port = leased
         }
       }
-      return success(
-        request.id,
-        .object([
-          "running": .bool(true), "port": .number(Double(port)),
-          "managed": .bool(devServerTask != nil),
-          "detail": .string(
-            devServerTask == nil
-              ? "Reusing a development server already listening on port 8081"
-              : "Metro is ready for \(projectRoot.lastPathComponent)"),
-        ]))
+      if await isDevelopmentServerReady(port: port) {
+        developmentServerPort = port
+        return success(
+          request.id,
+          .object([
+            "running": .bool(true), "port": .number(Double(port)),
+            "managed": .bool(devServerTask != nil),
+            "detail": .string(
+              devServerTask == nil
+                ? "Reusing a development server on port \(port)"
+                : "Metro is ready for \(projectRoot.lastPathComponent)"),
+          ]))
+      }
+    } else if await developmentServerOwnerWorkspace(port: port) != nil {
+      guard let leased = await firstAvailableDevelopmentServerPort() else {
+        return failure(request.id, -32099, "No development-server port is available")
+      }
+      port = leased
     }
+    developmentServerPort = port
     guard let npm = npmExecutable else {
       return failure(request.id, -32097, "npm was not found; install Node.js and try again")
     }
@@ -763,12 +1298,14 @@ public actor RuntimeService {
   }
 
   private func developmentServerStatus() async -> JSONValue {
-    let ready = await isDevelopmentServerReady(port: 8081)
+    let ready = await isDevelopmentServerReady(port: developmentServerPort)
     return .object([
       "running": .bool(ready), "managed": .bool(devServerTask != nil),
-      "port": .number(8081),
+      "port": .number(Double(developmentServerPort)),
       "detail": .string(
-        ready ? "Metro is listening on port 8081" : "No Metro server is ready on port 8081"),
+        ready
+          ? "Metro is listening on port \(developmentServerPort)"
+          : "No Metro server is ready on port \(developmentServerPort)"),
     ])
   }
 
@@ -831,7 +1368,8 @@ public actor RuntimeService {
         .init(
           id: nil, method: "devserver.start",
           params: .object([
-            "projectPath": .string(projectRoot.path), "port": .number(8081),
+            "projectPath": .string(projectRoot.path),
+            "port": .number(Double(developmentServerPort)),
           ])))
       if restarted.error == nil {
         if let launch = lastDevelopmentLaunch {
@@ -923,6 +1461,17 @@ public actor RuntimeService {
         .first(where: { $0.hasPrefix("n/") })
     else { return nil }
     return URL(fileURLWithPath: String(path.dropFirst()))
+  }
+
+  private func firstAvailableDevelopmentServerPort() async -> Int? {
+    for port in 8082...8099 {
+      if !(await isDevelopmentServerReady(port: port)),
+        await developmentServerOwnerWorkspace(port: port) == nil
+      {
+        return port
+      }
+    }
+    return nil
   }
 
   private var npmExecutable: URL? {
@@ -1081,6 +1630,9 @@ public actor RuntimeService {
         kind: .screenshot, status: .passed, taskGeneration: await ledger.generation,
         destinationUDID: udid, artifactPaths: [output.path], diagnosticSummary: summary)
       try await ledger.record(item)
+      emit(
+        .screenshot, message: summary, journeyID: activeJourney?.id,
+        destinationUDID: udid, artifactPath: output.path)
       return success(
         request.id,
         .object([
@@ -1089,6 +1641,7 @@ public actor RuntimeService {
           "artifactPath": .string(output.path),
           "evidenceIDs": .array([.string(item.id.uuidString)]),
           "diagnostics": .string(summary),
+          "message": .string(summary),
         ]))
     } catch { return failure(request.id, -32054, error.localizedDescription) }
   }
