@@ -79,6 +79,58 @@ public struct ACPNewSession: Codable, Equatable, Sendable {
   }
 }
 
+/// A session-level selector exposed by an ACP agent, such as its model or
+/// reasoning/thought level. The protocol deliberately keeps these options
+/// agent-defined so clients can support every CLI without hard-coded adapters.
+public struct ACPConfigOptionValue: Codable, Equatable, Identifiable, Sendable {
+  public var value: String
+  public var name: String
+  public var description: String?
+
+  public var id: String { value }
+
+  public init(value: String, name: String, description: String? = nil) {
+    self.value = value
+    self.name = name
+    self.description = description
+  }
+}
+
+public struct ACPConfigOption: Codable, Equatable, Identifiable, Sendable {
+  public var id: String
+  public var name: String
+  public var description: String?
+  public var category: String?
+  public var type: String
+  public var currentValue: JSONValue?
+  public var options: [ACPConfigOptionValue]
+
+  public init(
+    id: String, name: String, description: String? = nil, category: String? = nil,
+    type: String = "select", currentValue: JSONValue? = nil,
+    options: [ACPConfigOptionValue] = []
+  ) {
+    self.id = id
+    self.name = name
+    self.description = description
+    self.category = category
+    self.type = type
+    self.currentValue = currentValue
+    self.options = options
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    name = try container.decode(String.self, forKey: .name)
+    description = try container.decodeIfPresent(String.self, forKey: .description)
+    category = try container.decodeIfPresent(String.self, forKey: .category)
+    type = try container.decodeIfPresent(String.self, forKey: .type) ?? "select"
+    currentValue = try container.decodeIfPresent(JSONValue.self, forKey: .currentValue)
+    options = try container.decodeIfPresent([ACPConfigOptionValue].self, forKey: .options) ?? []
+  }
+}
+
 public struct ACPContentBlock: Codable, Equatable, Sendable {
   public var type: String
   public var text: String
@@ -148,7 +200,9 @@ public actor ACPWorkspaceRequestHandler {
 }
 
 public enum ACPUpdateKind: String, Codable, Sendable {
-  case content, plan, toolCall, permission, mode, authentication, error, completed
+  case content, plan, toolCall, permission, mode
+  case configOptionUpdate = "config_option_update"
+  case authentication, error, completed
 }
 public struct ACPUpdate: Codable, Sendable {
   public var sessionID: String

@@ -484,32 +484,55 @@ private struct AgentPanel: View {
           .foregroundStyle(model.agentComposerBlocker == nil ? Studio.secondary : Studio.warning)
           .lineLimit(2)
 
-        HStack {
-          Menu {
-            if model.adapters.allSatisfy({ $0.executable == nil }) {
-              Text("No ACP-ready adapters detected")
+        VStack(alignment: .leading, spacing: 7) {
+          HStack {
+            Menu {
+              if model.adapters.allSatisfy({ $0.executable == nil }) {
+                Text("No ACP-ready adapters detected")
+              }
+              ForEach(model.adapters) { adapter in
+                Button(adapter.displayName) { model.selectedAdapterID = adapter.id }
+                  .disabled(adapter.executable == nil || model.hasAgentSession)
+              }
+            } label: {
+              HStack(spacing: 5) {
+                Text(agentLabel)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+              }
+              .font(.system(size: 11))
+              .foregroundStyle(Studio.secondary)
             }
-            ForEach(model.adapters) { adapter in
-              Button(adapter.displayName) { model.selectedAdapterID = adapter.id }
-                .disabled(adapter.executable == nil)
+            .menuStyle(.borderlessButton)
+            Spacer()
+            Button {
+              model.section = .settings
+            } label: {
+              Image(systemName: "gearshape").frame(width: 30, height: 30)
             }
-          } label: {
-            HStack(spacing: 5) {
-              Text(agentLabel)
-              Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-            }
-            .font(.system(size: 11))
-            .foregroundStyle(Studio.secondary)
+            .buttonStyle(.plain)
+            .foregroundStyle(Studio.accent)
           }
-          .menuStyle(.borderlessButton)
-          Spacer()
-          Button {
-            model.section = .settings
-          } label: {
-            Image(systemName: "gearshape").frame(width: 30, height: 30)
+
+          if model.agentModelOption != nil || model.agentReasoningOption != nil {
+            HStack(spacing: 6) {
+              if let option = model.agentModelOption {
+                AgentConfigPicker(
+                  option: option, title: "Model", value: model.agentModelLabel,
+                  symbol: "cpu")
+              }
+              if let option = model.agentReasoningOption {
+                AgentConfigPicker(
+                  option: option, title: "Reasoning", value: model.agentReasoningLabel,
+                  symbol: "brain.head.profile")
+              }
+              Spacer(minLength: 0)
+            }
+          } else if model.hasAgentSession {
+            Text("This CLI did not report model or reasoning controls.")
+              .font(.system(size: 9.5))
+              .foregroundStyle(Studio.tertiary)
+              .lineLimit(1)
           }
-          .buttonStyle(.plain)
-          .foregroundStyle(Studio.accent)
         }
       }
       .padding(16)
@@ -545,6 +568,53 @@ private struct AgentPanel: View {
     }
     return adapter.executable == nil
       ? "\(adapter.displayName) needs setup" : adapter.displayName
+  }
+}
+
+private struct AgentConfigPicker: View {
+  @EnvironmentObject var model: AppModel
+  let option: ACPConfigOption
+  let title: String
+  let value: String
+  let symbol: String
+
+  var body: some View {
+    Menu {
+      ForEach(option.options) { item in
+        Button {
+          model.setAgentConfigOption(option, value: item)
+        } label: {
+          HStack {
+            Text(item.name)
+            if isCurrent(item) {
+              Spacer()
+              Image(systemName: "checkmark")
+            }
+          }
+        }
+      }
+    } label: {
+      HStack(spacing: 5) {
+        Image(systemName: symbol)
+        Text(value)
+          .lineLimit(1)
+        Image(systemName: "chevron.down")
+          .font(.system(size: 7, weight: .semibold))
+      }
+      .font(.system(size: 9.5, weight: .medium))
+      .foregroundStyle(Studio.secondary)
+      .padding(.horizontal, 8)
+      .frame(height: 26)
+      .background(Studio.raised)
+      .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+    .menuStyle(.borderlessButton)
+    .help(option.description ?? "Choose the agent \(title.lowercased())")
+    .disabled(option.options.isEmpty || !model.hasAgentSession || model.isBusy)
+  }
+
+  private func isCurrent(_ item: ACPConfigOptionValue) -> Bool {
+    option.currentValue?.stringValue == item.value
   }
 }
 
@@ -585,8 +655,9 @@ private struct AppStage: View {
   var body: some View {
     GeometryReader { geometry in
       let fittedDeviceHeight = min(650, max(300, geometry.size.height - 132))
+      let previewViewportWidth = max(0, geometry.size.width - 58)
 
-      VStack(spacing: 0) {
+      VStack(alignment: .leading, spacing: 0) {
         HStack {
           Menu {
             ForEach(model.schemes, id: \.self) { scheme in
@@ -655,17 +726,18 @@ private struct AppStage: View {
         .frame(height: 52)
 
         HStack(spacing: 0) {
-          Studio.backdrop
-            .frame(width: 58)
           ScrollView([.horizontal, .vertical]) {
             DevicePreview(height: fittedDeviceHeight * previewZoom)
               .padding(.horizontal, 22)
               .padding(.vertical, 14)
               .frame(
-                minWidth: max(0, geometry.size.width - 116),
-                minHeight: max(0, geometry.size.height - 116))
+                minWidth: max(0, previewViewportWidth - 44),
+                minHeight: max(0, geometry.size.height - 116), alignment: .top)
           }
-          .scrollIndicators(.hidden)
+          .frame(
+            minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
+            maxHeight: .infinity)
+          .scrollIndicators(.automatic)
           .background(Studio.backdrop)
           .clipped()
           InteractionPalette()
@@ -821,6 +893,17 @@ private struct DevicePreview: View {
                     normalizedX: value.location.x / screen.size.width,
                     normalizedY: value.location.y / screen.size.height)
                 })
+              .highPriorityGesture(
+                DragGesture(minimumDistance: 14).onEnded { value in
+                  guard screen.size.width > 0, screen.size.height > 0 else { return }
+                  let moved = abs(value.translation.width) + abs(value.translation.height)
+                  guard moved >= 14 else { return }
+                  model.swipePreview(
+                    startX: value.startLocation.x / screen.size.width,
+                    startY: value.startLocation.y / screen.size.height,
+                    endX: value.location.x / screen.size.width,
+                    endY: value.location.y / screen.size.height)
+                })
           }
           .help(previewInteractionHelp)
           if let tap = model.previewTapFeedback {
@@ -915,7 +998,7 @@ private struct DevicePreview: View {
 
   private var previewInteractionHelp: String {
     model.isSemanticAutomationReady
-      ? "Click for a remote tap. Use Live Simulator for native real-time interaction. Manual taps do not count as deterministic verification."
+      ? "Click to tap or drag to scroll the remote preview. Use Live Simulator for native real-time interaction. Manual gestures do not count as verification evidence."
       : "Click to set up WebDriverAgent interaction."
   }
 
@@ -939,6 +1022,7 @@ private struct DevicePreview: View {
 private struct InteractionPalette: View {
   @EnvironmentObject var model: AppModel
   @State private var showInspector = false
+  @State private var showScreenshot = false
   @State private var showAllHierarchyNodes = false
 
   var body: some View {
@@ -956,9 +1040,13 @@ private struct InteractionPalette: View {
       .disabled(!hasDeterministicSelection)
 
       paletteButton("camera", help: "Capture current Simulator screenshot") {
+        showScreenshot = true
         model.captureCurrentScreenshot()
       }
       .disabled(model.selectedTarget == nil)
+      .popover(isPresented: $showScreenshot, arrowEdge: .trailing) {
+        CapturedScreenshotView()
+      }
 
       paletteButton("checkmark.seal", help: "Assert that the selected element is present") {
         model.assertSelectedElement()
@@ -1113,6 +1201,52 @@ private struct InteractionPalette: View {
   }
 }
 
+private struct CapturedScreenshotView: View {
+  @EnvironmentObject var model: AppModel
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Latest screenshot")
+            .font(.system(size: 13, weight: .semibold))
+          Text("Stable Simulator capture")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        if let path = model.currentScreenshot?.lastPathComponent {
+          Text(path)
+            .font(.system(size: 9).monospaced())
+            .foregroundStyle(Studio.tertiary)
+            .lineLimit(1)
+        }
+      }
+      if let image = model.currentScreenshotImage {
+        Image(nsImage: image)
+          .resizable()
+          .scaledToFit()
+          .frame(width: 280, height: 460)
+          .background(Studio.raised)
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      } else {
+        VStack(spacing: 10) {
+          ProgressView()
+          Text("Capturing the Simulator frame…")
+            .font(.system(size: 11))
+            .foregroundStyle(Studio.secondary)
+        }
+        .frame(width: 280, height: 460)
+        .background(Studio.raised)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      }
+    }
+    .padding(16)
+    .frame(width: 312)
+    .background(Studio.surface)
+  }
+}
+
 private struct VerificationPanel: View {
   @EnvironmentObject var model: AppModel
 
@@ -1152,28 +1286,38 @@ private struct VerificationPanel: View {
 
       VStack(spacing: 0) {
         HStack {
-          Text("Evidence").font(.system(size: 12, weight: .semibold))
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Evidence").font(.system(size: 12, weight: .semibold))
+            Text("Machine-recorded proof · manual preview actions are excluded")
+              .font(.system(size: 9.5))
+              .foregroundStyle(Studio.secondary)
+              .lineLimit(1)
+          }
           Spacer()
-          Text(model.evidence.isEmpty ? "No artifacts" : "\(model.evidence.count) artifacts")
+          Text(model.verificationEvidence.isEmpty ? "No proof" : "\(model.verificationEvidence.count) artifacts")
             .font(.system(size: 11)).foregroundStyle(Studio.accent)
         }
         .padding(.horizontal, 20)
-        .frame(height: 48)
+        .frame(height: 58)
         Divider().overlay(Studio.separator)
-        if model.evidence.isEmpty {
+        if model.verificationEvidence.isEmpty {
           VStack(spacing: 10) {
             Image(systemName: "checklist.unchecked").font(.system(size: 24, weight: .light))
               .foregroundStyle(Studio.tertiary)
-            Text("Evidence appears after real tool operations.")
+            Text(
+              "Manual preview actions are exploratory, not verification proof. Capture a stable screenshot or run an assertion."
+            )
               .font(.system(size: 11)).foregroundStyle(Studio.secondary)
+              .multilineTextAlignment(.center)
+              .frame(maxWidth: 280)
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
           ScrollView {
             LazyVStack(spacing: 0) {
-              ForEach(model.evidence.suffix(6)) { evidence in
+              ForEach(Array(model.verificationEvidence.reversed())) { evidence in
                 EvidenceRow(evidence: evidence)
-                if evidence.id != model.evidence.suffix(6).last?.id {
+                if evidence.id != model.verificationEvidence.first?.id {
                   Divider().overlay(Studio.separator)
                 }
               }

@@ -166,6 +166,26 @@ private struct PreviewTapRequest {
   let sessionID: UUID
 }
 
+private struct PreviewSwipeRequest {
+  let startX: Double
+  let startY: Double
+  let endX: Double
+  let endY: Double
+  let sessionID: UUID
+}
+
+private enum PreviewInteractionRequest {
+  case tap(PreviewTapRequest)
+  case swipe(PreviewSwipeRequest)
+
+  var sessionID: UUID {
+    switch self {
+    case .tap(let request): request.sessionID
+    case .swipe(let request): request.sessionID
+    }
+  }
+}
+
 @MainActor
 public final class AppModel: ObservableObject {
   @Published var section: PrimarySection = .agent
@@ -208,6 +228,7 @@ public final class AppModel: ObservableObject {
   @Published var appOperation: AppOperation = .idle
   @Published var adapters: [DetectedAdapter] = []
   @Published var selectedAdapterID = ""
+  @Published var agentConfigOptions: [ACPConfigOption] = []
   @Published var wdaStatus = WDAStatus(
     availability: .unsupported, title: "Checking semantic UI automation",
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
@@ -228,6 +249,9 @@ public final class AppModel: ObservableObject {
   }
   var canRun: Bool { canBuild && taskWorkspace != nil }
   var changedFileCount: Int { proposedChanges.count }
+  var verificationEvidence: [Evidence] {
+    evidence.filter { $0.kind != .uiAction }
+  }
   var isSemanticAutomationReady: Bool { wdaStatus.availability == .ready }
   var meaningfulHierarchyElements: [UIElement] {
     UIHierarchyInspector.meaningfulElements(from: hierarchyElements)
@@ -258,9 +282,34 @@ public final class AppModel: ObservableObject {
     }
     return nil
   }
+  var hasAgentSession: Bool { activeACPSessionID != nil }
   var canSendAgentPrompt: Bool {
     !taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && agentComposerBlocker == nil && !isBusy
+  }
+  var agentModelOption: ACPConfigOption? {
+    agentConfigOptions.first { option in
+      option.category?.lowercased() == "model"
+        || option.id.localizedCaseInsensitiveContains("model")
+        || option.name.localizedCaseInsensitiveContains("model")
+    }
+  }
+  var agentReasoningOption: ACPConfigOption? {
+    agentConfigOptions.first { option in
+      let category = option.category?.lowercased() ?? ""
+      let id = option.id.lowercased()
+      let name = option.name.lowercased()
+      return category == "thought_level"
+        || id.contains("reason") || id.contains("effort") || id.contains("thinking")
+        || id.contains("thought") || name.contains("reason") || name.contains("effort")
+        || name.contains("thinking") || name.contains("thought")
+    }
+  }
+  var agentModelLabel: String {
+    agentConfigValueLabel(for: agentModelOption) ?? "Model not reported"
+  }
+  var agentReasoningLabel: String {
+    agentConfigValueLabel(for: agentReasoningOption) ?? "Reasoning not reported"
   }
 
   private var baseline: BaselineManifest?
@@ -295,7 +344,7 @@ public final class AppModel: ObservableObject {
   private var agentMessageFlushTask: Task<Void, Never>?
   private var agentToolContexts: [String: AgentToolContext] = [:]
   private var agentToolTimelineIDs: [String: UUID] = [:]
-  private var pendingPreviewTaps: [PreviewTapRequest] = []
+  private var pendingPreviewInteractions: [PreviewInteractionRequest] = []
   private var previewTapWorker: Task<Void, Never>?
   private var previewWarmupTask: Task<Void, Never>?
   private var previewFeedbackTask: Task<Void, Never>?
@@ -357,6 +406,7 @@ public final class AppModel: ObservableObject {
     activeACPClient?.cancel()
     activeACPClient = nil
     activeACPSessionID = nil
+    agentConfigOptions = []
     resolveAgentPermission(optionID: nil)
     resetAgentPresentation()
     repository = openedRepository
@@ -712,6 +762,27 @@ public final class AppModel: ObservableObject {
     }
   }
 
+  func setAgentConfigOption(_ option: ACPConfigOption, value: ACPConfigOptionValue) {
+    guard let client = activeACPClient, let sessionID = activeACPSessionID else {
+      notice = "Model and reasoning controls become available after the agent session connects."
+      return
+    }
+    Task {
+      do {
+        let result = try await client.request(
+          method: "session/set_config_option",
+          params: .object([
+            "sessionId": .string(sessionID),
+            "configId": .string(option.id),
+            "value": .string(value.value),
+          ]))
+        updateAgentConfigOptions(result.result?["configOptions"])
+      } catch {
+        notice = "Could not update \(option.name.lowercased()): \(error.localizedDescription)"
+      }
+    }
+  }
+
   func build() {
     guard canBuild else {
       notice = preflight?.issues.joined(separator: "\n") ?? "Choose a scheme and simulator first."
@@ -975,39 +1046,82 @@ public final class AppModel: ObservableObject {
       guard !Task.isCancelled, previewTapFeedback?.id == feedback.id else { return }
       previewTapFeedback = nil
     }
-    pendingPreviewTaps.append(
-      PreviewTapRequest(x: x, y: y, sessionID: previewSessionID))
+    pendingPreviewInteractions.append(
+      .tap(PreviewTapRequest(x: x, y: y, sessionID: previewSessionID)))
     previewInteractionState = .sending
     guard previewTapWorker == nil else { return }
-    previewTapWorker = Task { await processPreviewTaps(destination: destination, target: target) }
+    previewTapWorker = Task {
+      await processPreviewInteractions(destination: destination, target: target)
+    }
   }
 
-  private func processPreviewTaps(destination: Destination, target: AppTarget) async {
+  func swipePreview(
+    startX: Double, startY: Double, endX: Double, endY: Double
+  ) {
+    guard let destination = selectedDestination, let target = selectedTarget else {
+      notice = "Build and run the app before interacting with its preview."
+      return
+    }
+    guard wdaStatus.availability == .ready else {
+      if wdaStatus.availability == .setupRequired {
+        setupWebDriverAgent()
+      } else {
+        notice = wdaStatus.detail
+      }
+      return
+    }
+    guard !isBusy else { return }
+    pendingPreviewInteractions.append(
+      .swipe(
+        PreviewSwipeRequest(
+          startX: min(max(startX, 0), 1), startY: min(max(startY, 0), 1),
+          endX: min(max(endX, 0), 1), endY: min(max(endY, 0), 1),
+          sessionID: previewSessionID)))
+    previewInteractionState = .sending
+    guard previewTapWorker == nil else { return }
+    previewTapWorker = Task {
+      await processPreviewInteractions(destination: destination, target: target)
+    }
+  }
+
+  private func processPreviewInteractions(destination: Destination, target: AppTarget) async {
     do {
       try await ensureRuntime()
-      while let request = pendingPreviewTaps.first {
-        pendingPreviewTaps.removeFirst()
+      while let request = pendingPreviewInteractions.first {
+        pendingPreviewInteractions.removeFirst()
         guard request.sessionID == previewSessionID,
           selectedDestinationID == destination.udid,
           selectedTarget?.bundleID == target.bundleID
         else { continue }
 
         let started = DispatchTime.now().uptimeNanoseconds
+        let action: String
+        let coordinate: JSONValue
+        switch request {
+        case .tap(let tap):
+          action = "tap"
+          coordinate = .object([
+            "x": .number(tap.x), "y": .number(tap.y),
+          ])
+        case .swipe(let swipe):
+          action = "swipe"
+          coordinate = .object([
+            "startX": .number(swipe.startX), "startY": .number(swipe.startY),
+            "endX": .number(swipe.endX), "endY": .number(swipe.endY),
+            "durationMS": .number(350),
+          ])
+        }
         _ = try await runtime.request(
           method: "ui.perform",
           params: .object([
             "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
-            "selector": .object([
-              "coordinate": .object([
-                "x": .number(request.x), "y": .number(request.y),
-              ])
-            ]),
-            "action": .string("tap"),
+            "selector": .object(["coordinate": coordinate]),
+            "action": .string(action),
           ]))
 
-        // Rapid taps are delivered without waiting for an intermediate screenshot. Once the
+        // Rapid gestures are delivered without waiting for an intermediate screenshot. Once the
         // queue drains, one cheap frame replaces the preview without running verification.
-        guard pendingPreviewTaps.isEmpty else { continue }
+        guard pendingPreviewInteractions.isEmpty else { continue }
         try? await Task.sleep(for: .milliseconds(80))
         let frame = try await runtime.request(
           method: "preview.capture",
@@ -1031,12 +1145,12 @@ public final class AppModel: ObservableObject {
       }
     }
     previewTapWorker = nil
-    if !pendingPreviewTaps.isEmpty, let destination = selectedDestination,
+    if !pendingPreviewInteractions.isEmpty, let destination = selectedDestination,
       let target = selectedTarget
     {
       previewInteractionState = .sending
       previewTapWorker = Task {
-        await processPreviewTaps(destination: destination, target: target)
+        await processPreviewInteractions(destination: destination, target: target)
       }
     }
   }
@@ -1076,7 +1190,7 @@ public final class AppModel: ObservableObject {
     previewTapWorker = nil
     previewWarmupTask = nil
     previewFeedbackTask = nil
-    pendingPreviewTaps = []
+    pendingPreviewInteractions = []
     previewTapFeedback = nil
     previewLatencyMS = nil
     previewSessionID = UUID()
@@ -1110,7 +1224,14 @@ public final class AppModel: ObservableObject {
   }
 
   func captureCurrentScreenshot() {
-    Task { await captureScreenshot() }
+    status = "Capturing screenshot"
+    Task {
+      if await captureScreenshot() {
+        status = "Screenshot captured"
+      } else {
+        status = "Screenshot failed"
+      }
+    }
   }
 
   private func deterministicSelector(for element: UIElement) -> JSONValue? {
@@ -1169,6 +1290,7 @@ public final class AppModel: ObservableObject {
         activeACPClient?.cancel()
         activeACPClient = nil
         activeACPSessionID = nil
+        agentConfigOptions = []
         resolveAgentPermission(optionID: nil)
         resetAgentPresentation()
         await runtime.stop()
@@ -1567,6 +1689,7 @@ public final class AppModel: ObservableObject {
     guard let sessionID = session.result?["sessionId"]?.stringValue else {
       throw RPCError(code: -32092, message: "The ACP agent did not return a session ID")
     }
+    updateAgentConfigOptions(session.result?["configOptions"])
     activeACPSessionID = sessionID
     status = "Agent working"
     timeline.append(
@@ -1618,6 +1741,8 @@ public final class AppModel: ObservableObject {
     case "plan":
       finishAgentMessage()
       consumeAgentPlan(update)
+    case "config_option_update":
+      updateAgentConfigOptions(update["configOptions"])
     default: break
     }
   }
@@ -1921,9 +2046,32 @@ public final class AppModel: ObservableObject {
     agentMessageBuffer = ""
     agentToolContexts = [:]
     agentToolTimelineIDs = [:]
+    agentConfigOptions = []
     persistentPermissionChoices = [:]
     pendingPermissionFingerprint = nil
     didRecordRoutineTestingPermission = false
+  }
+
+  private func updateAgentConfigOptions(_ value: JSONValue?) {
+    guard let values = value?.arrayValue else {
+      agentConfigOptions = []
+      return
+    }
+    agentConfigOptions = values.compactMap { value in
+      guard let data = try? JSONEncoder().encode(value) else { return nil }
+      return try? JSONDecoder().decode(ACPConfigOption.self, from: data)
+    }
+  }
+
+  private func agentConfigValueLabel(for option: ACPConfigOption?) -> String? {
+    guard let option, let currentValue = option.currentValue else { return nil }
+    switch currentValue {
+    case .string(let value):
+      return option.options.first(where: { $0.value == value })?.name ?? value
+    case .bool(let value): return value ? "On" : "Off"
+    case .number(let value): return String(value)
+    case .object, .array, .null: return nil
+    }
   }
 
   private var selectedAgentDisplayName: String {
@@ -2183,17 +2331,27 @@ public final class AppModel: ObservableObject {
     isBusy = false
   }
 
-  private func captureScreenshot(settleDelayMS: Int = 0) async {
-    guard let destination = selectedDestination else { return }
+  @discardableResult
+  private func captureScreenshot(settleDelayMS: Int = 0) async -> Bool {
+    guard let destination = selectedDestination else { return false }
     do {
-      _ = try await runtime.request(
+      let result = try await runtime.request(
         method: "screenshot.capture",
         params: .object([
           "udid": .string(destination.udid),
           "settleDelayMS": .number(Double(settleDelayMS)),
         ]))
+      // The runtime returns the final artifact path. Present it immediately so
+      // a manual capture is visible even before the evidence refresh completes.
+      if let path = result["artifactPath"]?.stringValue {
+        setCurrentScreenshot(URL(fileURLWithPath: path))
+      }
       await refreshEvidence()
-    } catch { notice = error.localizedDescription }
+      return result["succeeded"]?.boolValue != false
+    } catch {
+      notice = error.localizedDescription
+      return false
+    }
   }
 
   private func refreshEvidence() async {

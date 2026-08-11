@@ -28,7 +28,7 @@ flowchart LR
 4. Every client connection authenticates with its task token before other calls.
 5. Applying checks the current original entry against the exact baseline manifest. A mismatch is a conflict, never an overwrite.
 6. Evidence has a mutation generation. Older evidence is stale.
-7. Coordinate actions are nondeterministic and cannot satisfy UI verification.
+7. Coordinate actions are exploratory, nondeterministic, and are not verification artifacts; semantic selectors and assertions remain machine-verifiable.
 8. App Graph edges are observed, confidence-scored, build-scoped, deterministic, and invalidated on mismatch.
 9. Credential ownership remains with the selected agent. Diagnostics are explicitly exported and redacted.
 

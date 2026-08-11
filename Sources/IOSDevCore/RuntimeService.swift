@@ -284,9 +284,10 @@ public actor RuntimeService {
       let label = selectorLabel(request.params)
       let type = selectorType(request.params)
       let coordinate = selectorCoordinate(request.params)
-      guard identifier != nil || label != nil || coordinate != nil else {
+      let swipe = selectorSwipe(request.params)
+      guard identifier != nil || label != nil || coordinate != nil || swipe != nil else {
         return failure(
-          request.id, -32602, "selector identifier, label, or coordinate is required")
+          request.id, -32602, "selector identifier, label, or coordinate gesture is required")
       }
       let context = try await automationContext(request)
       if let coordinate {
@@ -296,17 +297,19 @@ public actor RuntimeService {
         try await wda.performCoordinateTap(
           udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
           normalizedX: coordinate.x, normalizedY: coordinate.y, preflight: context.preflight)
-        let item = Evidence(
-          kind: .uiAction, status: .passed, taskGeneration: await ledger.generation,
-          destinationUDID: context.udid,
-          diagnosticSummary: String(
-            format: "Manual coordinate tap at %.1f%%, %.1f%%", coordinate.x * 100,
-            coordinate.y * 100),
-          deterministic: false)
-        try await ledger.record(item)
-        return success(
-          request.id,
-          .object(["evidenceIDs": .array([.string(item.id.uuidString)])]))
+        // Coordinate gestures are exploratory control, not verification proof.
+        // The preview footer and activity state are the user-facing trace for them.
+        return success(request.id, .object(["deterministic": .bool(false)]))
+      }
+      if let swipe {
+        guard action == "swipe" else {
+          return failure(request.id, -32602, "Coordinate gestures support swipe only")
+        }
+        try await wda.performCoordinateSwipe(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          startX: swipe.startX, startY: swipe.startY, endX: swipe.endX, endY: swipe.endY,
+          durationMS: swipe.durationMS, preflight: context.preflight)
+        return success(request.id, .object(["deterministic": .bool(false)]))
       }
       let before = try await wda.snapshot(
         udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
@@ -462,6 +465,21 @@ public actor RuntimeService {
       let y = params?["selector"]?["coordinate"]?["y"]?.numberValue
     else { return nil }
     return (min(max(x, 0), 1), min(max(y, 0), 1))
+  }
+
+  private func selectorSwipe(_ params: JSONValue?) -> (
+    startX: Double, startY: Double, endX: Double, endY: Double, durationMS: Int
+  )? {
+    guard let coordinate = params?["selector"]?["coordinate"],
+      let startX = coordinate["startX"]?.numberValue,
+      let startY = coordinate["startY"]?.numberValue,
+      let endX = coordinate["endX"]?.numberValue,
+      let endY = coordinate["endY"]?.numberValue
+    else { return nil }
+    let durationMS = Int(coordinate["durationMS"]?.numberValue ?? 350)
+    return (
+      min(max(startX, 0), 1), min(max(startY, 0), 1), min(max(endX, 0), 1),
+      min(max(endY, 0), 1), durationMS)
   }
 
   private func listTests(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -1048,6 +1066,7 @@ public actor RuntimeService {
         .object([
           "succeeded": .bool(true), "stable": .bool(stable),
           "frames": .number(Double(frameCount)),
+          "artifactPath": .string(output.path),
           "evidenceIDs": .array([.string(item.id.uuidString)]),
           "diagnostics": .string(summary),
         ]))

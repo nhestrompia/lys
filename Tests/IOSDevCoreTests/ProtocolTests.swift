@@ -47,6 +47,34 @@ import Testing
     ]))
 }
 
+@Test func acpSessionConfigOptionsExposeModelAndReasoningValues() throws {
+  let payload: JSONValue = .array([
+    .object([
+      "id": .string("model"), "name": .string("Model"), "category": .string("model"),
+      "type": .string("select"), "currentValue": .string("model-a"),
+      "options": .array([
+        .object(["value": .string("model-a"), "name": .string("Model A")]),
+        .object(["value": .string("model-b"), "name": .string("Model B")]),
+      ]),
+    ]),
+    .object([
+      "id": .string("reasoning_effort"), "name": .string("Reasoning effort"),
+      "category": .string("thought_level"), "type": .string("select"),
+      "currentValue": .string("high"),
+      "options": .array([
+        .object(["value": .string("low"), "name": .string("Low")]),
+        .object(["value": .string("high"), "name": .string("High")]),
+      ]),
+    ]),
+  ])
+  let data = try JSONEncoder().encode(payload)
+  let options = try JSONDecoder().decode([ACPConfigOption].self, from: data)
+  #expect(options.count == 2)
+  #expect(options.first?.category == "model")
+  #expect(options.first?.currentValue == .string("model-a"))
+  #expect(options.last?.options.last?.name == "High")
+}
+
 @Test func acpWorkspaceRequestsStayInsideWorktreeAndTrackMutations() async throws {
   let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

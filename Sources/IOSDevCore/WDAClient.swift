@@ -109,20 +109,7 @@ public actor WDAController {
     try await ensureSession(
       udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
     guard let sessionID else { throw RPCError(code: -32077, message: "WDA session is missing") }
-    let windowSize: (width: Double, height: Double)
-    if let cachedWindowSize {
-      windowSize = cachedWindowSize
-    } else {
-      let response = try await request(path: "/session/\(sessionID)/window/rect")
-      guard let value = response["value"] as? [String: Any],
-        let width = numeric(value["width"]), let height = numeric(value["height"]),
-        width > 0, height > 0
-      else {
-        throw RPCError(code: -32077, message: "WDA returned an invalid Simulator window size")
-      }
-      windowSize = (width, height)
-      cachedWindowSize = windowSize
-    }
+    let windowSize = try await resolveWindowSize(for: sessionID)
     let point = WDANormalizedPoint(x: normalizedX, y: normalizedY).scaled(
       width: windowSize.width, height: windowSize.height)
     _ = try await request(
@@ -144,6 +131,58 @@ public actor WDAController {
           ]
         ]
       ])
+  }
+
+  public func performCoordinateSwipe(
+    udid: String, runtime: String, bundleID: String,
+    startX: Double, startY: Double, endX: Double, endY: Double,
+    durationMS: Int = 350, preflight: ToolchainPreflight
+  ) async throws {
+    try await ensureSession(
+      udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
+    guard let sessionID else { throw RPCError(code: -32077, message: "WDA session is missing") }
+    let windowSize = try await resolveWindowSize(for: sessionID)
+    let start = WDANormalizedPoint(x: startX, y: startY).scaled(
+      width: windowSize.width, height: windowSize.height)
+    let end = WDANormalizedPoint(x: endX, y: endY).scaled(
+      width: windowSize.width, height: windowSize.height)
+    let duration = max(80, min(durationMS, 2_000))
+    _ = try await request(
+      method: "POST", path: "/session/\(sessionID)/actions",
+      body: [
+        "actions": [
+          [
+            "type": "pointer", "id": "operate-preview-finger",
+            "parameters": ["pointerType": "touch"],
+            "actions": [
+              [
+                "type": "pointerMove", "duration": 0, "origin": "viewport",
+                "x": start.x, "y": start.y,
+              ],
+              ["type": "pointerDown", "button": 0],
+              [
+                "type": "pointerMove", "duration": duration, "origin": "viewport",
+                "x": end.x, "y": end.y,
+              ],
+              ["type": "pointerUp", "button": 0],
+            ],
+          ]
+        ]
+      ])
+  }
+
+  private func resolveWindowSize(for sessionID: String) async throws -> (width: Double, height: Double) {
+    if let cachedWindowSize { return cachedWindowSize }
+    let response = try await request(path: "/session/\(sessionID)/window/rect")
+    guard let value = response["value"] as? [String: Any],
+      let width = numeric(value["width"]), let height = numeric(value["height"]),
+      width > 0, height > 0
+    else {
+      throw RPCError(code: -32077, message: "WDA returned an invalid Simulator window size")
+    }
+    let size = (width: width, height: height)
+    cachedWindowSize = size
+    return size
   }
 
   private func ensureSession(
