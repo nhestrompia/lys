@@ -103,8 +103,11 @@ public struct ScreenFingerprint: Codable, Hashable, Sendable {
     let app = elements.first?.owningApplication ?? "unknown"
     let stable =
       elements.map { element in
-        [element.type, element.identifier ?? "", headingValue(element), element.childPath].joined(
-          separator: "|")
+        [
+          element.type, element.identifier ?? "", headingValue(element), element.childPath,
+          element.enabled ? "enabled" : "disabled",
+          element.selected ? "selected" : "unselected",
+        ].joined(separator: "|")
       }.sorted().joined(separator: "\n") + "\nmodal=\(modal)\ntitle=\(navigationTitle ?? "")"
     let digest = SHA256.hash(data: Data(stable.utf8)).map { String(format: "%02x", $0) }.joined()
     return .init(
@@ -133,6 +136,9 @@ public struct NavigationEdge: Codable, Identifiable, Hashable, Sendable {
   public var from: ScreenFingerprint
   public var to: ScreenFingerprint
   public var selector: ElementSelector
+  /// Recorded for intent-graph diagnostics. Only tap edges are eligible for automatic replay;
+  /// text input is deliberately not persisted in the graph.
+  public var action: String?
   public var preconditions: [String]
   public var successCount: Int
   public var failureCount: Int
@@ -144,12 +150,13 @@ public struct NavigationEdge: Codable, Identifiable, Hashable, Sendable {
   }
   public init(
     id: UUID = UUID(), from: ScreenFingerprint, to: ScreenFingerprint, selector: ElementSelector,
-    preconditions: [String] = [], lastValidatedBuild: String
+    action: String = "tap", preconditions: [String] = [], lastValidatedBuild: String
   ) {
     self.id = id
     self.from = from
     self.to = to
     self.selector = selector
+    self.action = action
     self.preconditions = preconditions
     self.successCount = 1
     self.failureCount = 0
@@ -158,27 +165,44 @@ public struct NavigationEdge: Codable, Identifiable, Hashable, Sendable {
   }
 }
 
+public struct AppGraphSnapshot: Codable, Sendable {
+  public var nodes: [ScreenNode]
+  public var edges: [NavigationEdge]
+
+  public init(nodes: [ScreenNode] = [], edges: [NavigationEdge] = []) {
+    self.nodes = nodes
+    self.edges = edges
+  }
+}
+
 public actor AppGraph {
   private var nodes: [String: ScreenNode] = [:]
   private var edges: [UUID: NavigationEdge] = [:]
   public init() {}
 
+  public func replace(with snapshot: AppGraphSnapshot) {
+    nodes = Dictionary(snapshot.nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+    edges = Dictionary(snapshot.edges.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+  }
+
   @discardableResult public func observe(
     from: ScreenFingerprint, to: ScreenFingerprint, selector: ElementSelector, build: String,
-    name: String = "Observed screen"
+    action: String = "tap", name: String = "Observed screen"
   ) -> NavigationEdge? {
     nodes[from.digest] = nodes[from.digest] ?? ScreenNode(fingerprint: from, name: name)
     nodes[to.digest] = ScreenNode(fingerprint: to, name: name)
     guard from != to else { return nil }
     if let existingID = edges.first(where: {
       $0.value.from == from && $0.value.to == to && $0.value.selector == selector
+        && ($0.value.action ?? "tap") == action
     })?.key {
       edges[existingID]!.successCount += 1
       edges[existingID]!.stale = false
       edges[existingID]!.lastValidatedBuild = build
       return edges[existingID]
     }
-    let edge = NavigationEdge(from: from, to: to, selector: selector, lastValidatedBuild: build)
+    let edge = NavigationEdge(
+      from: from, to: to, selector: selector, action: action, lastValidatedBuild: build)
     edges[edge.id] = edge
     return edge
   }
@@ -193,6 +217,7 @@ public actor AppGraph {
       let (current, path) = queue.removeFirst()
       for edge in edges.values
       where edge.from == current && !edge.stale && edge.selector.deterministic
+        && (edge.action ?? "tap") == "tap"
         && edge.lastValidatedBuild == build
       {
         if edge.to == goal { return path + [edge] }
@@ -208,5 +233,11 @@ public actor AppGraph {
   }
   public func snapshot() -> (nodes: [ScreenNode], edges: [NavigationEdge]) {
     (Array(nodes.values), Array(edges.values))
+  }
+
+  public func codableSnapshot() -> AppGraphSnapshot {
+    .init(
+      nodes: nodes.values.sorted { $0.id < $1.id },
+      edges: edges.values.sorted { $0.id.uuidString < $1.id.uuidString })
   }
 }

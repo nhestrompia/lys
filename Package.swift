@@ -25,6 +25,8 @@ let package = Package(
     .executableTarget(name: "IOSDevSnapshot", dependencies: ["IOSDevUI"]),
     .executableTarget(name: "IOSDevRuntime", dependencies: ["IOSDevCore"]),
     .executableTarget(name: "IOSDevMCP", dependencies: ["IOSDevCore"]),
-    .testTarget(name: "IOSDevCoreTests", dependencies: ["IOSDevCore"]),
+    .testTarget(
+      name: "IOSDevCoreTests", dependencies: ["IOSDevCore"],
+      resources: [.copy("Fixtures")]),
   ]
 )

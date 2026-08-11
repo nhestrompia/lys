@@ -48,3 +48,38 @@ private func fingerprint(_ value: String) -> ScreenFingerprint {
     ScreenFingerprint.make(elements: [first], modal: false, navigationTitle: nil)
       == ScreenFingerprint.make(elements: [second], modal: false, navigationTitle: nil))
 }
+
+@Test func fingerprintTracksInteractiveStateChanges() {
+  let frame = ElementFrame(x: 0, y: 0, width: 20, height: 20)
+  let idle = UIElement(
+    type: "Button", identifier: "quiz.answer.a", label: "A", selected: false, frame: frame,
+    childPath: "0/1", owningApplication: "app")
+  let selected = UIElement(
+    type: "Button", identifier: "quiz.answer.a", label: "A", selected: true, frame: frame,
+    childPath: "0/1", owningApplication: "app")
+  #expect(
+    ScreenFingerprint.make(elements: [idle], modal: false, navigationTitle: nil)
+      != ScreenFingerprint.make(elements: [selected], modal: false, navigationTitle: nil))
+}
+
+@Test func graphSnapshotCanBeRestoredForLaterJourneys() async {
+  let graph = AppGraph()
+  let a = fingerprint("a")
+  let b = fingerprint("b")
+  _ = await graph.observe(
+    from: a, to: b, selector: .accessibilityIdentifier("quiz.start"), build: "build-1")
+  let restored = AppGraph()
+  await restored.replace(with: graph.codableSnapshot())
+  #expect(await restored.path(from: a, to: b, build: "build-1")?.count == 1)
+}
+
+@Test func textInputEdgesAreRecordedButNeverReplayedWithoutSensitiveInput() async {
+  let graph = AppGraph()
+  let a = fingerprint("a")
+  let b = fingerprint("b")
+  let edge = await graph.observe(
+    from: a, to: b, selector: .accessibilityIdentifier("quiz.name"), build: "build-1",
+    action: "type")
+  #expect(edge?.action == "type")
+  #expect(await graph.path(from: a, to: b, build: "build-1") == nil)
+}

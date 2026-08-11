@@ -1,44 +1,12 @@
 import Foundation
 import IOSDevCore
 
-struct MCPTool: Codable {
-  var name: String
-  var description: String
-  var inputSchema: JSONValue
-}
-
 @main
 enum IOSDevMCPMain {
-  static let tools: [MCPTool] = [
-    tool("workspace.describe", "Describe the isolated task workspace"),
-    tool(
-      "build.run", "Build the selected iOS application", ["container", "scheme", "destination"]),
-    tool("build.cancel", "Cancel the active build"),
-    tool("test.list", "List tests"), tool("test.run", "Run selected tests"),
-    tool("simulator.list", "List available simulators"),
-    tool("simulator.boot", "Boot a simulator", ["udid"]),
-    tool(
-      "simulator.configure", "Configure appearance, orientation, locale, or status bar", ["udid"]),
-    tool("devserver.start", "Start or reuse the Expo Metro development server"),
-    tool("devserver.status", "Report whether the Expo Metro development server is ready"),
-    tool("devserver.stop", "Stop the task-owned Expo Metro development server"),
-    tool(
-      "app.install_launch",
-      "Install and launch the selected application; for Expo pass startDevServer=true",
-      ["udid", "appPath", "bundleID"]),
-    tool("app.terminate", "Terminate the application", ["udid", "bundleID"]),
-    tool("app.reset_data", "Erase application data after explicit approval", ["udid", "bundleID"]),
-    tool("ui.snapshot", "Capture a structured accessibility hierarchy"),
-    tool("ui.find", "Find semantic UI elements", ["selector"]),
-    tool("ui.perform", "Perform a semantic UI action", ["selector", "action"]),
-    tool("ui.wait", "Wait for a semantic UI condition"),
-    tool("ui.assert", "Assert a semantic UI condition", ["criterionID", "selector"]),
-    tool("ui.navigate", "Replay deterministic observed App Graph edges", ["screen"]),
-    tool("screenshot.capture", "Capture a simulator screenshot", ["udid"]),
-    tool("logs.query", "Query bounded task runtime logs"),
-    tool("verification.status", "Report host-validated evidence status"),
-    tool("verification.submit", "Submit an evidence manifest for validation", ["evidenceIDs"]),
-  ]
+  static var tools: [AgentRuntimeToolDefinition] {
+    let raw = ProcessInfo.processInfo.environment["IOSDEV_INTENT_KIND"]
+    return AgentRuntimeToolCatalog.tools(for: raw.flatMap(AgentTaskKind.init(rawValue:)))
+  }
 
   static func main() {
     guard let socket = ProcessInfo.processInfo.environment["IOSDEVD_SOCKET"],
@@ -80,7 +48,19 @@ enum IOSDevMCPMain {
       guard let toolName = request.params?["name"]?.stringValue else {
         return .init(id: request.id, error: .init(code: -32602, message: "Tool name is required"))
       }
+      let rawIntent = ProcessInfo.processInfo.environment["IOSDEV_INTENT_KIND"]
+      let intent = rawIntent.flatMap(AgentTaskKind.init(rawValue:))
+      guard let tool = AgentRuntimeToolCatalog.definition(named: toolName, for: intent) else {
+        return toolError(
+          request.id,
+          "The host policy does not allow \(toolName) for this testing intent.")
+      }
       let arguments = request.params?["arguments"] ?? .object([:])
+      if let violation = AgentRuntimeToolCatalog.argumentViolation(
+        for: tool, arguments: arguments)
+      {
+        return toolError(request.id, violation)
+      }
       do {
         let connection = try UnixSocketConnection.connect(path: socket)
         try connection.send(
@@ -94,14 +74,13 @@ enum IOSDevMCPMain {
         if let error = runtime.error {
           return toolError(request.id, "\(error.message) [\(error.code)]")
         }
-        let text =
-          String(
-            data: (try? JSONEncoder().encode(runtime.result ?? .null)) ?? Data(), encoding: .utf8)
-          ?? "null"
+        let structured = runtime.result ?? .object([:])
+        let text = humanSummary(tool: toolName, result: structured)
         return .init(
           id: request.id,
           result: .object([
             "content": .array([.object(["type": .string("text"), "text": .string(text)])]),
+            "structuredContent": structured,
             "isError": .bool(false),
           ]))
       } catch { return toolError(request.id, error.localizedDescription) }
@@ -117,16 +96,14 @@ enum IOSDevMCPMain {
         "isError": .bool(true),
       ]))
   }
-  private static func tool(_ name: String, _ description: String, _ required: [String] = [])
-    -> MCPTool
-  {
-    let properties = Dictionary(
-      uniqueKeysWithValues: required.map { ($0, JSONValue.object(["type": .string("string")])) })
-    return .init(
-      name: name, description: description,
-      inputSchema: .object([
-        "type": .string("object"), "properties": .object(properties),
-        "required": .array(required.map(JSONValue.string)), "additionalProperties": .bool(true),
-      ]))
+  private static func humanSummary(tool: String, result: JSONValue) -> String {
+    if let message = result["message"]?.stringValue { return message }
+    if let detail = result["detail"]?.stringValue { return detail }
+    if let status = result["status"]?.stringValue {
+      return "\(tool) completed with status \(status)."
+    }
+    if result["succeeded"]?.boolValue == true { return "\(tool) completed successfully." }
+    if result["passed"]?.boolValue == true { return "\(tool) passed." }
+    return "\(tool) completed. Structured results are attached."
   }
 }

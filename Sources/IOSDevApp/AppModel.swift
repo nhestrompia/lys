@@ -209,6 +209,8 @@ public final class AppModel: ObservableObject {
   @Published var generation = 0
   @Published var taskPrompt = ""
   @Published var taskTitle = ""
+  @Published var activeTaskIntent: AgentTaskIntent?
+  @Published var activeJourney: JourneyRecord?
   @Published var timeline: [TimelineItem] = []
   @Published var plan: [TaskPlanItem] = []
   @Published var evidence: [Evidence] = []
@@ -259,7 +261,9 @@ public final class AppModel: ObservableObject {
   var meaningfulHierarchyElements: [UIElement] {
     UIHierarchyInspector.meaningfulElements(from: hierarchyElements)
   }
-  var requiresUIVerification: Bool { activeWorktree != nil && selectedTarget != nil }
+  var requiresUIVerification: Bool {
+    activeTaskIntent?.requiresRunningApp == true || (activeWorktree != nil && selectedTarget != nil)
+  }
   var isExpoRepository: Bool { expoProjectRoot != nil }
   var expoProjectRoot: URL? {
     guard let workspace = taskWorkspace?.standardizedFileURL else { return nil }
@@ -273,8 +277,11 @@ public final class AppModel: ObservableObject {
   }
   var needsExpoPreparation: Bool { isExpoRepository && containers.isEmpty }
   var agentComposerBlocker: String? {
-    if repository == nil { return "Open a Git repository to start an editable agent task." }
-    if !isGitRepository { return "Agent editing requires a Git repository." }
+    guard repository != nil else { return "Open a repository to start an agent task." }
+    let pendingIntent = AgentTaskIntentRouter.classify(taskPrompt)
+    if pendingIntent.allowsSourceWrites && !isGitRepository {
+      return "Editing requires a Git repository. Inspection and app testing remain available."
+    }
     if selectedAdapterID.isEmpty
       || !adapters.contains(where: { $0.id == selectedAdapterID && $0.executable != nil })
     {
@@ -357,6 +364,8 @@ public final class AppModel: ObservableObject {
   private let wdaInstaller = WDAInstaller()
   private var activeACPClient: ACPClient?
   private var activeACPSessionID: String?
+  private var runtimeEventObserverTask: Task<Void, Never>?
+  private var runtimeEventSequence = 0
   private var metroTask: Task<ProcessOutcome, Error>?
   private var metroRunID: UUID?
   private var metroWorkspace: URL?
@@ -443,6 +452,8 @@ public final class AppModel: ObservableObject {
     activeACPClient?.cancel()
     activeACPClient = nil
     activeACPSessionID = nil
+    runtimeEventObserverTask?.cancel()
+    runtimeEventObserverTask = nil
     agentConfigOptions = []
     resolveAgentPermission(optionID: nil)
     resetAgentPresentation()
@@ -460,6 +471,8 @@ public final class AppModel: ObservableObject {
     selectedElement = nil
     hierarchyElements = []
     generation = 0
+    activeTaskIntent = nil
+    activeJourney = nil
     terminalEntries = []
     terminalOutputBuffers = [:]
     terminalFlushTask?.cancel()
@@ -709,42 +722,57 @@ public final class AppModel: ObservableObject {
   }
 
   func startTask() {
-    guard let repository, isGitRepository,
+    guard let repository,
       !taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       activeWorktree == nil
     else { return }
     let prompt = taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    let intent = AgentTaskIntentRouter.classify(prompt)
+    guard !intent.allowsSourceWrites || isGitRepository else {
+      notice = "Editing requires a Git repository. You can still ask the agent to inspect or test the running app."
+      return
+    }
     taskPrompt = ""
     taskTitle = prompt
+    activeTaskIntent = intent
+    activeJourney = nil
     generation = 0
     status = "Preparing task"
     isBusy = true
-    plan = [
-      .init(title: "Create isolated worktree", state: .active),
-      .init(title: "Connect task runtime", state: .waiting),
-      .init(title: "Connect selected ACP agent", state: .waiting),
-      .init(title: "Build and collect fresh evidence", state: .waiting),
-      .init(title: "Review and apply selected changes", state: .waiting),
-    ]
+    plan = hostPlan(for: intent)
     timeline.append(
-      .init(time: Self.now(), title: "Task requested", detail: prompt, state: .complete))
+      .init(
+        time: Self.now(), title: "Task routed",
+        detail: intentSummary(intent), state: .complete))
     Task {
       do {
-        let prepared = try await workspaceManager.createTask(
-          repository: repository, taskRoot: taskRoot)
-        activeWorktree = prepared.worktree
-        baseline = prepared.manifest
-        files = Self.children(of: prepared.worktree, depth: 0)
-        selectedFile = nil
-        source = ""
-        plan[0].state = .complete
+        let workspace: URL
+        if intent.workspacePolicy == .isolatedWorktree {
+          let prepared = try await workspaceManager.createTask(
+            repository: repository, taskRoot: taskRoot)
+          activeWorktree = prepared.worktree
+          baseline = prepared.manifest
+          files = Self.children(of: prepared.worktree, depth: 0)
+          selectedFile = nil
+          source = ""
+          workspace = prepared.worktree
+          plan[0].state = .complete
+          timeline.append(
+            .init(
+              time: Self.now(), title: "Isolated task ready", detail: prepared.worktree.path,
+              state: .complete))
+        } else {
+          workspace = repository
+          plan[0].state = .complete
+          timeline.append(
+            .init(
+              time: Self.now(), title: "Current app session selected",
+              detail: "No worktree or source mutation is allowed for this task.", state: .complete))
+        }
         plan[1].state = .active
-        try await startRuntime(workspace: prepared.worktree)
+        try await ensureRuntimeForTask(workspace: workspace)
+        try await configureRuntime(intent: intent)
         plan[1].state = .complete
-        timeline.append(
-          .init(
-            time: Self.now(), title: "Isolated task ready", detail: prepared.worktree.path,
-            state: .complete))
         guard
           let adapter = adapters.first(where: {
             $0.id == selectedAdapterID && $0.executable != nil
@@ -757,10 +785,12 @@ public final class AppModel: ObservableObject {
             message: "Choose an ACP-ready coding agent in Settings before starting a task.")
         }
         plan[2].state = .active
-        try await connectAgent(adapter: adapter, workspace: prepared.worktree, prompt: prompt)
+        try await connectAgent(
+          adapter: adapter, workspace: workspace, prompt: prompt, intent: intent)
         plan[2].state = .complete
-        status = "Agent finished · review evidence"
-        try await refreshProposedChanges()
+        status = intent.allowsSourceWrites
+          ? "Agent finished · review evidence" : "Testing finished · review evidence"
+        if intent.allowsSourceWrites { try await refreshProposedChanges() }
         await refreshEvidence()
       } catch {
         if activeWorktree == nil { status = "Task failed" } else { status = "Task needs attention" }
@@ -776,9 +806,92 @@ public final class AppModel: ObservableObject {
     }
   }
 
+  private func hostPlan(for intent: AgentTaskIntent) -> [TaskPlanItem] {
+    switch intent.kind {
+    case .verifyCurrentApp:
+      return [
+        .init(title: "Attach to the current app", state: .active),
+        .init(title: "Configure the semantic testing session", state: .waiting),
+        .init(title: "Connect the selected agent", state: .waiting),
+        .init(title: "Run the app journey and assertions", state: .waiting),
+        .init(title: "Validate current evidence", state: .waiting),
+      ]
+    case .inspectCurrentApp:
+      return [
+        .init(title: "Attach to the current app", state: .active),
+        .init(title: "Configure read-only inspection", state: .waiting),
+        .init(title: "Connect the selected agent", state: .waiting),
+        .init(title: "Inspect the semantic interface", state: .waiting),
+        .init(title: "Present captured evidence", state: .waiting),
+      ]
+    case .runTests:
+      return [
+        .init(title: "Use the current checkout", state: .active),
+        .init(title: "Configure the test runner", state: .waiting),
+        .init(title: "Connect the selected agent", state: .waiting),
+        .init(title: "Run selected tests", state: .waiting),
+        .init(title: "Validate test evidence", state: .waiting),
+      ]
+    case .modifyAndVerify:
+      return [
+        .init(title: "Create isolated worktree", state: .active),
+        .init(title: "Configure the task runtime", state: .waiting),
+        .init(title: "Connect the selected agent", state: .waiting),
+        .init(title: "Build only if the mutation requires it", state: .waiting),
+        .init(title: "Run journey, review, and apply", state: .waiting),
+      ]
+    }
+  }
+
+  private func intentSummary(_ intent: AgentTaskIntent) -> String {
+    switch intent.kind {
+    case .verifyCurrentApp:
+      "Verify current app · preserve runtime · build only if missing · read-only source"
+    case .inspectCurrentApp:
+      "Inspect current app · preserve runtime · read-only source"
+    case .runTests:
+      "Run source tests · no Simulator lifecycle · read-only source"
+    case .modifyAndVerify:
+      "Modify and verify · isolated worktree · build only when stale"
+    }
+  }
+
+  private func agentContext(prompt: String, workspace: URL, intent: AgentTaskIntent) -> String {
+    let sourcePolicy = intent.allowsSourceWrites
+      ? "Source edits are allowed only inside the isolated worktree at \(workspace.path)."
+      : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
+    let journeyPolicy = intent.requiresRunningApp
+      ? "Call journey.run first with the user's goal and no steps. It attaches to the compatible current app and returns its semantic UI. Choose semantic actions using accessibility identifiers or unique label/type selectors. Continue the same journey with journeyID and short asserted steps, then call journey.run with complete=true. Never start, stop, install, terminate, or rebuild app infrastructure yourself."
+      : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
+    return """
+      \(prompt)
+
+      Host-classified intent: \(intent.kind.rawValue).
+      \(sourcePolicy)
+      \(journeyPolicy)
+      The selected scheme is \(selectedScheme.isEmpty ? "not selected" : selectedScheme), and the selected Simulator is \(selectedDestination?.name ?? "not selected"). Tool results contain structuredContent; use it instead of parsing display text. Do not claim completion from prose. Completion requires fresh host-recorded evidence for the active generation.
+      """
+  }
+
   func sendAgentPrompt() {
     guard canSendAgentPrompt else { return }
-    if activeWorktree == nil {
+    if activeACPSessionID == nil {
+      startTask()
+      return
+    }
+    let pendingIntent = AgentTaskIntentRouter.classify(taskPrompt)
+    if let activeTaskIntent, pendingIntent.allowsSourceWrites && !activeTaskIntent.allowsSourceWrites {
+      activeACPClient?.cancel()
+      activeACPClient = nil
+      activeACPSessionID = nil
+      agentConfigOptions = []
+      activeJourney = nil
+      self.activeTaskIntent = nil
+      timeline.append(
+        .init(
+          time: Self.now(), title: "Starting an editable task",
+          detail: "The read-only testing session was closed before creating an isolated worktree.",
+          state: .complete))
       startTask()
       return
     }
@@ -800,9 +913,10 @@ public final class AppModel: ObservableObject {
           .init(
             time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
             state: reason == "end_turn" || reason == "completed" ? .complete : .warning))
-        try await refreshProposedChanges()
+        if activeTaskIntent?.allowsSourceWrites == true { try await refreshProposedChanges() }
         await refreshEvidence()
-        status = "Agent finished · review evidence"
+        status = activeTaskIntent?.allowsSourceWrites == true
+          ? "Agent finished · review evidence" : "Testing finished · review evidence"
       } catch {
         finishAgentMessage()
         status = "Agent needs attention"
@@ -1449,6 +1563,8 @@ public final class AppModel: ObservableObject {
         activeACPClient?.cancel()
         activeACPClient = nil
         activeACPSessionID = nil
+        runtimeEventObserverTask?.cancel()
+        runtimeEventObserverTask = nil
         agentConfigOptions = []
         resolveAgentPermission(optionID: nil)
         resetAgentPresentation()
@@ -1463,6 +1579,8 @@ public final class AppModel: ObservableObject {
         evidence = []
         verificationReport = nil
         taskTitle = ""
+        activeTaskIntent = nil
+        activeJourney = nil
         plan = []
         status = "Ready"
       } catch { notice = error.localizedDescription }
@@ -1569,6 +1687,22 @@ public final class AppModel: ObservableObject {
     isTerminalExpanded = ProcessInfo.processInfo.environment["IOSDEV_SNAPSHOT_TERMINAL"] == "1"
     taskTitle =
       "Add dark mode support to the Profile screen and verify it on small and large iPhones."
+    activeTaskIntent = AgentTaskIntentRouter.classify(taskTitle)
+    var journey = JourneyRecord(goal: "Verify Profile appearance and navigation")
+    journey.status = .running
+    journey.steps = [
+      .init(
+        step: .init(id: "open-profile", title: "Open Profile", assertVisible: true),
+        status: .passed, detail: "Profile heading is visible."),
+      .init(
+        step: .init(id: "open-appearance", title: "Open Appearance", assertVisible: true),
+        status: .passed, detail: "Appearance is set to Dark."),
+      .init(
+        step: .init(id: "verify-large", title: "Verify on large iPhone", assertVisible: true),
+        status: .running, detail: "Inspecting the current semantic screen."),
+    ]
+    journey.currentFingerprint = .init(digest: "9b3f81d219preview", owningApplication: "TravelApp")
+    activeJourney = journey
     selectedScheme = "TravelApp"
     selectedDestinationID = "SYNTHETIC-IPHONE"
     destinations = [
@@ -1801,13 +1935,13 @@ public final class AppModel: ObservableObject {
   }
 
   private func connectAgent(
-    adapter: DetectedAdapter, workspace: URL, prompt: String
+    adapter: DetectedAdapter, workspace: URL, prompt: String, intent: AgentTaskIntent
   ) async throws {
     guard let executable = adapter.executable else {
       throw RPCError(code: -32090, message: "The selected ACP adapter is unavailable")
     }
     let workspaceHandler = ACPWorkspaceRequestHandler(
-      workspace: workspace, allowWrites: true,
+      workspace: workspace, allowWrites: intent.allowsSourceWrites,
       didMutate: { [weak self] in await self?.recordAgentMutation() })
     let client = try ACPClient(
       executable: executable, arguments: adapter.launchArguments, workspace: workspace,
@@ -1838,7 +1972,8 @@ public final class AppModel: ObservableObject {
 
     let initialized = try await client.request(
       method: "initialize",
-      params: try jsonValue(ACPInitialize(clientVersion: "0.1.0", allowWrites: true)))
+      params: try jsonValue(
+        ACPInitialize(clientVersion: "0.1.0", allowWrites: intent.allowsSourceWrites)))
     guard initialized.result?["protocolVersion"]?.numberValue == Double(ACPProtocol.version) else {
       client.cancel()
       activeACPClient = nil
@@ -1846,7 +1981,8 @@ public final class AppModel: ObservableObject {
     }
     let mcp = ACPMCPServer(
       name: "iOS Development Runtime", command: try mcpExecutable().path,
-      env: try await runtime.mcpEnvironment())
+      env: try await runtime.mcpEnvironment().merging(
+        ["IOSDEV_INTENT_KIND": intent.kind.rawValue], uniquingKeysWith: { _, task in task }))
     let session = try await client.request(
       method: "session/new", params: try jsonValue(ACPNewSession(cwd: workspace, mcpServers: [mcp]))
     )
@@ -1863,11 +1999,7 @@ public final class AppModel: ObservableObject {
         time: Self.now(), title: "\(adapter.displayName) connected",
         detail: "ACP v1 session \(sessionID)", state: .complete))
 
-    let context = """
-      \(prompt)
-
-      You are editing an isolated task worktree at \(workspace.path). Use the iOS Development Runtime MCP tools for builds, Simulator operations, UI automation, and verification. The selected scheme is \(selectedScheme.isEmpty ? "not selected" : selectedScheme), and the selected Simulator is \(selectedDestination?.name ?? "not selected"). Expo development-server startup is currently \(startDevServerOnRun ? "enabled" : "disabled") by the user. For Expo or React Native development-client apps, call devserver.start before app.install_launch (or pass startDevServer=true) when it is enabled. Do not claim completion from prose: submit only fresh machine-recorded evidence from the current mutation generation. Reviewable changes must remain inside this worktree.
-      """
+    let context = agentContext(prompt: prompt, workspace: workspace, intent: intent)
     let result = try await client.request(
       method: "session/prompt",
       params: try jsonValue(ACPPrompt(sessionID: sessionID, text: context)))
@@ -2355,6 +2487,9 @@ public final class AppModel: ObservableObject {
 
   private static let runtimeToolTitles: [String: String] = [
     "workspace.describe": "Inspecting the task workspace",
+    "journey.run": "Running the app journey",
+    "journey.status": "Checking the app journey",
+    "journey.cancel": "Cancelling the app journey",
     "build.run": "Building the app",
     "build.cancel": "Stopping the build",
     "test.list": "Finding tests",
@@ -2381,18 +2516,105 @@ public final class AppModel: ObservableObject {
   ]
 
   private static let routineTestingTools: Set<String> = [
-    "workspace.describe", "build.run", "build.cancel", "test.list", "test.run",
-    "simulator.list", "simulator.boot", "simulator.configure", "devserver.start",
-    "devserver.status", "devserver.stop", "app.install_launch", "app.terminate",
-    "ui.snapshot", "ui.find", "ui.perform", "ui.wait", "ui.assert", "ui.navigate",
+    "workspace.describe", "journey.run", "journey.status", "journey.cancel", "build.run",
+    "test.list", "test.run", "ui.snapshot", "ui.find", "ui.perform", "ui.wait", "ui.assert", "ui.navigate",
     "screenshot.capture", "logs.query", "verification.status", "verification.submit",
   ]
 
   private func startRuntime(workspace: URL) async throws {
-    _ = try? await runtime.request(method: "devserver.stop")
     try await runtime.start(
       executable: try runtimeExecutable(), workspace: workspace, stateRoot: runtimeRoot,
       developerDirectory: developerDirectory)
+    startRuntimeEventObserver()
+  }
+
+  private func ensureRuntimeForTask(workspace: URL) async throws {
+    do {
+      let description = try await runtime.request(method: "workspace.describe")
+      if description["root"]?.stringValue != workspace.standardizedFileURL.path {
+        try await startRuntime(workspace: workspace)
+      } else {
+        startRuntimeEventObserver()
+      }
+    } catch {
+      try await startRuntime(workspace: workspace)
+    }
+  }
+
+  private func configureRuntime(intent: AgentTaskIntent) async throws {
+    let configuration = RuntimeSessionConfiguration(
+      intent: intent, container: taskContainer()?.path, scheme: selectedScheme,
+      destination: selectedDestination, target: selectedTarget,
+      startDevelopmentServer: isExpoRepository && startDevServerOnRun)
+    _ = try await runtime.request(
+      method: "session.configure", params: try jsonValue(configuration))
+  }
+
+  private func startRuntimeEventObserver() {
+    runtimeEventObserverTask?.cancel()
+    runtimeEventSequence = 0
+    runtimeEventObserverTask = Task { [weak self] in
+      guard let self else { return }
+      while !Task.isCancelled {
+        do {
+          let page = try await self.runtime.request(
+            method: "runtime.events",
+            params: .object(["after": .number(Double(self.runtimeEventSequence))]))
+          let values: [RuntimeEvent] = try self.decodeRuntimeValue(
+            page["events"] ?? .array([]))
+          for event in values {
+            self.runtimeEventSequence = max(self.runtimeEventSequence, event.sequence)
+            await self.consumeRuntimeEvent(event)
+          }
+        } catch {
+          if !Task.isCancelled { return }
+        }
+        try? await Task.sleep(for: .milliseconds(180))
+      }
+    }
+  }
+
+  private func decodeRuntimeValue<T: Decodable>(_ value: JSONValue) throws -> T {
+    try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
+  }
+
+  private func consumeRuntimeEvent(_ event: RuntimeEvent) async {
+    if let target = event.target { selectedTarget = target }
+    switch event.kind {
+    case .sessionAttached, .appLaunched, .previewAvailable:
+      if let destination = selectedDestination {
+        if let target = event.target { selectedTarget = target }
+        if selectedTarget != nil {
+          warmPreviewInteraction(destination: destination, target: selectedTarget!)
+          beginLiveSimulatorSession(destination: destination)
+        }
+      }
+    case .screenshot:
+      if let path = event.artifactPath {
+        setCurrentScreenshot(URL(fileURLWithPath: path))
+      }
+      await refreshEvidence()
+    case .journeyStarted, .journeyReady, .journeyStepStarted, .journeyStepFinished,
+      .journeyFinished:
+      if let value = try? await runtime.request(method: "journey.status"),
+        let record: JourneyRecord = try? decodeRuntimeValue(value)
+      {
+        activeJourney = record
+      }
+      status = event.message
+      if event.kind == .journeyFinished { await refreshEvidence() }
+    case .assertion:
+      await refreshEvidence()
+    case .buildStarted:
+      appOperation = .building
+    case .buildFinished:
+      appOperation = .idle
+      await refreshEvidence()
+    case .warning:
+      notice = event.message
+    case .sessionConfigured, .uiAction:
+      break
+    }
   }
 
   private func ensureRuntime() async throws {
