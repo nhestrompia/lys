@@ -17,21 +17,18 @@ enum IOSDevSnapshotMain {
     let size = requestedSize ?? CGSize(width: 1536, height: 1024)
     let model = AppModel()
     if arguments.contains("--code") {
-      model.loadCodePreview()
+      model.showSnapshotPage("code")
     } else if arguments.contains("--files") {
-      model.loadFilesPreview()
+      model.showSnapshotPage("files")
     } else if arguments.contains("--changes") {
-      model.loadChangesPreview()
+      model.showSnapshotPage("changes")
+    } else if arguments.contains("--deploy") {
+      model.showSnapshotPage("deploy")
     } else if arguments.contains("--settings") {
-      model.loadSettingsPreview()
-    } else if arguments.contains("--permission") {
-      model.loadPermissionPreview()
-    } else if arguments.contains("--building") {
-      model.loadDesignBuildPreview()
-    } else if arguments.contains("--failure") {
-      model.loadDesignFailurePreview()
-    } else if !arguments.contains("--empty") {
-      model.loadDesignPreview()
+      model.showSnapshotPage("settings")
+    }
+    if arguments.contains("--evidence") {
+      model.isEvidenceWorkspaceOpen = true
     }
     let content = WorkbenchView().environmentObject(model).frame(
       width: size.width, height: size.height
