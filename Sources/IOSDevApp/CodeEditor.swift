@@ -11,19 +11,18 @@ import SwiftUI
     scroll.hasVerticalScroller = true
     scroll.hasHorizontalScroller = true
     scroll.autohidesScrollers = true
-    let storage = NSTextStorage()
-    let manager = NSLayoutManager()
-    let container = NSTextContainer(
-      containerSize: NSSize(
-        width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
-    container.widthTracksTextView = false
-    manager.addTextContainer(container)
-    storage.addLayoutManager(manager)
-    let editor = NSTextView(frame: .zero, textContainer: container)
+    let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     editor.delegate = context.coordinator
     editor.isEditable = !readOnly
     editor.isRichText = false
     editor.allowsUndo = true
+    editor.isVerticallyResizable = true
+    editor.isHorizontallyResizable = false
+    editor.minSize = NSSize(width: 0, height: 0)
+    editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+    editor.autoresizingMask = [.width]
+    editor.textContainer?.widthTracksTextView = true
+    editor.textContainer?.lineFragmentPadding = 0
     editor.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
     editor.textColor = NSColor(white: 0.9, alpha: 1)
     editor.backgroundColor = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
@@ -33,7 +32,13 @@ import SwiftUI
     editor.usesFindBar = true
     editor.isIncrementalSearchingEnabled = true
     editor.textContainerInset = NSSize(width: 42, height: 12)
-    editor.string = text
+    editor.textStorage?.setAttributedString(
+      NSAttributedString(
+        string: text,
+        attributes: [
+          .foregroundColor: NSColor(white: 0.86, alpha: 1),
+          .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+        ]))
     scroll.documentView = editor
     scroll.hasVerticalRuler = true
     scroll.rulersVisible = true
@@ -62,10 +67,11 @@ import SwiftUI
       editor.enclosingScrollView?.verticalRulerView?.needsDisplay = true
     }
     func highlight() {
-      guard let editor, let storage = editor.textStorage else { return }
-      let range = NSRange(location: 0, length: storage.length)
-      storage.beginEditing()
-      storage.setAttributes(
+    guard let editor, let storage = editor.textStorage else { return }
+    let range = NSRange(location: 0, length: storage.length)
+    storage.beginEditing()
+    editor.textColor = NSColor(white: 0.86, alpha: 1)
+    storage.setAttributes(
         [
           .foregroundColor: NSColor(white: 0.86, alpha: 1),
           .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
@@ -125,7 +131,7 @@ import SwiftUI
     var glyph = glyphRange.location
     let attributes: [NSAttributedString.Key: Any] = [
       .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-      .foregroundColor: NSColor.secondaryLabelColor,
+      .foregroundColor: NSColor(white: 0.48, alpha: 1),
     ]
     while glyph < NSMaxRange(glyphRange) {
       let character = layout.characterIndexForGlyph(at: glyph)

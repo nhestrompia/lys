@@ -16,16 +16,23 @@ enum IOSDevSnapshotMain {
       .flatMap(parseSize)
     let size = requestedSize ?? CGSize(width: 1536, height: 1024)
     let model = AppModel()
-    if arguments.contains("--settings") {
-      model.loadSettingsPreview()
-    } else if arguments.contains("--permission") {
-      model.loadPermissionPreview()
-    } else if arguments.contains("--building") {
-      model.loadDesignBuildPreview()
-    } else if arguments.contains("--failure") {
-      model.loadDesignFailurePreview()
-    } else if !arguments.contains("--empty") {
-      model.loadDesignPreview()
+    if arguments.contains("--code") {
+      model.showSnapshotPage("code")
+    } else if arguments.contains("--changes") {
+      model.showSnapshotPage("changes")
+    } else if arguments.contains("--deploy") {
+      model.showSnapshotPage("deploy")
+    } else if arguments.contains("--settings") {
+      model.showSnapshotPage("settings")
+    }
+    if arguments.contains("--terminal") {
+      model.showSnapshotWorkspaceTab("terminal")
+    } else if arguments.contains("--logs") {
+      model.showSnapshotWorkspaceTab("logs")
+    } else if arguments.contains("--changes-tab") {
+      model.showSnapshotWorkspaceTab("changes")
+    } else if arguments.contains("--evidence") {
+      model.showSnapshotWorkspaceTab("evidence")
     }
     let content = WorkbenchView().environmentObject(model).frame(
       width: size.width, height: size.height

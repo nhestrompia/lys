@@ -1,5 +1,5 @@
 ---
-name: "iOS Development Workbench"
+name: "Lys"
 description: "A luminous native macOS studio that keeps agent intent, the running app, and machine-recorded proof in one view."
 colors:
   primary: "#0A63F2"
@@ -96,7 +96,7 @@ components:
     size: "38px 34px"
 ---
 
-# Design System: iOS Development Workbench
+# Design System: Lys
 
 ## Overview
 
@@ -108,7 +108,7 @@ White working surfaces sit on a cool luminous canvas. System blue identifies sel
 
 The signature composition keeps the developer's causal story legible without changing views: open a repository, delegate in an isolated worktree, watch the app, inspect fresh generation-scoped evidence, then review and apply or discard. The interface stays transparent and recoverable at every boundary.
 
-**FORM provenance.** The shipped form is a direct native reproduction of the user-supplied approved Operate reference at `/var/folders/nx/yjq006696mz0bdbbjl96t8g00000gn/T/codex-clipboard-41a70dfc-90f7-44b2-97b1-2a75e13ab85e.png` (1536 × 1024 viewport; SHA-256 `a0147fa507a0f01639a54b67801528fefdf4ea7090895348237d795d6b1981ab`). This exact reference is the visual authority for composition and form when documentation or derivative screens drift.
+**FORM provenance.** The shipped form is a direct native reproduction of the user-supplied approved reference at `/var/folders/nx/yjq006696mz0bdbbjl96t8g00000gn/T/codex-clipboard-41a70dfc-90f7-44b2-97b1-2a75e13ab85e.png` (1536 × 1024 viewport; SHA-256 `a0147fa507a0f01639a54b67801528fefdf4ea7090895348237d795d6b1981ab`). This exact reference is the visual authority for composition and form when documentation or derivative screens drift.
 
 **Key Characteristics:**
 
@@ -184,7 +184,7 @@ The application is a desktop-first macOS workbench with a minimum window of 1180
 
 The Agent first viewport uses a fixed 380pt intent panel, a flexible center app stage, and a fixed 420pt verification ledger. The regions sit in a 12pt gap with a 12pt outer inset. The phone preview remains horizontally centered but is top-weighted directly beneath the stage toolbar; intent and proof are adjacent context, not alternate destinations. Inside panels, recurring horizontal insets are 20–22pt, grouped rows are 64–70pt tall, and toolbars are 48–52pt tall.
 
-The rail switches between Agent, Code, Files, Git, and Settings workspaces. Agent is the primary operating surface; Code and Files retain repository context, Git owns review and conflicts, and Settings uses grouped native lists. Fixed side widths yield before the center stage does: do not compress the device preview into a thumbnail or hide verification behind a transient overlay.
+The rail switches between Develop, Code, Deploy, and Settings workspaces. Develop is the primary operating surface; Code retains repository context, Deploy owns TestFlight distribution, and Settings uses grouped native lists. Change review remains available from the persistent decision bar instead of duplicating another rail destination. Fixed side widths yield before the center stage does: do not compress the device preview into a thumbnail or hide verification behind a transient overlay.
 
 **The Center-of-Work Rule.** The running app occupies the horizontal center and starts directly beneath the stage toolbar; agent activity and evidence flank it in the same viewport.
 

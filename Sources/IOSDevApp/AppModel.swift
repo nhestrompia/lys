@@ -3,22 +3,31 @@ import IOSDevCore
 import SwiftUI
 
 enum PrimarySection: String, CaseIterable, Identifiable {
-  case agent = "Agent"
+  case agent = "Develop"
   case code = "Code"
-  case files = "Files"
-  case git = "Git"
+  case git = "Deploy"
+  case changes = "Changes"
   case settings = "Settings"
 
   var id: String { rawValue }
   var symbol: String {
     switch self {
-    case .agent: "sparkles.square.filled.on.square"
+    case .agent: "sparkles"
     case .code: "chevron.left.forwardslash.chevron.right"
-    case .files: "folder"
-    case .git: "arrow.triangle.branch"
+    case .git: "paperplane"
+    case .changes: "square.and.pencil"
     case .settings: "gearshape"
     }
   }
+}
+
+enum EvidenceWorkspaceTab: String, CaseIterable, Identifiable {
+  case terminal = "Terminal"
+  case logs = "Logs"
+  case evidence = "Evidence"
+  case changes = "Changes"
+
+  var id: String { rawValue }
 }
 
 struct FileNode: Identifiable, Hashable {
@@ -236,12 +245,13 @@ public final class AppModel: ObservableObject {
     availability: .unsupported, title: "Checking semantic UI automation",
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
   @Published var recoverableWorkspaces: [RecoverableWorkspace] = []
-  @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
   @Published var openLiveSimulatorOnRun = false
   @Published var terminalEntries: [TerminalEntry] = []
   @Published public var isTerminalExpanded = false
+  @Published var evidenceWorkspaceTab: EvidenceWorkspaceTab = .evidence
+  @Published public var isEvidenceWorkspaceOpen = false
   let simulatorLiveSession = SimulatorLiveSession()
 
   var selectedDestination: Destination? {
@@ -535,7 +545,14 @@ public final class AppModel: ObservableObject {
     Task { await refreshDestinations() }
   }
 
-  public func toggleTerminal() { isTerminalExpanded.toggle() }
+  public func toggleTerminal() {
+    isTerminalExpanded.toggle()
+    if isTerminalExpanded { evidenceWorkspaceTab = .terminal }
+  }
+
+  public func toggleEvidenceWorkspace() {
+    isEvidenceWorkspaceOpen.toggle()
+  }
 
   func clearTerminal() {
     guard !terminalEntries.contains(where: { $0.state == .running }) else { return }
@@ -547,12 +564,12 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Prepare this Expo project for iOS?"
     confirmation.informativeText =
-      "Operate will run npm ci when node_modules is missing, then npm exec -- expo prebuild --platform ios. This executes the repository's package scripts and may download dependencies."
+      "Lys will run npm ci when node_modules is missing, then npm exec -- expo prebuild --platform ios. This executes the repository's package scripts and may download dependencies."
     confirmation.addButton(withTitle: "Prepare iOS Project")
     confirmation.addButton(withTitle: "Cancel")
     guard confirmation.runModal() == .alertFirstButtonReturn else { return }
     guard let npm = npmExecutable() else {
-      notice = "npm was not found. Install Node.js, then reopen Operate."
+      notice = "npm was not found. Install Node.js, then reopen Lys."
       return
     }
     isBusy = true
@@ -1668,161 +1685,24 @@ public final class AppModel: ObservableObject {
     } catch { notice = error.localizedDescription }
   }
 
-  public func loadDesignPreview() {
-    designPreview = true
-    repository = URL(fileURLWithPath: "/Synthetic/TravelApp")
-    activeWorktree = URL(fileURLWithPath: "/Synthetic/Tasks/profile-dark-mode")
-    isGitRepository = true
-    branchName = "main"
-    status = "Verifying"
-    isBusy = true
-    generation = 2
-    terminalEntries = [
-      TerminalEntry(
-        command:
-          "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace /Synthetic/TravelApp.xcworkspace -scheme TravelApp build",
-        workingDirectory: "/Synthetic/TravelApp", state: .succeeded)
-    ]
-    terminalEntries[0].output = "** BUILD SUCCEEDED **\n"
-    isTerminalExpanded = ProcessInfo.processInfo.environment["IOSDEV_SNAPSHOT_TERMINAL"] == "1"
-    taskTitle =
-      "Add dark mode support to the Profile screen and verify it on small and large iPhones."
-    activeTaskIntent = AgentTaskIntentRouter.classify(taskTitle)
-    var journey = JourneyRecord(goal: "Verify Profile appearance and navigation")
-    journey.status = .running
-    journey.steps = [
-      .init(
-        step: .init(id: "open-profile", title: "Open Profile", assertVisible: true),
-        status: .passed, detail: "Profile heading is visible."),
-      .init(
-        step: .init(id: "open-appearance", title: "Open Appearance", assertVisible: true),
-        status: .passed, detail: "Appearance is set to Dark."),
-      .init(
-        step: .init(id: "verify-large", title: "Verify on large iPhone", assertVisible: true),
-        status: .running, detail: "Inspecting the current semantic screen."),
-    ]
-    journey.currentFingerprint = .init(digest: "9b3f81d219preview", owningApplication: "TravelApp")
-    activeJourney = journey
-    selectedScheme = "TravelApp"
-    selectedDestinationID = "SYNTHETIC-IPHONE"
-    destinations = [
-      .init(
-        udid: "SYNTHETIC-IPHONE", name: "iPhone 16 Pro", deviceType: "iPhone 16 Pro",
-        runtime: "iOS 18.2", state: "Booted")
-    ]
-    plan = [
-      .init(title: "Review Profile implementation", state: .complete),
-      .init(title: "Update colors and assets", state: .complete),
-      .init(title: "Build and run on small phone", state: .complete),
-      .init(title: "Verify dark mode appearance", state: .active),
-      .init(title: "Run on large phone", state: .waiting),
-    ]
-    timeline = [
-      .init(
-        time: "10:42", title: "Read ProfileView.swift", detail: "Synthetic fixture",
-        state: .complete),
-      .init(
-        time: "10:44", title: "Build succeeded", detail: "Synthetic fixture · 24s", state: .complete
-      ),
-      .init(
-        time: "10:46", title: "Application launched", detail: "Synthetic fixture", state: .complete),
-      .init(time: "10:47", title: "Verifying Profile", detail: "Synthetic fixture", state: .active),
-    ]
-    evidence = [
-      .init(
-        kind: .build, status: .passed, taskGeneration: 2,
-        diagnosticSummary: "Synthetic fixture · build succeeded in 24s"),
-      .init(
-        kind: .launch, status: .passed, taskGeneration: 2,
-        diagnosticSummary: "Synthetic fixture · app launched"),
-      .init(
-        kind: .uiAssertion, status: .passed, taskGeneration: 2, criterionID: "profile-dark",
-        diagnosticSummary: "Synthetic fixture · 5 assertions passed"),
-      .init(
-        kind: .screenshot, status: .informational, taskGeneration: 2,
-        diagnosticSummary: "Synthetic fixture · comparing screenshots"),
-      .init(
-        kind: .runtimeLog, status: .passed, taskGeneration: 2,
-        diagnosticSummary: "Synthetic fixture · no unacknowledged errors"),
-    ]
-    verificationReport = .init(
-      status: .partiallyVerified, currentEvidence: evidence, staleEvidence: [],
-      missing: ["Fresh screenshot"])
-    proposedChanges = [
-      .init(path: "ProfileView.swift", kind: .modified, binary: false),
-      .init(path: "ProfileColors.swift", kind: .modified, binary: false),
-      .init(path: "Assets.xcassets", kind: .modified, binary: true),
-      .init(path: "ProfileTests.swift", kind: .added, binary: false),
-    ]
+  public func showSnapshotPage(_ page: String) {
+    switch page {
+    case "code": section = .code
+    case "changes": section = .changes
+    case "deploy": section = .git
+    case "settings": section = .settings
+    default: section = .agent
+    }
   }
 
-  public func loadDesignFailurePreview() {
-    loadDesignPreview()
-    isBusy = false
-    status = "Build failed"
-    generation = 3
-    timeline.append(
-      .init(
-        time: "10:49", title: "Build failed", detail: "Synthetic fixture · compiler error",
-        state: .warning))
-    let failed = Evidence(
-      kind: .build, status: .failed, taskGeneration: 3,
-      diagnosticSummary: "Synthetic fixture · ProfileColors.swift:42")
-    evidence.append(failed)
-    verificationReport = .init(
-      status: .failed, currentEvidence: [failed], staleEvidence: Array(evidence.dropLast()),
-      missing: ["Fresh successful build", "Launch and UI evidence are stale"])
-  }
-
-  public func loadDesignBuildPreview() {
-    loadDesignPreview()
-    setCurrentScreenshot(nil)
-    appOperation = .building
-    isBusy = true
-    status = "Building"
-    timeline.append(
-      .init(
-        time: "10:49", title: "Build started", detail: "TravelApp · iPhone 16 Pro",
-        state: .active))
-  }
-
-  public func loadPermissionPreview() {
-    loadDesignPreview()
-    status = "Awaiting permission"
-    pendingAgentPermission = .init(
-      toolCallID: "synthetic-command", title: "Run this command?",
-      detail: "Codex wants to run the command below. Review it before continuing.",
-      scopeLabel: "Isolated task",
-      scopeDetail: "/Synthetic/Tasks/profile-dark-mode",
-      command: "npm install @testing-library/react-native --save-dev",
-      options: [
-        .init(id: "allow-once", name: "Allow Once", kind: "allow_once"),
-        .init(id: "allow-task", name: "Allow For This Session", kind: "allow_always"),
-        .init(id: "reject-once", name: "Reject", kind: "reject_once"),
-        .init(id: "reject-always", name: "Reject Always", kind: "reject_always"),
-      ])
-    timeline.append(
-      .init(
-        time: "10:48", title: "Install test dependency",
-        detail: "Waiting for your approval", state: .active, category: .tool))
-  }
-
-  public func loadSettingsPreview() {
-    section = .settings
-    preflight = .init(
-      developerDirectory: "/Applications/Xcode.app/Contents/Developer",
-      xcodebuildPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
-      simctlPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/simctl",
-      xcodeVersion: "26.6", xcodeBuild: "17F113", isFullXcode: true, issues: [])
-    destinations = [
-      .init(
-        udid: "D8368E82-B87A-459C-ADE0-473ABC9CFD54", name: "iPhone 17 Pro",
-        deviceType: "iPhone 17 Pro", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-5",
-        state: "Booted")
-    ]
-    selectedDestinationID = destinations[0].udid
-    refreshAdapters()
-    refreshWDAStatus()
+  public func showSnapshotWorkspaceTab(_ tab: String) {
+    isEvidenceWorkspaceOpen = true
+    switch tab {
+    case "terminal": evidenceWorkspaceTab = .terminal
+    case "logs": evidenceWorkspaceTab = .logs
+    case "changes": evidenceWorkspaceTab = .changes
+    default: evidenceWorkspaceTab = .evidence
+    }
   }
 
   private func loadRepository(_ repository: URL, loadID: UUID) async {
@@ -2265,7 +2145,7 @@ public final class AppModel: ObservableObject {
       }
       return (
         "Allow app testing?",
-        "\(selectedAgentDisplayName) wants to \(action.lowercased()) using Operate's iOS runtime.",
+        "\(selectedAgentDisplayName) wants to \(action.lowercased()) using Lys's iOS runtime.",
         scopeLabel, scopeDetail, nil)
     }
 
@@ -2896,7 +2776,7 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Install CocoaPods dependencies?"
     confirmation.informativeText =
-      "The selected app cannot build because \(requirement.reason) Operate will run `\(command)` in \(requirement.projectDirectory.path). This executes the Podfile and may access the network."
+      "The selected app cannot build because \(requirement.reason) Lys will run `\(command)` in \(requirement.projectDirectory.path). This executes the Podfile and may access the network."
     confirmation.addButton(withTitle: "Install Pods and Continue")
     confirmation.addButton(withTitle: "Cancel")
     return confirmation.runModal() == .alertFirstButtonReturn
@@ -2969,7 +2849,7 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Update Podfile.lock?"
     confirmation.informativeText =
-      "CocoaPods refused the locked installation because the Podfile or CocoaPods version changed. Operate can run `pod install` in \(directory.path). This may modify the tracked Podfile.lock and generated support files; review the Git diff afterward."
+      "CocoaPods refused the locked installation because the Podfile or CocoaPods version changed. Lys can run `pod install` in \(directory.path). This may modify the tracked Podfile.lock and generated support files; review the Git diff afterward."
     confirmation.addButton(withTitle: "Update Lockfile and Continue")
     confirmation.addButton(withTitle: "Cancel")
     return confirmation.runModal() == .alertFirstButtonReturn
@@ -3009,7 +2889,7 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Apply the Expo compatibility repairs?"
     confirmation.informativeText =
-      "This project includes generated fmt or MMKV sources that Apple Clang 21 cannot compile. Operate will apply narrow repairs inside ios/Pods only. Regenerating ios/Pods removes them."
+      "This project includes generated fmt or MMKV sources that Apple Clang 21 cannot compile. Lys will apply narrow repairs inside ios/Pods only. Regenerating ios/Pods removes them."
     confirmation.addButton(withTitle: "Apply and Run")
     confirmation.addButton(withTitle: "Cancel")
     guard confirmation.runModal() == .alertFirstButtonReturn else { return false }
@@ -3031,7 +2911,7 @@ public final class AppModel: ObservableObject {
     guard let workspace = expoProjectRoot, let npm = npmExecutable() else {
       throw RPCError(
         code: -32096,
-        message: "npm was not found. Install Node.js, then reopen Operate.")
+        message: "npm was not found. Install Node.js, then reopen Lys.")
     }
 
     if metroTask != nil, metroWorkspace?.standardizedFileURL != workspace.standardizedFileURL {

@@ -2,7 +2,7 @@
 // OWN-WORLD: Luminous macOS studio surfaces, quiet grouped lists, 14pt structural corners, system-blue action, and green only for machine-recorded success.
 // STORY: Open a repository, delegate in isolation, watch the app, inspect fresh evidence, then review and apply or discard without losing context.
 // FIRST VIEWPORT: Persistent navigation rail; task-focused Agent column; large device stage; Verify ledger; one bottom change-review bar with the primary action at right.
-// FORM: Direct native reproduction of the user-supplied Operate reference, replacing the prior blueprint direction.
+// FORM: Direct native reproduction of the user-supplied reference, replacing the prior blueprint direction.
 // FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 
 import AppKit
@@ -15,7 +15,7 @@ struct IOSDevWorkbenchApp: App {
 
   init() {
     // SwiftPM launches do not have an app bundle to establish this automatically. A regular
-    // activation policy gives Operate a Dock presence and lets AppKit text views receive input.
+    // activation policy gives Lys a Dock presence and lets AppKit text views receive input.
     NSApplication.shared.setActivationPolicy(.regular)
     DispatchQueue.main.async {
       NSApplication.shared.activate(ignoringOtherApps: true)
@@ -23,13 +23,13 @@ struct IOSDevWorkbenchApp: App {
   }
 
   var body: some Scene {
-    WindowGroup("iOS Development Workbench") {
+    WindowGroup("Lys") {
       WorkbenchView().environmentObject(model).frame(minWidth: 1180, minHeight: 680)
         .preferredColorScheme(.light)
         .background(WindowViewportGuard())
     }
     .windowStyle(.hiddenTitleBar)
-    .defaultSize(width: 1440, height: 860)
+    .defaultSize(width: 1536, height: 1024)
     .commands {
       CommandGroup(after: .sidebar) {
         Divider()
@@ -37,6 +37,10 @@ struct IOSDevWorkbenchApp: App {
           model.toggleTerminal()
         }
         .keyboardShortcut("j", modifiers: .command)
+        Button(model.isEvidenceWorkspaceOpen ? "Hide Evidence" : "Show Evidence") {
+          model.toggleEvidenceWorkspace()
+        }
+        .keyboardShortcut("e", modifiers: [.command, .shift])
       }
     }
   }
@@ -62,6 +66,13 @@ private struct WindowViewportGuard: NSViewRepresentable {
   private func fitWindow(for view: NSView, coordinator: Coordinator) {
     DispatchQueue.main.async {
       guard let window = view.window, let screen = window.screen ?? NSScreen.main else { return }
+      window.titleVisibility = .hidden
+      window.titlebarAppearsTransparent = true
+      window.styleMask.insert(.fullSizeContentView)
+      window.isMovableByWindowBackground = true
+      window.standardWindowButton(.closeButton)?.isHidden = true
+      window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+      window.standardWindowButton(.zoomButton)?.isHidden = true
       let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
       var frame = window.frame
       frame.size.width = min(frame.width, visible.width)

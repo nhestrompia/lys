@@ -6,7 +6,7 @@ private enum Studio {
   static let backdrop = Color(red: 0.965, green: 0.968, blue: 0.974)
   static let surface = Color.white
   static let raised = Color(red: 0.955, green: 0.96, blue: 0.968)
-  static let separator = Color.black.opacity(0.085)
+  static let separator = Color.black.opacity(0.055)
   static let secondary = Color(nsColor: .secondaryLabelColor)
   static let tertiary = Color(nsColor: .tertiaryLabelColor)
   static let accent = Color(red: 0.04, green: 0.39, blue: 0.95)
@@ -24,22 +24,36 @@ public struct WorkbenchView: View {
   public var body: some View {
     GeometryReader { viewport in
       VStack(spacing: 0) {
-        OperateToolbar()
+        let compact = viewport.size.height < 820
+        LysToolbar()
           .layoutPriority(2)
         Divider().overlay(Studio.separator)
         HStack(spacing: 0) {
           NavigationRail()
           Divider().overlay(Studio.separator)
-          content
+          VStack(spacing: 0) {
+            content(viewportWidth: viewport.size.width)
+              .frame(maxWidth: .infinity, maxHeight: .infinity)
+              .clipped()
+              .layoutPriority(0)
+            if model.isEvidenceWorkspaceOpen {
+              Divider().overlay(Studio.separator)
+              EvidenceWorkspace()
+                .frame(
+                  minHeight: compact ? 132 : 180,
+                  idealHeight: compact ? 150 : 240,
+                  maxHeight: compact ? 158 : 240)
+                .layoutPriority(2)
+            }
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .layoutPriority(0)
         Divider().overlay(Studio.separator)
-        TerminalDrawer()
-          .layoutPriority(2)
-        Divider().overlay(Studio.separator)
         TaskActionBar()
+          .frame(height: compact ? 54 : 62)
           .layoutPriority(2)
       }
       .frame(width: viewport.size.width, height: viewport.size.height, alignment: .top)
@@ -49,7 +63,7 @@ public struct WorkbenchView: View {
     .foregroundStyle(Color(nsColor: .labelColor))
     .tint(Studio.accent)
     .alert(
-      "Operate",
+      "Lys",
       isPresented: Binding(
         get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })
     ) {
@@ -59,21 +73,26 @@ public struct WorkbenchView: View {
     }
   }
 
-  @ViewBuilder private var content: some View {
+  @ViewBuilder private func content(viewportWidth: CGFloat) -> some View {
     switch model.section {
     case .agent:
+      let narrow = viewportWidth < 1400
       HStack(spacing: 12) {
-        AgentPanel().frame(width: 380)
-        AppStage().frame(maxWidth: .infinity)
-        VerificationPanel().frame(width: 420)
+        AgentPanel().frame(width: narrow ? 300 : 340)
+        AppStage()
+          .frame(maxWidth: .infinity)
+        VerificationPanel().frame(width: narrow ? 320 : 400)
       }
-      .padding(12)
+      .padding(.top, 21)
+      .padding(.leading, 23)
+      .padding(.trailing, 24)
+      .padding(.bottom, 12)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     case .code:
       CodeWorkspace()
-    case .files:
-      FilesWorkspace()
     case .git:
+      DeployWorkspace()
+    case .changes:
       GitWorkspace()
     case .settings:
       SettingsWorkspace()
@@ -172,16 +191,18 @@ private struct TerminalDrawer: View {
   }
 }
 
-private struct OperateToolbar: View {
+private struct LysToolbar: View {
   @EnvironmentObject var model: AppModel
 
   var body: some View {
-    HStack(spacing: 12) {
-      Spacer().frame(width: 102)
-      Text("Operate")
-        .font(.system(size: 18, weight: .bold))
-        .padding(.trailing, 20)
-      Divider().frame(height: 24).overlay(Studio.separator)
+    HStack(spacing: 0) {
+      Text("Lys")
+        .font(.system(size: 20, weight: .bold))
+        .padding(.leading, 22)
+        .frame(width: 100, alignment: .leading)
+
+      Divider().frame(height: 28).overlay(Studio.separator)
+        .padding(.horizontal, 17.5)
 
       Menu {
         Button("Open Repository…") { model.chooseRepository() }
@@ -199,14 +220,43 @@ private struct OperateToolbar: View {
         }
       } label: {
         ToolbarControl(
-          symbol: "shippingbox", title: model.repository?.lastPathComponent ?? "Open Project",
-          width: 152)
+          symbol: "cube", title: model.repository?.lastPathComponent ?? "Open Project",
+          width: 126)
       }
       .menuStyle(.borderlessButton)
       .tint(Color(nsColor: .labelColor))
+      .frame(width: 126, height: 40)
+      .background(Studio.surface)
+      .overlay {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Studio.separator, lineWidth: 1)
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .padding(.trailing, 21)
 
-      ToolbarControl(
-        symbol: "arrow.triangle.branch", title: model.branchName, width: 118)
+      Menu {
+        if model.branchName == "—" || model.branchName.isEmpty {
+          Text("No branch detected")
+        } else {
+          Text(model.branchName)
+        }
+        if model.isGitRepository {
+          Divider()
+          Button("Open Changes", systemImage: "doc.text.magnifyingglass") { model.section = .changes }
+        }
+      } label: {
+        ToolbarControl(symbol: "arrow.triangle.branch", title: model.branchName, width: 117)
+      }
+      .menuStyle(.borderlessButton)
+      .tint(Color(nsColor: .labelColor))
+      .frame(width: 117, height: 40)
+      .background(Studio.surface)
+      .overlay {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Studio.separator, lineWidth: 1)
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .padding(.trailing, 22)
 
       Menu {
         if !model.destinations.isEmpty {
@@ -226,80 +276,61 @@ private struct OperateToolbar: View {
       } label: {
         ToolbarControl(
           symbol: "iphone",
-          title: model.selectedDestination.map { "\($0.name) · \(runtimeName($0.runtime))" }
-            ?? "Select Simulator", width: 250)
+          title: model.selectedDestination.map {
+            "\($0.name) · \(runtimeName($0.runtime))"
+          }
+            ?? "Select Simulator", width: 232)
       }
       .menuStyle(.borderlessButton)
       .tint(Color(nsColor: .labelColor))
-
-      if model.schemes.count > 1 {
-        Menu {
-          ForEach(model.schemes, id: \.self) { scheme in
-            Button(scheme) { model.selectScheme(scheme) }
-          }
-        } label: {
-          ToolbarControl(
-            symbol: "square.stack.3d.up",
-            title: model.selectedScheme.isEmpty ? "Scheme" : model.selectedScheme,
-            width: 142)
-        }
-        .menuStyle(.borderlessButton)
-        .tint(Color(nsColor: .labelColor))
+      .frame(width: 232, height: 40)
+      .background(Studio.surface)
+      .overlay {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Studio.separator, lineWidth: 1)
       }
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
       Spacer(minLength: 12)
 
       HStack(spacing: 7) {
-        Circle().fill(statusColor).frame(width: 9, height: 9)
+        Circle().fill(statusColor).frame(width: 8, height: 8)
         Text(model.status).font(.system(size: 12, weight: .medium)).lineLimit(1)
         if model.isBusy { ProgressView().controlSize(.small).scaleEffect(0.72) }
       }
-      .padding(.horizontal, 12)
-      .frame(height: 36)
+      .padding(.horizontal, 10)
+      .frame(width: 125, height: 40)
       .accessibilityElement(children: .combine)
       .accessibilityLabel("Status: \(model.status)")
 
-      HStack(spacing: 0) {
-        Button(action: model.run) {
-          Label("Run", systemImage: "play.fill")
-            .font(.system(size: 12, weight: .semibold))
-            .frame(width: 92, height: 36)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .disabled(!model.canRun)
-        Divider().overlay(Color.white.opacity(0.22)).frame(height: 36)
-        Menu {
-          Button("Build", action: model.build).disabled(!model.canBuild)
-          Button("Stop", action: model.stop).disabled(!model.isBusy)
-          if model.isExpoRepository {
-            Divider()
-            Toggle("Start Expo development server", isOn: $model.startDevServerOnRun)
-          }
-          Divider()
-          Button("Open Simulator", action: model.openSimulator)
-        } label: {
-          Image(systemName: "ellipsis")
-            .font(.system(size: 10, weight: .semibold))
-            .frame(width: 42, height: 36)
-            .foregroundStyle(.white)
-        }
-        .menuStyle(.borderlessButton)
+      Button(action: model.run) {
+        Label("Run", systemImage: "play.fill")
+          .font(.system(size: 12, weight: .semibold))
+          .frame(width: 92, height: 40)
       }
-      .background(Studio.accent.opacity(model.canRun ? 1 : 0.5))
-      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      .buttonStyle(.plain)
+      .foregroundStyle(Color.primary)
+      .background(Studio.surface)
+      .overlay {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Studio.separator, lineWidth: 1)
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .disabled(!model.canRun)
 
-      Spacer().frame(width: 24)
+      ToolbarMoreButton()
+      .padding(.leading, 16)
+      .padding(.trailing, 24)
     }
-    .padding(.horizontal, 14)
-    .frame(height: 68)
+    .frame(height: 72)
     .background(Studio.surface)
   }
 
   private var statusColor: Color {
     if model.status.contains("failed") || model.status.contains("blocked") { return Studio.warning }
     if model.isBusy { return Studio.accent }
-    return model.repository == nil ? Studio.tertiary : Studio.success
+    if model.repository == nil { return Studio.tertiary }
+    return model.status == "Running" ? Studio.success : Studio.secondary
   }
 }
 
@@ -309,16 +340,69 @@ private struct ToolbarControl: View {
   let width: CGFloat
 
   var body: some View {
-    HStack(spacing: 8) {
-      Image(systemName: symbol).font(.system(size: 13, weight: .medium))
-      Text(title).lineLimit(1)
+    ZStack(alignment: .leading) {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(Studio.surface)
+        .overlay {
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1)
+        }
+      HStack(spacing: 8) {
+        Image(systemName: symbol).font(.system(size: 13, weight: .medium))
+        Text(title).lineLimit(1)
+        Spacer(minLength: 0)
+        Image(systemName: "chevron.down")
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+      }
+      .font(.system(size: 12, weight: .medium))
+      .padding(.horizontal, 12)
     }
-    .font(.system(size: 12, weight: .medium))
-    .padding(.horizontal, 12)
-    .frame(width: width, height: 36)
-    .background(Studio.raised)
-    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    .shadow(color: .black.opacity(0.035), radius: 5, y: 2)
+    .frame(width: width, height: 40)
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .shadow(color: .black.opacity(0.014), radius: 4, y: 1)
+  }
+}
+
+private struct ToolbarMoreButton: View {
+  @EnvironmentObject var model: AppModel
+  @State private var isPresented = false
+
+  var body: some View {
+    Button {
+      isPresented.toggle()
+    } label: {
+      ZStack {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(Studio.surface)
+          .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(Studio.separator, lineWidth: 1)
+          }
+        Image(systemName: "ellipsis")
+          .font(.system(size: 14, weight: .semibold))
+          .foregroundStyle(Color.primary)
+      }
+      .frame(width: 52, height: 40)
+    }
+    .buttonStyle(.plain)
+    .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+      VStack(alignment: .leading, spacing: 2) {
+        Button("Build", action: model.build)
+          .disabled(!model.canBuild)
+        Button("Stop", action: model.stop)
+          .disabled(!model.isBusy)
+        if model.isExpoRepository {
+          Divider()
+          Toggle("Start Expo development server", isOn: $model.startDevServerOnRun)
+        }
+        Divider()
+        Button("Open Simulator", action: model.openSimulator)
+      }
+      .padding(10)
+      .frame(width: 220, alignment: .leading)
+    }
+    .help("More run actions")
   }
 }
 
@@ -326,32 +410,46 @@ private struct NavigationRail: View {
   @EnvironmentObject var model: AppModel
 
   var body: some View {
-    VStack(spacing: 8) {
-      ForEach(PrimarySection.allCases) { section in
-        Button {
-          model.section = section
-        } label: {
-          VStack(spacing: 5) {
-            Image(systemName: section.symbol)
-              .symbolVariant(model.section == section ? .fill : .none)
-              .font(.system(size: 19, weight: .regular))
-              .frame(width: 38, height: 34)
-              .background(model.section == section ? Studio.accentSoft : .clear)
-              .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            Text(section.rawValue).font(.system(size: 10, weight: .medium))
-          }
-          .foregroundStyle(model.section == section ? Studio.accent : Studio.secondary)
-          .frame(width: 68, height: 66)
-          .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(section.rawValue)
-        if section == .git { Spacer() }
+    let primarySections: [PrimarySection] = [.agent, .code, .git]
+    VStack(alignment: .leading, spacing: 6) {
+      ForEach(primarySections) { section in
+        railButton(section)
       }
+
+      Spacer(minLength: 10)
+      railButton(.settings)
     }
-    .padding(.vertical, 22)
-    .frame(minWidth: 88, maxWidth: 88, maxHeight: .infinity)
+    .padding(.top, 26)
+    .padding(.bottom, 20)
+    .frame(minWidth: 156, maxWidth: 156, maxHeight: .infinity, alignment: .topLeading)
     .background(Studio.surface)
+  }
+
+  private func railButton(_ section: PrimarySection) -> some View {
+    let isSelected = model.section == section
+    return Button {
+      model.section = section
+    } label: {
+      HStack(spacing: 8) {
+        Image(systemName: section.symbol)
+          .symbolVariant(isSelected ? .fill : .none)
+          .font(.system(size: 17, weight: .regular))
+          .frame(width: 24, height: 30)
+        Text(section.rawValue)
+          .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+          .fixedSize(horizontal: true, vertical: false)
+        Spacer(minLength: 0)
+      }
+      .foregroundStyle(isSelected ? Studio.accent : Studio.secondary)
+      .padding(.horizontal, 8)
+      .frame(width: 124, height: 42)
+      .background(isSelected ? Studio.accentSoft : .clear)
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .padding(.leading, 15)
+    .accessibilityLabel(section.rawValue)
   }
 }
 
@@ -360,18 +458,29 @@ private struct AgentPanel: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      Text("Agent")
-        .font(.system(size: 12, weight: .semibold))
-        .foregroundStyle(Studio.accent)
-        .padding(.horizontal, 22)
-        .padding(.top, 20)
+      HStack(spacing: 9) {
+        Image(systemName: "sparkles")
+          .font(.system(size: 15, weight: .medium))
+          .foregroundStyle(Studio.accent)
+        Text("Agent")
+          .font(.system(size: 13, weight: .semibold))
+        Spacer()
+        HStack(spacing: 5) {
+          Circle().fill(Studio.success).frame(width: 7, height: 7)
+          Text(model.isBusy ? "Working" : "Live")
+        }
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(model.isBusy ? Studio.accent : Studio.success)
+      }
+      .padding(.horizontal, 20)
+      .frame(height: 52)
 
       ScrollView {
         VStack(alignment: .leading, spacing: 18) {
           VStack(alignment: .leading, spacing: 10) {
-            Text(model.taskTitle.isEmpty ? "What should the agent change?" : model.taskTitle)
-              .font(.system(size: model.taskTitle.isEmpty ? 21 : 19, weight: .bold))
-              .lineSpacing(5)
+            Text(taskTitleText)
+              .font(.system(size: model.taskTitle.isEmpty ? 20 : 17, weight: .bold))
+              .lineSpacing(3)
               .fixedSize(horizontal: false, vertical: true)
             Text(taskSubtitle)
               .font(.system(size: 12))
@@ -391,17 +500,15 @@ private struct AgentPanel: View {
             HStack {
               Text("Plan").font(.system(size: 12, weight: .semibold))
               Spacer()
-              Text("Host tracked").font(.system(size: 11)).foregroundStyle(Studio.secondary)
+              Text("Generation \(model.generation)")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(Studio.secondary)
             }
-            VStack(spacing: 10) {
+            VStack(spacing: 0) {
               ForEach(Array(model.plan.enumerated()), id: \.element.id) { index, item in
-                HStack(spacing: 10) {
-                  Text("\(index + 1).").font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Studio.accent).frame(width: 18, alignment: .trailing)
-                  Text(item.title).font(.system(size: 12)).lineLimit(2)
-                  Spacer()
-                  PlanStateMark(state: item.state)
-                }
+                PlanActivityRow(
+                  index: index, item: item, detail: planDetail(for: index),
+                  duration: nil, activeMarkComplete: false)
               }
             }
           }
@@ -410,31 +517,29 @@ private struct AgentPanel: View {
             JourneyProgressSection(journey: journey)
           }
 
-          Divider().overlay(Studio.separator)
-          HStack {
-            Text("Agent activity").font(.system(size: 12, weight: .semibold))
-            Spacer()
-            HStack(spacing: 5) {
+          if model.plan.isEmpty {
+            Divider().overlay(Studio.separator)
+            HStack {
+              Text("Agent activity").font(.system(size: 12, weight: .semibold))
+              Spacer()
               Text(model.isBusy ? "Live" : "Idle")
-              Circle().fill(model.isBusy ? Studio.accent : Studio.tertiary).frame(
-                width: 6, height: 6)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(model.isBusy ? Studio.accent : Studio.secondary)
             }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(model.isBusy ? Studio.accent : Studio.secondary)
-          }
-          if model.timeline.isEmpty {
-            Text("Open a repository to begin.").font(.system(size: 12)).foregroundStyle(
-              Studio.secondary)
-          } else {
-            VStack(spacing: 0) {
-              ForEach(model.timeline.suffix(10)) { item in
-                ActivityRow(item: item)
+            if model.timeline.isEmpty {
+              Text("Open a repository to begin.").font(.system(size: 12)).foregroundStyle(
+                Studio.secondary)
+            } else {
+              VStack(spacing: 0) {
+                ForEach(model.timeline.suffix(8)) { item in
+                  ActivityRow(item: item)
+                }
               }
             }
           }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 18)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
       }
 
       if let permission = model.pendingAgentPermission {
@@ -473,7 +578,7 @@ private struct AgentPanel: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .frame(minHeight: 48)
+        .frame(height: 48)
         .background(Studio.raised)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
@@ -482,60 +587,35 @@ private struct AgentPanel: View {
           .foregroundStyle(model.agentComposerBlocker == nil ? Studio.secondary : Studio.warning)
           .lineLimit(2)
 
-        VStack(alignment: .leading, spacing: 7) {
-          HStack {
-            Menu {
-              if model.adapters.allSatisfy({ $0.executable == nil }) {
-                Text("No ACP-ready adapters detected")
-              }
-              ForEach(model.adapters) { adapter in
-                Button(adapter.displayName) { model.selectAgentAdapter(adapter.id) }
-                  .disabled(adapter.executable == nil || model.hasAgentSession)
-              }
-            } label: {
-              Text(agentLabel)
-              .font(.system(size: 11))
-              .foregroundStyle(Studio.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            Spacer()
-            Button {
-              model.section = .settings
-            } label: {
-              Image(systemName: "gearshape").frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Studio.accent)
-          }
+        AgentConfigurationBar()
 
-          HStack(spacing: 6) {
-            if let option = model.agentModelOption {
-              AgentConfigPicker(
-                option: option, title: "Model", value: model.agentModelLabel,
-                symbol: "cpu")
-            } else {
-              AgentConfigPlaceholder(title: "Model", symbol: "cpu")
-            }
-            if let option = model.agentReasoningOption {
-              AgentConfigPicker(
-                option: option, title: "Reasoning", value: model.agentReasoningLabel,
-                symbol: "brain.head.profile")
-            } else {
-              AgentConfigPlaceholder(title: "Reasoning", symbol: "brain.head.profile")
-            }
-            Spacer(minLength: 0)
-          }
-          Text(model.agentConfigStatusText)
-            .font(.system(size: 9.5))
-            .foregroundStyle(Studio.tertiary)
-            .lineLimit(2)
-        }
+        Text(model.agentConfigStatusText)
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.tertiary)
+          .lineLimit(2)
       }
-      .padding(16)
+      .padding(.horizontal, 16)
+      .padding(.top, 16)
+      .padding(.bottom, 16)
     }
     .background(Studio.surface)
     .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
-    .shadow(color: .black.opacity(0.045), radius: 16, y: 7)
+    .shadow(color: .black.opacity(0.022), radius: 14, y: 4)
+  }
+
+  private var taskTitleText: String {
+    if model.taskTitle.isEmpty { return "What should the agent change?" }
+    return model.taskTitle
+  }
+
+  private func planDetail(for index: Int) -> String {
+    switch index {
+    case 0: return "Preparing the task context."
+    case 1: return "Updating the isolated worktree."
+    case 2: return "Waiting for agent output."
+    case 3: return "Collecting fresh evidence."
+    default: return "Waiting for the previous step."
+    }
   }
 
   private var taskSubtitle: String {
@@ -560,13 +640,42 @@ private struct AgentPanel: View {
     if model.isBusy { return .active }
     return .neutral
   }
+}
 
-  private var agentLabel: String {
-    guard let adapter = model.adapters.first(where: { $0.id == model.selectedAdapterID }) else {
-      return "Choose ACP agent"
+private struct PlanActivityRow: View {
+  let index: Int
+  let item: TaskPlanItem
+  let detail: String
+  let duration: String?
+  let activeMarkComplete: Bool
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 13) {
+      PlanStateMark(state: item.state, activeMarkComplete: activeMarkComplete)
+        .frame(width: 18, height: 18)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(item.title)
+          .font(.system(size: 11.5, weight: item.state == .active ? .semibold : .medium))
+          .lineLimit(2)
+        Text(detail)
+          .font(.system(size: 10))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(2)
+      }
+      Spacer(minLength: 0)
+      if item.state == .active {
+        Circle()
+          .trim(from: 0.08, to: 0.84)
+          .stroke(Studio.accent, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+          .frame(width: 15, height: 15)
+          .rotationEffect(.degrees(-35))
+      } else if let duration {
+        Text(duration)
+          .font(.system(size: 10).monospacedDigit())
+          .foregroundStyle(Studio.secondary)
+      }
     }
-    return adapter.executable == nil
-      ? "\(adapter.displayName) needs setup" : adapter.displayName
+    .padding(.vertical, activeMarkComplete ? 10 : 8)
   }
 }
 
@@ -664,74 +773,323 @@ private struct JourneyStepMark: View {
   }
 }
 
-private struct AgentConfigPicker: View {
+private struct AgentConfigurationBar: View {
   @EnvironmentObject var model: AppModel
-  let option: ACPConfigOption
-  let title: String
-  let value: String
-  let symbol: String
 
   var body: some View {
-    Menu {
-      ForEach(option.options) { item in
-        Button {
-          model.setAgentConfigOption(option, value: item)
-        } label: {
-          HStack {
-            Text(item.name)
-            if isCurrent(item) {
-              Spacer()
-              Image(systemName: "checkmark")
-            }
-          }
-        }
-      }
-    } label: {
-      HStack(spacing: 6) {
-        Image(systemName: symbol)
-        Text("\(title): \(value)")
-          .font(.system(size: 9.5, weight: .medium))
-          .lineLimit(1)
-          .truncationMode(.middle)
-      }
-      .foregroundStyle(Studio.secondary)
-      .padding(.horizontal, 8)
-      .frame(height: 26)
-      .background(Studio.raised)
-      .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    HStack(spacing: 0) {
+      AgentModelSelector()
+        .frame(maxWidth: .infinity, alignment: .leading)
+      Divider()
+        .frame(height: 20)
+        .padding(.horizontal, 9)
+      AgentEffortSelector()
+        .fixedSize(horizontal: true, vertical: false)
     }
-    .menuStyle(.borderlessButton)
-    .help(
-      model.canChangeAgentConfigOption(option)
-        ? (option.description ?? "Choose the agent \(title.lowercased())")
-        : model.agentConfigStatusText)
-    .disabled(
-      !model.canChangeAgentConfigOption(option)
-        || (model.hasAgentSession && model.isBusy))
-  }
-
-  private func isCurrent(_ item: ACPConfigOptionValue) -> Bool {
-    option.currentValue?.stringValue == item.value
+    .frame(height: 34)
+    .accessibilityElement(children: .contain)
   }
 }
 
-private struct AgentConfigPlaceholder: View {
-  let title: String
-  let symbol: String
+private struct AgentModelSelector: View {
+  @EnvironmentObject var model: AppModel
+  @State private var isPresented = false
+  @State private var search = ""
+  @State private var browsedAdapterID = ""
 
   var body: some View {
-    HStack(spacing: 6) {
-      Image(systemName: symbol)
-      Text("\(title): Not reported")
-        .font(.system(size: 9.5, weight: .medium))
-        .foregroundStyle(Studio.tertiary)
+    Button {
+      browsedAdapterID = resolvedAdapterID
+      search = ""
+      isPresented = true
+    } label: {
+      HStack(spacing: 7) {
+        AgentMark(id: selectedAdapter?.id ?? "", size: 16)
+          .foregroundStyle(selectedAdapter?.executable == nil ? Studio.tertiary : Color.primary)
+        Text(model.agentModelOption == nil ? "Choose model" : model.agentModelLabel)
+          .font(.system(size: 11.5, weight: .medium))
+          .foregroundStyle(model.agentModelOption == nil ? Studio.secondary : Color.primary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+        Image(systemName: "chevron.down")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+      }
+      .padding(.horizontal, 3)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .frame(height: 32)
+      .contentShape(Rectangle())
     }
-    .foregroundStyle(Studio.secondary)
-    .padding(.horizontal, 8)
-    .frame(height: 26)
-    .background(Studio.raised)
-    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    .help("The selected CLI has not reported a \(title.lowercased()) yet.")
+    .buttonStyle(.plain)
+    .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+      modelBrowser
+    }
+    .help("Choose an available agent and model")
+    .accessibilityLabel("Model: \(model.agentModelLabel)")
+  }
+
+  private var modelBrowser: some View {
+    HStack(spacing: 0) {
+      providerRail
+      Divider().overlay(Studio.separator)
+      VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 9) {
+          Image(systemName: "magnifyingglass")
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Studio.secondary)
+          TextField("Search models…", text: $search)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .disabled(browsedAdapter?.executable == nil)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        Divider().overlay(Studio.separator)
+        modelList
+      }
+    }
+    .frame(width: 410, height: 390)
+    .background(Studio.surface)
+    .onAppear {
+      browsedAdapterID = resolvedAdapterID
+    }
+  }
+
+  private var providerRail: some View {
+    VStack(spacing: 7) {
+      ForEach(model.adapters) { adapter in
+        Button {
+          browsedAdapterID = adapter.id
+          search = ""
+          if adapter.executable != nil && adapter.id != model.selectedAdapterID {
+            model.selectAgentAdapter(adapter.id)
+          }
+        } label: {
+          ZStack(alignment: .bottomTrailing) {
+            AgentMark(id: adapter.id, size: 22)
+              .foregroundStyle(providerColor(adapter))
+              .frame(width: 38, height: 38)
+              .background(browsedAdapterID == adapter.id ? Studio.accentSoft : .clear)
+              .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            Circle()
+              .fill(adapter.executable == nil ? Studio.tertiary : Studio.success)
+              .frame(width: 7, height: 7)
+              .overlay(Circle().stroke(Studio.surface, lineWidth: 1.5))
+          }
+        }
+        .buttonStyle(.plain)
+        .disabled(model.hasAgentSession && adapter.id != model.selectedAdapterID)
+        .help(providerHelp(adapter))
+        .accessibilityLabel(providerHelp(adapter))
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 12)
+    .frame(width: 60)
+    .background(Studio.raised.opacity(0.58))
+  }
+
+  @ViewBuilder private var modelList: some View {
+    if let adapter = browsedAdapter {
+      if adapter.executable == nil {
+        modelUnavailable(adapter)
+      } else if filteredModels.isEmpty {
+        VStack(spacing: 8) {
+          Image(systemName: search.isEmpty ? "cpu" : "magnifyingglass")
+            .font(.system(size: 22, weight: .light))
+            .foregroundStyle(Studio.tertiary)
+          Text(search.isEmpty ? "No models reported" : "No matching models")
+            .font(.system(size: 12, weight: .semibold))
+          Text(
+            search.isEmpty
+              ? "\(adapter.displayName) has not exposed a model list yet."
+              : "Try a different model name."
+          )
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if let option = model.agentModelOption {
+        ScrollView {
+          LazyVStack(spacing: 4) {
+            ForEach(filteredModels) { item in
+              modelRow(item, option: option, adapter: adapter)
+            }
+          }
+          .padding(10)
+        }
+        .scrollIndicators(.automatic)
+      }
+    } else {
+      VStack(spacing: 8) {
+        Image(systemName: "sparkles")
+          .font(.system(size: 22, weight: .light))
+          .foregroundStyle(Studio.tertiary)
+        Text("No agents detected")
+          .font(.system(size: 12, weight: .semibold))
+        Text("Install or configure an ACP-compatible agent to choose a model.")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 230)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+  }
+
+  private func modelRow(
+    _ item: ACPConfigOptionValue, option: ACPConfigOption, adapter: DetectedAdapter
+  ) -> some View {
+    let selected = option.currentValue?.stringValue == item.value
+    return Button {
+      model.setAgentConfigOption(option, value: item)
+      isPresented = false
+    } label: {
+      HStack(spacing: 11) {
+        AgentMark(id: adapter.id, size: 17)
+          .foregroundStyle(Studio.secondary)
+          .frame(width: 20)
+        Text(item.name)
+          .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+          .foregroundStyle(Color.primary)
+          .lineLimit(1)
+        Spacer(minLength: 8)
+        if selected {
+          Image(systemName: "checkmark")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Studio.accent)
+        }
+      }
+      .padding(.horizontal, 12)
+      .frame(height: 44)
+      .background(selected ? Studio.accentSoft : .clear)
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .disabled(!model.canChangeAgentConfigOption(option) || (model.hasAgentSession && model.isBusy))
+    .help(item.description ?? "Use \(item.name)")
+  }
+
+  private func modelUnavailable(_ adapter: DetectedAdapter) -> some View {
+    VStack(spacing: 9) {
+      AgentMark(id: adapter.id, size: 25)
+        .foregroundStyle(Studio.tertiary)
+      Text("\(adapter.displayName) unavailable")
+        .font(.system(size: 12.5, weight: .semibold))
+      Text(adapter.limitation ?? "The ACP adapter is not installed or is not available on PATH.")
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 240)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  private var selectedAdapter: DetectedAdapter? {
+    model.adapters.first { $0.id == model.selectedAdapterID }
+  }
+
+  private var browsedAdapter: DetectedAdapter? {
+    model.adapters.first { $0.id == resolvedAdapterID }
+  }
+
+  private var resolvedAdapterID: String {
+    if model.adapters.contains(where: { $0.id == browsedAdapterID }) {
+      return browsedAdapterID
+    }
+    if model.adapters.contains(where: { $0.id == model.selectedAdapterID }) {
+      return model.selectedAdapterID
+    }
+    return model.adapters.first(where: { $0.executable != nil })?.id
+      ?? model.adapters.first?.id ?? ""
+  }
+
+  private var filteredModels: [ACPConfigOptionValue] {
+    guard resolvedAdapterID == model.selectedAdapterID,
+      let values = model.agentModelOption?.options
+    else { return [] }
+    let term = search.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !term.isEmpty else { return values }
+    return values.filter {
+      $0.name.localizedCaseInsensitiveContains(term)
+        || $0.value.localizedCaseInsensitiveContains(term)
+        || ($0.description?.localizedCaseInsensitiveContains(term) ?? false)
+    }
+  }
+
+  private func providerColor(_ adapter: DetectedAdapter) -> Color {
+    if adapter.executable == nil { return Studio.tertiary }
+    return browsedAdapterID == adapter.id ? Studio.accent : Studio.secondary
+  }
+
+  private func providerHelp(_ adapter: DetectedAdapter) -> String {
+    if adapter.executable != nil { return "\(adapter.displayName) — available" }
+    return "\(adapter.displayName) — unavailable. \(adapter.limitation ?? "ACP adapter not installed.")"
+  }
+}
+
+private struct AgentEffortSelector: View {
+  @EnvironmentObject var model: AppModel
+  @State private var isPresented = false
+
+  var body: some View {
+    if let option = model.agentReasoningOption {
+      Button {
+        isPresented.toggle()
+      } label: {
+        HStack(spacing: 7) {
+          Text(model.agentReasoningLabel)
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(Color.primary)
+          Image(systemName: "chevron.down")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(Studio.secondary)
+        }
+        .padding(.horizontal, 3)
+        .frame(height: 32)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+        VStack(spacing: 2) {
+          ForEach(option.options) { item in
+            Button {
+              model.setAgentConfigOption(option, value: item)
+              isPresented = false
+            } label: {
+              HStack(spacing: 12) {
+                Text(item.name)
+                  .font(.system(size: 11.5, weight: .medium))
+                Spacer(minLength: 12)
+                if option.currentValue?.stringValue == item.value {
+                  Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Studio.accent)
+                }
+              }
+              .padding(.horizontal, 10)
+              .frame(width: 164, height: 34)
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+          }
+        }
+        .padding(6)
+        .background(Studio.surface)
+      }
+      .disabled(!model.canChangeAgentConfigOption(option) || (model.hasAgentSession && model.isBusy))
+      .help(option.description ?? "Choose reasoning effort")
+      .accessibilityLabel("Reasoning effort: \(model.agentReasoningLabel)")
+    } else {
+      Text("Effort unavailable")
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(Studio.tertiary)
+        .frame(height: 32)
+        .help("The selected agent has not reported a reasoning effort control.")
+    }
   }
 }
 
@@ -748,7 +1106,7 @@ private struct ExpoSetupCallout: View {
         Text("Expo needs an iOS project")
           .font(.system(size: 12, weight: .semibold))
         Text(
-          "No .xcworkspace or .xcodeproj was found. Generate it here, then Operate will discover the scheme automatically."
+          "No .xcworkspace or .xcodeproj was found. Generate it here, then Lys will discover the scheme automatically."
         )
         .font(.system(size: 10.5)).foregroundStyle(Studio.secondary)
         .fixedSize(horizontal: false, vertical: true)
@@ -768,30 +1126,46 @@ private struct ExpoSetupCallout: View {
 private struct AppStage: View {
   @EnvironmentObject var model: AppModel
   @State private var previewZoom: CGFloat = 1
+  @State private var landscape = false
 
   var body: some View {
     GeometryReader { geometry in
-      let fittedDeviceHeight = min(650, max(300, geometry.size.height - 132))
+      let compact = geometry.size.height < 560
+      let emptyState = model.repository == nil
       let previewViewportWidth = max(0, geometry.size.width - 58)
+      let widthFittedDeviceHeight = landscape
+        ? max(300, previewViewportWidth - 44)
+        : max(300, (previewViewportWidth - 44) / 0.505)
+      let fittedDeviceHeight = min(
+        650,
+        max(360, min(geometry.size.height - (compact ? 180 : 100), widthFittedDeviceHeight)))
+      let emptyDeviceHeight = min(
+        700,
+        max(420, min(geometry.size.height * 0.80, widthFittedDeviceHeight)))
+      let deviceHeight = compact
+        ? max(300, geometry.size.height - 180)
+        : (emptyState ? emptyDeviceHeight : fittedDeviceHeight)
 
       VStack(alignment: .leading, spacing: 0) {
         HStack {
           Menu {
-            ForEach(model.schemes, id: \.self) { scheme in
-              Button(scheme) { model.selectScheme(scheme) }
+            if model.schemes.isEmpty {
+              Text("No app schemes discovered")
+            } else {
+              ForEach(model.schemes, id: \.self) { scheme in
+                Button(scheme) { model.selectScheme(scheme) }
+              }
             }
           } label: {
-            Text(model.selectedScheme.isEmpty ? "App" : model.selectedScheme)
-            .font(.system(size: 12, weight: .semibold))
+            HStack(spacing: 7) {
+              Image(systemName: "app.badge")
+              Text(model.selectedScheme.isEmpty ? "App" : model.selectedScheme)
+              Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+            }
+            .font(.system(size: 11, weight: .semibold))
           }
           .menuStyle(.borderlessButton)
-          if model.designPreview {
-            Text("Synthetic QA fixture")
-              .font(.system(size: 9, weight: .semibold))
-              .foregroundStyle(Studio.accent)
-              .padding(.horizontal, 8).padding(.vertical, 4)
-              .background(Studio.accentSoft).clipShape(Capsule())
-          }
           if model.isExpoRepository {
             Button {
               model.startDevServerOnRun.toggle()
@@ -807,43 +1181,19 @@ private struct AppStage: View {
             .buttonStyle(.plain)
             .help("Choose whether Run starts the Expo development server")
           }
-          if let journey = model.activeJourney {
-            let completed = journey.steps.filter { $0.status == .passed }.count
-            Label {
-              Text(
-                journey.steps.isEmpty
-                  ? "Agent testing"
-                  : "Agent testing \(completed)/\(journey.steps.count)"
-              )
-            } icon: {
-              Image(systemName: journey.status == .passed ? "checkmark.circle.fill" : "scope")
-            }
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(journey.status == .failed ? Studio.warning : Studio.accent)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(Studio.accentSoft)
-            .clipShape(Capsule())
-            .help(journey.goal)
-          }
           Spacer()
-          Button(action: model.openSimulator) {
-            Label("Open Simulator", systemImage: "arrow.up.right.square")
-              .font(.system(size: 11, weight: .medium))
-          }
-          .buttonStyle(.borderedProminent)
-          .controlSize(.small)
-          .disabled(model.preflight?.isFullXcode != true)
-          .help("Open Apple's separate Simulator window")
+          orientationControls
           Button(action: model.refreshApp) {
-            Label("Refresh", systemImage: "arrow.clockwise")
-              .font(.system(size: 11, weight: .medium))
-              .frame(minHeight: 32)
+            Image(systemName: "arrow.clockwise")
+              .font(.system(size: 13, weight: .medium))
+              .frame(width: 30, height: 30)
           }
           .buttonStyle(.plain)
           .disabled(model.selectedTarget == nil || model.isBusy)
           .help("Relaunch the installed app and capture a fresh screenshot")
           Menu {
+            Button("Open Simulator", systemImage: "arrow.up.right.square", action: model.openSimulator)
+              .disabled(model.preflight?.isFullXcode != true)
             Button("Refresh App", systemImage: "arrow.clockwise", action: model.refreshApp)
               .disabled(model.selectedTarget == nil || model.isBusy)
             Toggle("Open Apple Simulator after Run", isOn: $model.openLiveSimulatorOnRun)
@@ -858,23 +1208,36 @@ private struct AppStage: View {
           .menuStyle(.borderlessButton)
         }
         .padding(.horizontal, 20)
-        .frame(height: 52)
+        .frame(height: compact ? 38 : 44)
 
         HStack(spacing: 0) {
-          ScrollView([.horizontal, .vertical]) {
-            DevicePreview(height: fittedDeviceHeight * previewZoom)
-              .padding(.horizontal, 22)
-              .padding(.vertical, 14)
-              .frame(
-                minWidth: max(0, previewViewportWidth - 44),
-                minHeight: max(0, geometry.size.height - 116), alignment: .top)
+          if emptyState {
+            VStack(spacing: 0) {
+              Spacer(minLength: 0)
+              DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
+                .offset(y: geometry.size.height >= 800 ? 32 : 0)
+              Spacer(minLength: 0)
+            }
+            .frame(minWidth: previewViewportWidth, maxWidth: previewViewportWidth, maxHeight: .infinity)
+            .background(Studio.backdrop)
+            .clipped()
+          } else {
+            ScrollView([.horizontal, .vertical]) {
+              DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
+                .padding(.horizontal, 22)
+                .padding(.top, compact ? 120 : 8)
+                .padding(.bottom, compact ? 0 : 8)
+                .frame(
+                  minWidth: max(0, previewViewportWidth - 44),
+                  minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .top)
+            }
+            .frame(
+              minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
+              maxHeight: .infinity)
+            .scrollIndicators(.automatic)
+            .background(Studio.backdrop)
+            .clipped()
           }
-          .frame(
-            minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
-            maxHeight: .infinity)
-          .scrollIndicators(.automatic)
-          .background(Studio.backdrop)
-          .clipped()
           InteractionPalette()
             .frame(width: 58)
             .frame(maxHeight: .infinity)
@@ -884,18 +1247,56 @@ private struct AppStage: View {
 
         HStack(spacing: 0) {
           appearanceControls
-          Divider().frame(height: 22).padding(.horizontal, 10)
-          zoomControls
+          if !compact {
+            Divider().frame(height: 22).padding(.horizontal, 10)
+            zoomControls
+          }
           Spacer(minLength: 10)
-          previewInteractionStatus
+          if !compact {
+            previewInteractionStatus
+          }
         }
         .padding(.horizontal, 14)
-        .frame(height: 64)
+        .frame(height: compact ? 40 : 48)
       }
     }
     .background(Studio.surface)
     .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
-    .shadow(color: .black.opacity(0.035), radius: 16, y: 7)
+    .shadow(color: .black.opacity(0.018), radius: 14, y: 4)
+  }
+
+  private var orientationControls: some View {
+    HStack(spacing: 2) {
+      orientationButton("Portrait", selected: !landscape) { landscape = false }
+      orientationButton("Landscape", selected: landscape) { landscape = true }
+      Divider().frame(height: 20).padding(.horizontal, 8)
+      Button {
+        landscape.toggle()
+      } label: {
+        Image(systemName: "arrow.triangle.2.circlepath")
+          .font(.system(size: 13, weight: .medium))
+          .frame(width: 28, height: 28)
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(Studio.secondary)
+      .help("Rotate the preview")
+    }
+    .fixedSize()
+  }
+
+  private func orientationButton(
+    _ title: String, selected: Bool, action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Text(title)
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(selected ? Color.primary : Studio.secondary)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(selected ? Studio.accentSoft : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+    .buttonStyle(.plain)
   }
 
   private var appearanceControls: some View {
@@ -905,7 +1306,9 @@ private struct AppStage: View {
       appearanceButton(.dark, title: "Dark")
       Divider().frame(height: 20).padding(.horizontal, 6)
       Image(systemName: "iphone").foregroundStyle(Studio.secondary)
-      Text("Portrait").font(.system(size: 11, weight: .medium)).fixedSize()
+      Text(landscape ? "Landscape" : "Portrait")
+        .font(.system(size: 11, weight: .medium))
+        .fixedSize()
     }
     .fixedSize()
   }
@@ -1013,11 +1416,24 @@ private struct SimulatorInteractionStatus: View {
 private struct DevicePreview: View {
   @EnvironmentObject var model: AppModel
   let height: CGFloat
+  var landscape = false
 
   private var scale: CGFloat { height / 650 }
-  private var width: CGFloat { height * 306 / 650 }
+  private var width: CGFloat { height * 0.505 }
 
   var body: some View {
+    ZStack {
+      deviceBody
+        .frame(width: width, height: height)
+        .rotationEffect(.degrees(landscape ? 90 : 0))
+    }
+    .frame(width: landscape ? height : width, height: landscape ? width : height)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(
+      model.currentScreenshot == nil ? "No app screenshot" : "Latest app screenshot")
+  }
+
+  @ViewBuilder private var deviceBody: some View {
     ZStack {
       RoundedRectangle(cornerRadius: 52 * scale, style: .continuous)
         .fill(Color(red: 0.08, green: 0.085, blue: 0.095))
@@ -1026,10 +1442,6 @@ private struct DevicePreview: View {
         .stroke(Color.white.opacity(0.32), lineWidth: max(1, 2 * scale)).padding(4 * scale)
       if let title = model.appOperation.title, let detail = model.appOperation.detail {
         deviceOperation(title: title, detail: detail)
-      } else if model.designPreview {
-        SyntheticProfilePreview()
-          .clipShape(RoundedRectangle(cornerRadius: 45 * scale, style: .continuous))
-          .padding(8 * scale)
       } else if let image = model.currentScreenshotImage {
         ZStack {
           Image(nsImage: image)
@@ -1113,10 +1525,6 @@ private struct DevicePreview: View {
       )
       .padding(.top, 15 * scale)
     }
-    .frame(width: width, height: height)
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel(
-      model.currentScreenshot == nil ? "No app screenshot" : "Latest app screenshot")
   }
 
   private func deviceOperation(title: String, detail: String) -> some View {
@@ -1152,7 +1560,7 @@ private struct DevicePreview: View {
       return "Select full Xcode to discover Simulator destinations."
     }
     if model.needsExpoPreparation {
-      return "Generate the native iOS workspace once; Operate will detect it automatically."
+      return "Generate the native iOS workspace once; Lys will detect it automatically."
     }
     if model.selectedDestination == nil { return "Choose a Simulator from the toolbar." }
     if model.selectedContainer == nil {
@@ -1170,8 +1578,8 @@ private struct InteractionPalette: View {
   @State private var showAllHierarchyNodes = false
 
   var body: some View {
-    VStack(spacing: 5) {
-      paletteButton("list.bullet.rectangle", help: "Inspect accessibility hierarchy") {
+    VStack(spacing: 6) {
+      paletteButton("cursorarrow", help: "Inspect accessibility hierarchy") {
         model.captureHierarchy()
         showInspector = true
       }
@@ -1192,35 +1600,41 @@ private struct InteractionPalette: View {
         CapturedScreenshotView()
       }
 
-      paletteButton("checkmark.seal", help: "Assert that the selected element is present") {
+      paletteButton("viewfinder", help: "Assert that the selected element is present") {
         model.assertSelectedElement()
       }
       .disabled(!hasDeterministicSelection)
 
-      if automationAvailable {
-        Image(systemName: "checkmark.shield.fill")
-          .font(.system(size: 10, weight: .semibold))
-          .foregroundStyle(Studio.success)
-          .frame(width: 42, height: 24)
-          .help("Semantic interaction is ready")
-      } else {
-        Button(action: model.setupWebDriverAgent) {
-          Image(systemName: "lock.open")
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(
-              model.wdaStatus.availability == .setupRequired ? Studio.accent : Studio.tertiary
-            )
-            .frame(width: 42, height: 32)
+      Menu {
+        Button("Capture Screenshot", systemImage: "camera") {
+          showScreenshot = true
+          model.captureCurrentScreenshot()
         }
-        .buttonStyle(.plain)
-        .disabled(model.wdaStatus.availability != .setupRequired || model.isBusy)
-        .help(model.wdaStatus.detail)
+        .disabled(model.selectedTarget == nil)
+        Button("Open Simulator", systemImage: "arrow.up.right.square", action: model.openSimulator)
+          .disabled(model.preflight?.isFullXcode != true)
+        Button("Inspect hierarchy", systemImage: "list.bullet.rectangle") {
+          model.captureHierarchy()
+          showInspector = true
+        }
+        if model.wdaStatus.availability == .setupRequired {
+          Divider()
+          Button("Set up semantic automation", systemImage: "lock.open", action: model.setupWebDriverAgent)
+            .disabled(model.isBusy)
+        }
+      } label: {
+        Image(systemName: "ellipsis")
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+          .frame(width: 32, height: 32)
       }
+      .menuStyle(.borderlessButton)
+      .help("More preview tools")
     }
-    .padding(6)
+    .padding(5)
     .background(Studio.surface)
     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-    .shadow(color: .black.opacity(0.07), radius: 12, y: 5)
+    .shadow(color: .black.opacity(0.035), radius: 10, y: 4)
   }
 
   private var automationAvailable: Bool {
@@ -1243,8 +1657,8 @@ private struct InteractionPalette: View {
     _ symbol: String, help: String, action: @escaping () -> Void
   ) -> some View {
     Button(action: action) {
-      Image(systemName: symbol).font(.system(size: 17, weight: .regular)).frame(
-        width: 42, height: 42
+      Image(systemName: symbol).font(.system(size: 16, weight: .regular)).frame(
+        width: 34, height: 42
       )
       .background(.clear)
       .foregroundStyle(Studio.accent)
@@ -1397,106 +1811,153 @@ private struct CapturedScreenshotView: View {
 
 private struct VerificationPanel: View {
   @EnvironmentObject var model: AppModel
-  @State private var selectedEvidence: Evidence?
 
   var body: some View {
-    VStack(spacing: 12) {
-      VStack(spacing: 0) {
-        HStack {
-          Text("Verify").font(.system(size: 12, weight: .semibold)).foregroundStyle(Studio.accent)
-          Spacer()
-          Text("Generation \(model.generation)").font(.system(size: 10).monospacedDigit())
-            .foregroundStyle(Studio.secondary)
-        }
-        .padding(.horizontal, 20)
-        .frame(height: 48)
-        Divider().overlay(Studio.separator)
-
-        HStack(spacing: 14) {
-          VerificationGlyph(status: summaryStatus, size: 42)
-          VStack(alignment: .leading, spacing: 4) {
-            Text(summaryTitle).font(.system(size: 18, weight: .bold))
-            Text(summaryDetail).font(.system(size: 11)).foregroundStyle(Studio.secondary)
-          }
-          Spacer()
-        }
-        .padding(20)
-
-        Divider().overlay(Studio.separator)
-        ForEach(checks, id: \.title) { check in
-          VerificationRow(check: check)
-          if check.title != checks.last?.title { Divider().overlay(Studio.separator) }
-        }
-      }
-      .background(Studio.surface)
-      .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
-      .shadow(color: .black.opacity(0.04), radius: 14, y: 6)
-      .fixedSize(horizontal: false, vertical: true)
-
-      VStack(spacing: 0) {
-        HStack {
-          VStack(alignment: .leading, spacing: 2) {
-            Text("Evidence").font(.system(size: 12, weight: .semibold))
-            Text("Machine-recorded proof · manual preview actions are excluded · click to inspect")
-              .font(.system(size: 9.5))
+    ScrollView {
+      VStack(spacing: 12) {
+        VStack(spacing: 0) {
+          HStack {
+            Text("Progress")
+              .font(.system(size: 13, weight: .semibold))
+            Spacer()
+            Text("Generation \(model.generation)")
+              .font(.system(size: 10).monospacedDigit())
               .foregroundStyle(Studio.secondary)
-              .lineLimit(1)
           }
-          Spacer()
-          Text(model.verificationEvidence.isEmpty ? "No proof" : "\(model.verificationEvidence.count) artifacts")
-            .font(.system(size: 11)).foregroundStyle(Studio.accent)
-        }
-        .padding(.horizontal, 20)
-        .frame(height: 58)
-        Divider().overlay(Studio.separator)
-        if model.verificationEvidence.isEmpty {
-          VStack(spacing: 10) {
-            Image(systemName: "checklist.unchecked").font(.system(size: 24, weight: .light))
-              .foregroundStyle(Studio.tertiary)
-            Text(
-              "Manual preview actions are exploratory, not verification proof. Capture a stable screenshot or run an assertion."
-            )
-              .font(.system(size: 11)).foregroundStyle(Studio.secondary)
-              .multilineTextAlignment(.center)
-              .frame(maxWidth: 280)
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-          ScrollView {
-            LazyVStack(spacing: 0) {
-              ForEach(Array(model.verificationEvidence.reversed())) { evidence in
-                EvidenceRow(evidence: evidence) { selectedEvidence = evidence }
-                if evidence.id != model.verificationEvidence.first?.id {
-                  Divider().overlay(Studio.separator)
-                }
+          .padding(.horizontal, 20)
+          .frame(height: 54)
+          Divider().overlay(Studio.separator)
+          VStack(spacing: 0) {
+            ForEach(progressRows, id: \.title) { row in
+              VerificationRow(check: row)
+              if row.title != progressRows.last?.title {
+                Divider().overlay(Studio.separator)
               }
             }
           }
-          .scrollIndicators(.visible)
         }
+        .background(Studio.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
+    .shadow(color: .black.opacity(0.022), radius: 12, y: 4)
+
+        environmentCard
+        recentRunsCard
       }
-      .frame(maxHeight: .infinity, alignment: .top)
-      .background(Studio.surface)
-      .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
-      .shadow(color: .black.opacity(0.04), radius: 14, y: 6)
-      .popover(item: $selectedEvidence, arrowEdge: .trailing) { evidence in
-        EvidenceArtifactInspector(evidence: evidence)
-      }
+      .padding(.bottom, 2)
     }
+    .scrollIndicators(.automatic)
   }
 
-  private var checks: [VerificationCheck] {
+  private var environmentCard: some View {
+    HStack(spacing: 12) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Environment")
+          .font(.system(size: 12, weight: .semibold))
+        Text(environmentDetail)
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+      }
+      Spacer(minLength: 6)
+      Button("Simulator", action: model.openSimulator)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(model.preflight?.isFullXcode != true)
+        .help("Open the selected Simulator")
+    }
+    .padding(.horizontal, 18)
+    .frame(height: 64)
+    .background(Studio.surface)
+    .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
+    .shadow(color: .black.opacity(0.018), radius: 11, y: 4)
+  }
+
+  private var recentRunsCard: some View {
+    VStack(spacing: 0) {
+        HStack {
+          Text("Recent Runs")
+            .font(.system(size: 12, weight: .semibold))
+          Spacer()
+          Button("View all") {
+            model.evidenceWorkspaceTab = .logs
+            model.isEvidenceWorkspaceOpen = true
+          }
+          .buttonStyle(.plain)
+          .font(.system(size: 10.5, weight: .medium))
+          .foregroundStyle(Studio.accent)
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 46)
+        Divider().overlay(Studio.separator)
+        if recentRuns.isEmpty {
+          Text("No completed runs in this workspace.")
+            .font(.system(size: 10.5))
+            .foregroundStyle(Studio.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+        } else {
+          ForEach(recentRuns, id: \.id) { item in
+            HStack(spacing: 9) {
+              Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(Studio.success)
+              Text(item.title)
+                .font(.system(size: 10.5, weight: .medium))
+                .lineLimit(1)
+              Spacer(minLength: 6)
+              Text(item.time)
+                .font(.system(size: 9.5).monospacedDigit())
+                .foregroundStyle(Studio.secondary)
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 32)
+          }
+        }
+      }
+      .background(Studio.surface)
+      .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
+      .shadow(color: .black.opacity(0.022), radius: 12, y: 4)
+  }
+
+  private var progressRows: [VerificationCheck] {
     [
       check("Build", kind: .build, waiting: "Waiting for a fresh build"),
       check("Launch", kind: .launch, waiting: "Waiting for app launch"),
-      check(
-        "UI interaction", kind: .uiAssertion,
-        waiting: model.requiresUIVerification
-          ? (model.isSemanticAutomationReady
-            ? "Waiting for a deterministic UI assertion" : "WDA compatibility setup required")
-          : "Optional until an editable task requires UI verification"),
-      check("Screenshot", kind: .screenshot, waiting: "Waiting for current screenshot"),
+      testingCheck,
+      validateCheck,
+      .init(title: "Deploy", detail: "Waiting for validation", status: .waiting),
     ]
+  }
+
+  private var testingCheck: VerificationCheck {
+    if let evidence = model.evidence.reversed().first(where: {
+      $0.kind == .uiAssertion || $0.kind == .test
+    }), evidence.taskGeneration == model.generation {
+      return .init(
+        title: "Testing", detail: evidence.diagnosticSummary,
+        status: evidence.status == .passed ? .passed : evidence.status == .failed ? .failed : .blocked)
+    }
+    return .init(
+      title: "Testing",
+      detail: model.requiresUIVerification
+        ? (model.isSemanticAutomationReady ? "Waiting for UI tests" : "UI automation setup required")
+        : "Waiting for tests",
+      status: model.requiresUIVerification && !model.isSemanticAutomationReady ? .blocked : .waiting)
+  }
+
+  private var validateCheck: VerificationCheck {
+    switch model.verificationReport?.status {
+    case .verified:
+      return .init(title: "Validate", detail: "All evidence is current", status: .passed)
+    case .failed:
+      return .init(title: "Validate", detail: "Verification failed", status: .failed)
+    case .blocked:
+      return .init(title: "Validate", detail: "Waiting for compatibility setup", status: .blocked)
+    case .partiallyVerified:
+      return .init(title: "Validate", detail: "Waiting for tests", status: .waiting)
+    case nil:
+      return .init(title: "Validate", detail: "Waiting for tests", status: .waiting)
+    }
   }
 
   private func check(_ title: String, kind: EvidenceKind, waiting: String) -> VerificationCheck {
@@ -1521,35 +1982,20 @@ private struct VerificationPanel: View {
     }
   }
 
-  private var summaryStatus: VerificationCheck.Status {
-    switch model.verificationReport?.status {
-    case .verified: .passed
-    case .failed: .failed
-    case .blocked: .blocked
-    case .partiallyVerified, nil: .waiting
-    }
+  private var environmentDetail: String {
+    let device = model.selectedDestination?.name ?? "No Simulator selected"
+    let runtime = model.selectedDestination.map { runtimeName($0.runtime) }
+      ?? "Choose a destination"
+    return "\(device) · \(runtime)"
   }
-  private var summaryTitle: String {
-    switch model.verificationReport?.status {
-    case .verified: "Verified"
-    case .failed: "Verification failed"
-    case .blocked: "Verification blocked"
-    case .partiallyVerified: "Partially verified"
-    case nil: "No current verification"
-    }
-  }
-  private var summaryDetail: String {
-    guard let report = model.verificationReport else {
-      return "Run the app to collect machine-recorded evidence."
-    }
-    if report.missing.isEmpty { return "Evidence is current for generation \(model.generation)." }
-    return report.missing.first.map { "Missing: \($0)" }
-      ?? "Additional evidence is required."
+
+  private var recentRuns: [TimelineItem] {
+    model.timeline.filter { $0.state == .complete }.suffix(3).reversed()
   }
 }
 
 private struct VerificationCheck {
-  enum Status { case passed, failed, waiting, blocked, optional }
+  enum Status { case passed, failed, waiting, blocked, optional, active }
   var title: String
   var detail: String
   var status: Status
@@ -1558,17 +2004,19 @@ private struct VerificationCheck {
 private struct VerificationRow: View {
   let check: VerificationCheck
   var body: some View {
-    HStack(spacing: 12) {
+    HStack(spacing: 17) {
       VerificationGlyph(status: check.status, size: 22)
       VStack(alignment: .leading, spacing: 4) {
         Text(check.title).font(.system(size: 13, weight: .semibold))
         Text(check.detail).font(.system(size: 11)).foregroundStyle(Studio.secondary).lineLimit(2)
       }
       Spacer()
-      Text(statusText).font(.system(size: 10, weight: .medium)).foregroundStyle(statusColor)
+      if !statusText.isEmpty {
+        Text(statusText).font(.system(size: 10, weight: .medium)).foregroundStyle(statusColor)
+      }
     }
     .padding(.horizontal, 20)
-    .frame(minHeight: 70)
+    .frame(height: 65)
   }
   private var statusText: String {
     switch check.status {
@@ -1576,7 +2024,8 @@ private struct VerificationRow: View {
     case .failed: "Failed"
     case .waiting: "Waiting"
     case .blocked: "Blocked"
-    case .optional: "Optional"
+    case .optional: ""
+    case .active: "3 / 8"
     }
   }
   private var statusColor: Color {
@@ -1586,6 +2035,7 @@ private struct VerificationRow: View {
     case .waiting: Studio.secondary
     case .blocked: Studio.warning
     case .optional: Studio.secondary
+    case .active: Studio.accent
     }
   }
 }
@@ -1595,9 +2045,13 @@ private struct VerificationGlyph: View {
   var size: CGFloat = 22
   var body: some View {
     ZStack {
-      Circle().fill(fill).frame(width: size, height: size)
-      Image(systemName: symbol).font(.system(size: size * 0.48, weight: .bold)).foregroundStyle(
-        foreground)
+      if status == .active {
+        Circle().stroke(Studio.accent, lineWidth: 2).frame(width: size, height: size)
+      } else {
+        Circle().fill(fill).frame(width: size, height: size)
+        Image(systemName: symbol).font(.system(size: size * 0.48, weight: .bold)).foregroundStyle(
+          foreground)
+      }
     }
     .accessibilityLabel(label)
   }
@@ -1608,6 +2062,7 @@ private struct VerificationGlyph: View {
     case .waiting: Studio.accentSoft
     case .blocked: Color.orange.opacity(0.17)
     case .optional: Studio.raised
+    case .active: .clear
     }
   }
   private var foreground: Color {
@@ -1616,6 +2071,7 @@ private struct VerificationGlyph: View {
     case .waiting: Studio.accent
     case .blocked: Studio.warning
     case .optional: Studio.secondary
+    case .active: Studio.accent
     }
   }
   private var symbol: String {
@@ -1625,6 +2081,7 @@ private struct VerificationGlyph: View {
     case .waiting: "clock"
     case .blocked: "lock"
     case .optional: "minus"
+    case .active: "circle"
     }
   }
   private var label: String {
@@ -1634,6 +2091,7 @@ private struct VerificationGlyph: View {
     case .waiting: "Waiting"
     case .blocked: "Blocked"
     case .optional: "Optional"
+    case .active: "Running"
     }
   }
 }
@@ -1936,190 +2394,960 @@ private struct ArtifactActionBar: View {
   }
 }
 
+private struct EvidenceWorkspace: View {
+  @EnvironmentObject var model: AppModel
+  @State private var selectedEvidence: Evidence?
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 0) {
+        ForEach(EvidenceWorkspaceTab.allCases) { tab in
+          tabButton(tab)
+        }
+        if !model.proposedChanges.isEmpty {
+          Text("\(model.proposedChanges.count)")
+            .font(.system(size: 9, weight: .semibold).monospacedDigit())
+            .foregroundStyle(Studio.secondary)
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(Studio.raised)
+            .clipShape(Capsule())
+            .padding(.leading, -4)
+        }
+        Spacer(minLength: 12)
+        if model.evidenceWorkspaceTab == .terminal {
+          HStack(spacing: 16) {
+            Button("Copy Latest", action: copyLatest)
+              .buttonStyle(.plain)
+              .font(.system(size: 10.5, weight: .medium))
+              .disabled(model.terminalEntries.isEmpty)
+            Button("Clear", action: model.clearTerminal)
+              .buttonStyle(.plain)
+              .font(.system(size: 10.5, weight: .medium))
+              .disabled(model.terminalEntries.isEmpty || model.terminalEntries.contains(where: { $0.state == .running }))
+          }
+        }
+      }
+      .padding(.horizontal, 16)
+      .frame(height: 40)
+      Divider().overlay(Studio.separator)
+      tabContent
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    .background(Studio.surface)
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .shadow(color: .black.opacity(0.018), radius: 11, y: 4)
+    .padding(.leading, 24)
+    .padding(.trailing, 24)
+    .padding(.top, 8)
+    .padding(.bottom, 4)
+  }
+
+  @ViewBuilder private var tabContent: some View {
+    switch model.evidenceWorkspaceTab {
+    case .terminal:
+      if model.terminalEntries.isEmpty {
+        workspaceMessage(symbol: "terminal", title: "Terminal is ready", detail: "Build and agent commands will stream here.")
+      } else {
+        TerminalTranscriptView(entries: model.terminalEntries)
+      }
+    case .logs:
+      if model.timeline.isEmpty {
+        workspaceMessage(
+          symbol: "list.bullet.rectangle", title: "No logs yet",
+          detail: "Run an operation to record a timeline.")
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 0) {
+            ForEach(model.timeline.suffix(8)) { item in
+              HStack(alignment: .top, spacing: 12) {
+                LogStateMark(state: item.state)
+                Text(item.time)
+                  .font(.system(size: 9.5).monospacedDigit())
+                  .foregroundStyle(Studio.secondary)
+                  .frame(width: 44, alignment: .leading)
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(item.title).font(.system(size: 11, weight: .medium))
+                  if !item.detail.isEmpty {
+                    Text(item.detail)
+                      .font(.system(size: 10))
+                      .foregroundStyle(Studio.secondary)
+                      .lineLimit(1)
+                  }
+                }
+                Spacer(minLength: 0)
+              }
+              .padding(.horizontal, 18)
+              .frame(minHeight: 36)
+              if item.id != model.timeline.suffix(8).last?.id {
+                Divider().overlay(Studio.separator)
+              }
+            }
+          }
+        }
+      }
+    case .evidence:
+      evidenceContent
+    case .changes:
+      if model.proposedChanges.isEmpty {
+        workspaceMessage(
+          symbol: "checkmark", title: "No changes",
+          detail: "The isolated task has not produced a change set.")
+      } else {
+        changesContent
+      }
+    }
+  }
+
+  private var evidenceContent: some View {
+    HStack(spacing: 0) {
+      ScrollView(.horizontal) {
+        HStack(spacing: 12) {
+          ForEach(Array(model.verificationEvidence.reversed().prefix(4))) { evidence in
+            Button { selectedEvidence = evidence } label: {
+              EvidenceThumbnail(evidence: evidence)
+            }
+            .buttonStyle(.plain)
+            .popover(item: $selectedEvidence, arrowEdge: .top) { selected in
+              EvidenceArtifactInspector(evidence: selected)
+            }
+          }
+          Button {
+            model.captureCurrentScreenshot()
+          } label: {
+            VStack(spacing: 6) {
+              Image(systemName: "plus")
+                .font(.system(size: 17, weight: .light))
+              Text("Add")
+                .font(.system(size: 10.5, weight: .medium))
+            }
+            .foregroundStyle(model.selectedTarget == nil ? Studio.tertiary : Studio.secondary)
+            .frame(width: 92, height: 104)
+            .overlay {
+              RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Studio.separator, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+            }
+          }
+          .buttonStyle(.plain)
+          .disabled(model.selectedTarget == nil)
+          .help("Capture a current Simulator screenshot")
+        }
+        .padding(.horizontal, 18)
+      }
+      .scrollIndicators(.hidden)
+      Divider().padding(.vertical, 12)
+      VStack(alignment: .leading, spacing: 8) {
+        HStack {
+          Text("Logs").font(.system(size: 11, weight: .semibold))
+          Spacer()
+          Button("View full log") { model.evidenceWorkspaceTab = .logs }
+            .buttonStyle(.plain)
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(Studio.accent)
+        }
+        HStack(spacing: 6) {
+          Circle().fill(model.terminalEntries.contains(where: { $0.state == .failed }) ? .red : Studio.success)
+            .frame(width: 6, height: 6)
+          Text(model.terminalEntries.contains(where: { $0.state == .failed }) ? "A command failed" : "All available logs captured")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Text(logSummary)
+          .font(.system(size: 10).monospacedDigit())
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(3)
+      }
+      .padding(.horizontal, 18)
+      .frame(width: 250)
+    }
+  }
+
+  private var changesContent: some View {
+    ScrollView {
+      LazyVStack(spacing: 0) {
+        ForEach(model.proposedChanges) { change in
+          HStack(spacing: 14) {
+            Text(change.kind.rawValue.uppercased())
+              .font(.system(size: 9, weight: .bold).monospaced())
+              .foregroundStyle(changeColor(change.kind))
+              .frame(width: 68, alignment: .leading)
+            Text(change.path)
+              .font(.system(size: 10.5).monospaced())
+              .lineLimit(1)
+            Spacer(minLength: 0)
+            if change.binary {
+              Text("Binary")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.warning)
+            }
+          }
+          .padding(.horizontal, 18)
+          .frame(minHeight: 32)
+        }
+      }
+    }
+  }
+
+  private func tabButton(_ tab: EvidenceWorkspaceTab) -> some View {
+    Button {
+      model.evidenceWorkspaceTab = tab
+      if tab == .terminal { model.isTerminalExpanded = true }
+    } label: {
+      Text(tab.rawValue)
+        .font(.system(size: 10.5, weight: model.evidenceWorkspaceTab == tab ? .semibold : .medium))
+        .foregroundStyle(model.evidenceWorkspaceTab == tab ? Color.primary : Studio.secondary)
+        .frame(width: tabWidth(tab), height: 40)
+        .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(model.evidenceWorkspaceTab == tab ? Color.primary : .clear)
+          .frame(
+            width: model.evidenceWorkspaceTab == tab ? tabWidth(tab) - 18 : 0,
+            height: 2)
+        }
+    }
+    .buttonStyle(.plain)
+    .contentShape(Rectangle())
+    .accessibilityLabel("Show \(tab.rawValue)")
+    .accessibilityValue(model.evidenceWorkspaceTab == tab ? "Selected" : "")
+  }
+
+  private func tabWidth(_ tab: EvidenceWorkspaceTab) -> CGFloat {
+    switch tab {
+    case .terminal, .logs: 70
+    case .evidence: 88
+    case .changes: 78
+    }
+  }
+
+  private func workspaceMessage(symbol: String, title: String, detail: String) -> some View {
+    VStack(spacing: 5) {
+      Image(systemName: symbol)
+        .font(.system(size: 18, weight: .light))
+        .foregroundStyle(Studio.tertiary)
+      Text(title).font(.system(size: 11, weight: .semibold))
+      Text(detail).font(.system(size: 10)).foregroundStyle(Studio.secondary)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  private var logSummary: String {
+    let count = model.timeline.count
+    return "\(count) recorded event\(count == 1 ? "" : "s") · generation \(model.generation)"
+  }
+
+  private func copyLatest() {
+    guard let entry = model.terminalEntries.last else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(
+      "\(entry.workingDirectory) % \(entry.command)\n\(entry.output)", forType: .string)
+  }
+
+  private func changeColor(_ kind: ProposedChangeKind) -> Color {
+    switch kind {
+    case .added: Studio.success
+    case .modified: Studio.accent
+    case .deleted: .red
+    }
+  }
+}
+
+private struct EvidenceThumbnail: View {
+  let evidence: Evidence
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 5) {
+      ZStack {
+        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Studio.raised)
+        if let image = previewImage {
+          Image(nsImage: image).resizable().scaledToFill()
+        } else {
+          Image(systemName: symbol)
+            .font(.system(size: 19, weight: .light))
+            .foregroundStyle(Studio.secondary)
+        }
+      }
+      .frame(width: 92, height: 104)
+      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      Text(title)
+        .font(.system(size: 9.5, weight: .medium))
+        .lineLimit(1)
+        .frame(width: 92, alignment: .center)
+    }
+    .foregroundStyle(Color.primary)
+  }
+
+  private var previewImage: NSImage? {
+    evidence.artifactPaths.compactMap { path in
+      NSImage(contentsOf: URL(fileURLWithPath: path))
+    }.first
+  }
+
+  private var title: String {
+    switch evidence.kind {
+    case .build: "Build"
+    case .test: "Tests"
+    case .launch: "Launch"
+    case .uiAction: "UI action"
+    case .uiAssertion: "Assertion"
+    case .screenshot: "Screenshot"
+    case .runtimeLog: "App log"
+    case .diff: "Changes"
+    }
+  }
+
+  private var symbol: String {
+    switch evidence.kind {
+    case .build: "terminal"
+    case .test: "checklist"
+    case .launch: "play.rectangle"
+    case .uiAction, .uiAssertion: "viewfinder"
+    case .screenshot: "iphone"
+    case .runtimeLog: "list.bullet.rectangle"
+    case .diff: "doc.text.magnifyingglass"
+    }
+  }
+}
+
+private struct LogStateMark: View {
+  let state: TimelineItem.State
+
+  var body: some View {
+    Circle()
+      .fill(color)
+      .frame(width: 7, height: 7)
+      .padding(.top, 4)
+  }
+
+  private var color: Color {
+    switch state {
+    case .complete: Studio.success
+    case .active: Studio.accent
+    case .waiting: Studio.tertiary
+    case .warning: Studio.warning
+    }
+  }
+}
+
+private struct EvidenceToggleButton: View {
+  @EnvironmentObject var model: AppModel
+
+  var body: some View {
+    Button(action: model.toggleEvidenceWorkspace) {
+      Image(systemName: model.isEvidenceWorkspaceOpen ? "chevron.down" : "chevron.up")
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(Studio.secondary)
+        .frame(width: 34, height: 34)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .keyboardShortcut("e", modifiers: [.command, .shift])
+    .accessibilityLabel(
+      model.isEvidenceWorkspaceOpen ? "Close bottom workspace" : "Open bottom workspace")
+    .help(
+      model.isEvidenceWorkspaceOpen
+        ? "Close bottom workspace (⇧⌘E)" : "Open bottom workspace (⇧⌘E)")
+  }
+}
+
 private struct TaskActionBar: View {
   @EnvironmentObject var model: AppModel
   var body: some View {
-    HStack {
-      Spacer().frame(width: 88)
+    taskReviewBar
+  }
+
+  private var taskReviewBar: some View {
+    HStack(spacing: 16) {
+      Spacer().frame(width: 156)
       Button(action: showChanges) {
         HStack(spacing: 10) {
-          Image(systemName: "shippingbox.fill").foregroundStyle(Studio.accent)
-          Text(
-            "\(model.changedFileCount) \(model.changedFileCount == 1 ? "file" : "files") changed"
-          )
+          Image(systemName: model.activeWorktree == nil ? "checkmark.circle" : "shippingbox.fill")
+            .foregroundStyle(model.activeWorktree == nil ? Studio.success : Studio.accent)
+          Text(model.activeWorktree == nil ? "All changes committed" :
+            "\(model.changedFileCount) \(model.changedFileCount == 1 ? "file" : "files") changed")
           .font(.system(size: 12, weight: .semibold)).monospacedDigit()
-          Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
-            .foregroundStyle(Studio.secondary)
+          if model.activeWorktree != nil {
+            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
+              .foregroundStyle(Studio.secondary)
+          }
         }
       }
       .buttonStyle(.plain)
       .disabled(model.activeWorktree == nil)
       Spacer()
-      Button("Discard Task", action: model.discardTask)
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-        .disabled(model.activeWorktree == nil)
-      Button(action: reviewAction) {
-        HStack(spacing: 22) {
-          Text(model.proposedChanges.isEmpty ? "Review Changes" : "Apply Changes")
-          Divider().overlay(Color.white.opacity(0.25)).frame(height: 42)
-          Image(systemName: "arrow.right")
+      HStack(spacing: 10) {
+        if model.activeWorktree != nil {
+          Button("Discard Task", action: model.discardTask)
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+          Button(action: reviewAction) {
+            HStack(spacing: 16) {
+              Text(model.proposedChanges.isEmpty ? "Review Changes" : "Apply Changes")
+              Image(systemName: "arrow.right")
+                .font(.system(size: 10, weight: .semibold))
+            }
+            .font(.system(size: 11.5, weight: .semibold))
+            .padding(.horizontal, 16)
+            .frame(height: 38)
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(.white)
+          .background(Studio.accent)
+          .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .font(.system(size: 12, weight: .semibold))
-        .padding(.leading, 18)
-        .padding(.trailing, 14)
-        .frame(height: 44)
+        Button {
+          model.notice = "No unread notifications."
+        } label: {
+          Image(systemName: "bell")
+            .font(.system(size: 14, weight: .medium))
+            .frame(width: 34, height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Studio.secondary)
+        .help("Notifications")
+        Divider()
+          .frame(height: 18)
+          .overlay(Studio.separator)
+        EvidenceToggleButton()
       }
-      .buttonStyle(.plain)
-      .foregroundStyle(.white)
-      .background(
-        model.activeWorktree == nil ? Studio.tertiary.opacity(0.32) : Studio.accent
-      )
-      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-      .disabled(model.activeWorktree == nil)
+      Spacer().frame(width: 4)
     }
     .padding(.horizontal, 20)
-    .frame(height: 76)
+    .frame(maxHeight: .infinity)
     .background(Studio.surface)
   }
   private func reviewAction() {
     if model.proposedChanges.isEmpty {
       model.reviewChanges()
-      model.section = .git
+      model.section = .changes
     } else {
       model.applyAll()
     }
   }
   private func showChanges() {
     if model.proposedChanges.isEmpty { model.reviewChanges() }
-    model.section = .git
+    model.section = .changes
   }
 }
 
-private struct SyntheticProfilePreview: View {
+private enum DeployListTab: String, CaseIterable, Identifiable {
+  case releases = "Releases"
+  case builds = "Builds"
+  var id: String { rawValue }
+}
+
+private enum DeployDetailTab: String, CaseIterable, Identifiable {
+  case overview = "Overview"
+  case whatsNew = "What's New"
+  case screenshots = "Screenshots"
+  case testers = "Testers"
+  case feedback = "Feedback"
+  case buildDetails = "Build Details"
+  var id: String { rawValue }
+}
+
+private struct DeployWorkspace: View {
+  @EnvironmentObject var model: AppModel
+  @State private var listTab: DeployListTab = .releases
+  @State private var detailTab: DeployDetailTab = .overview
+
   var body: some View {
-    ZStack {
-      Color(red: 0.055, green: 0.065, blue: 0.075)
-      VStack(spacing: 0) {
-        Text("SYNTHETIC UI FIXTURE")
-          .font(.system(size: 8, weight: .semibold)).tracking(0.8)
-          .foregroundStyle(.white.opacity(0.45)).padding(.top, 38)
-        Text("Profile").font(.system(size: 17, weight: .bold)).foregroundStyle(.white).padding(
-          .top, 8)
-        Circle().fill(Color(red: 0.25, green: 0.35, blue: 0.48)).frame(width: 84, height: 84)
-          .overlay(
-            Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(
-              .white.opacity(0.9))
-          )
-          .padding(.top, 20)
-        Text("Sarah Chen").font(.system(size: 18, weight: .bold)).foregroundStyle(.white).padding(
-          .top, 10)
-        Text("sarah@example.com").font(.system(size: 11)).foregroundStyle(.white.opacity(0.6))
-        VStack(spacing: 8) {
-          SyntheticProfileRow(
-            symbol: "person.crop.circle", title: "Edit Profile", detail: "Name, photo, bio")
-          SyntheticProfileRow(
-            symbol: "gearshape", title: "Settings", detail: "Preferences and more")
-          SyntheticProfileRow(symbol: "moon", title: "Appearance", detail: "Dark")
-          SyntheticProfileRow(symbol: "info.circle", title: "About", detail: "Version and support")
-        }
-        .padding(.horizontal, 18).padding(.top, 20)
-        Spacer()
-        HStack {
-          ForEach(["house", "suitcase", "envelope", "person"], id: \.self) { symbol in
-            Image(systemName: symbol).frame(maxWidth: .infinity)
+    GeometryReader { geometry in
+      if geometry.size.width < 1180 {
+        ScrollView {
+          VStack(spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+              releaseColumn
+                .frame(width: 224, height: 650)
+              detailColumn
+                .frame(maxWidth: .infinity, minHeight: 650, maxHeight: 650)
+            }
+            insightsColumn
+              .frame(height: 440)
           }
+          .padding(16)
+          .frame(width: geometry.size.width, alignment: .top)
         }
-        .font(.system(size: 17)).foregroundStyle(.white.opacity(0.72)).padding(.horizontal, 16)
-        .padding(.bottom, 22)
+        .scrollIndicators(.automatic)
+      } else {
+        HStack(alignment: .top, spacing: 14) {
+          releaseColumn
+            .frame(width: 272)
+          detailColumn
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          insightsColumn
+            .frame(width: 304)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 28)
+        .padding(.bottom, 16)
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    .background(Studio.backdrop)
+  }
+
+  private var releaseColumn: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      Text("Deploy")
+        .font(.system(size: 19, weight: .bold))
+      Text("Distribute your app with TestFlight.")
+        .font(.system(size: 11))
+        .foregroundStyle(Studio.secondary)
+        .padding(.top, 7)
+
+      HStack(spacing: 2) {
+        ForEach(DeployListTab.allCases) { tab in
+          Button {
+            listTab = tab
+          } label: {
+            Text(tab.rawValue)
+              .font(.system(size: 10.5, weight: listTab == tab ? .semibold : .medium))
+              .foregroundStyle(listTab == tab ? Color.primary : Studio.secondary)
+              .frame(maxWidth: .infinity, minHeight: 34)
+              .background(listTab == tab ? Studio.surface : .clear)
+              .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .frame(maxWidth: .infinity)
+          .contentShape(Rectangle())
+          .accessibilityLabel("Show deploy \(tab.rawValue.lowercased())")
+        }
+      }
+      .padding(2)
+      .background(Studio.raised)
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .padding(.top, 22)
+
+      DeploySurface {
+        DeployEmptyState(
+          symbol: listTab == .releases ? "shippingbox" : "hammer",
+          title: listTab == .releases ? "No releases yet" : "No deployment builds yet",
+          detail: listTab == .releases
+            ? "Release history will appear here when TestFlight data is connected."
+            : "Builds prepared for distribution will appear here."
+        )
+      }
+      .frame(maxHeight: .infinity)
+      .padding(.top, 14)
+    }
+  }
+
+  private var detailColumn: some View {
+    DeploySurface {
+      VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("No release selected")
+            .font(.system(size: 20, weight: .bold))
+          Text("Choose a release after deployment data is connected.")
+            .font(.system(size: 10.5))
+            .foregroundStyle(Studio.secondary)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 22)
+
+        ScrollView(.horizontal) {
+          HStack(spacing: 25) {
+            ForEach(DeployDetailTab.allCases) { tab in
+              Button {
+                detailTab = tab
+              } label: {
+                VStack(spacing: 9) {
+                  Text(tab.rawValue)
+                    .font(.system(size: 10.5, weight: detailTab == tab ? .semibold : .medium))
+                    .foregroundStyle(detailTab == tab ? Color.primary : Studio.secondary)
+                  Rectangle()
+                    .fill(detailTab == tab ? Color.primary : .clear)
+                    .frame(height: 1)
+                }
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Show deploy \(tab.rawValue.lowercased())")
+            }
+          }
+          .padding(.horizontal, 22)
+        }
+        .scrollIndicators(.hidden)
+        .padding(.top, 24)
+
+        Divider().overlay(Studio.separator)
+        detailContent
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
     }
   }
+
+  @ViewBuilder private var detailContent: some View {
+    switch detailTab {
+    case .overview:
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+          HStack(alignment: .top, spacing: 14) {
+            deploySection(title: "App Preview") {
+              appPreview
+            }
+            deploySection(title: "Build Information") {
+              buildInformation
+            }
+            .frame(width: 250)
+          }
+          .padding(18)
+
+          Divider().overlay(Studio.separator)
+          deployTextSection(
+            title: "Processing",
+            detail: "Processing information will appear when a deployment build is active.")
+          Divider().overlay(Studio.separator)
+          deployTextSection(
+            title: "What's New",
+            detail: "Release notes will appear here when they are available.")
+          Divider().overlay(Studio.separator)
+          screenshotSection
+        }
+      }
+    case .whatsNew:
+      DeployEmptyState(
+        symbol: "text.alignleft", title: "No release notes",
+        detail: "Release notes will appear when a release is selected.")
+    case .screenshots:
+      if let image = model.currentScreenshotImage {
+        Image(nsImage: image)
+          .resizable()
+          .scaledToFit()
+          .padding(24)
+      } else {
+        DeployEmptyState(
+          symbol: "photo.on.rectangle", title: "No release screenshots",
+          detail: "Screenshots attached to the selected release will appear here.")
+      }
+    case .testers:
+      DeployEmptyState(
+        symbol: "person.2", title: "No tester data",
+        detail: "Tester access will appear when TestFlight data is connected.")
+    case .feedback:
+      DeployEmptyState(
+        symbol: "bubble.left.and.bubble.right", title: "No feedback",
+        detail: "Tester feedback for the selected release will appear here.")
+    case .buildDetails:
+      VStack(alignment: .leading, spacing: 0) {
+        buildInformation
+          .padding(24)
+        Spacer(minLength: 0)
+      }
+    }
+  }
+
+  private var insightsColumn: some View {
+    VStack(spacing: 14) {
+      DeploySurface {
+        VStack(alignment: .leading, spacing: 0) {
+          HStack {
+            Text("Testers").font(.system(size: 12, weight: .semibold))
+            Spacer()
+          }
+          .padding(.horizontal, 20)
+          .frame(height: 54)
+          Divider().overlay(Studio.separator)
+          DeployEmptyState(
+            symbol: "person.2", title: "No testers",
+            detail: "Tester groups and access will appear here.")
+        }
+      }
+      .frame(maxHeight: .infinity)
+
+      DeploySurface {
+        VStack(alignment: .leading, spacing: 0) {
+          Text("Recent Feedback")
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 20)
+            .frame(height: 54)
+          Divider().overlay(Studio.separator)
+          DeployEmptyState(
+            symbol: "bubble.left", title: "No feedback yet",
+            detail: "Feedback from connected tester groups will appear here.")
+        }
+      }
+      .frame(maxHeight: .infinity)
+    }
+  }
+
+  private var appPreview: some View {
+    HStack(spacing: 15) {
+      Group {
+        if let image = model.currentScreenshotImage {
+          Image(nsImage: image).resizable().scaledToFill()
+        } else {
+          Image(systemName: "app.dashed")
+            .font(.system(size: 27, weight: .light))
+            .foregroundStyle(Studio.tertiary)
+        }
+      }
+      .frame(width: 82, height: 82)
+      .background(Studio.raised)
+      .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+      VStack(alignment: .leading, spacing: 5) {
+        Text(model.selectedScheme.isEmpty ? "No app selected" : model.selectedScheme)
+          .font(.system(size: 16, weight: .bold))
+          .lineLimit(1)
+        Text(model.selectedTarget == nil ? "Run a project to create an app preview." : "Current local app preview")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private var buildInformation: some View {
+    VStack(spacing: 0) {
+      DeployInfoRow(label: "Platform", value: "iOS")
+      DeployInfoRow(label: "Scheme", value: model.selectedScheme.isEmpty ? "Not selected" : model.selectedScheme)
+      DeployInfoRow(label: "Destination", value: model.selectedDestination?.name ?? "Not selected")
+      DeployInfoRow(label: "Bundle ID", value: model.selectedTarget?.bundleID ?? "Not available")
+    }
+  }
+
+  private var screenshotSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Screenshots").font(.system(size: 11.5, weight: .semibold))
+      if let image = model.currentScreenshotImage {
+        Image(nsImage: image)
+          .resizable()
+          .scaledToFill()
+          .frame(width: 104, height: 142)
+          .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+      } else {
+        Text("No release screenshots are available.")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+      }
+    }
+    .padding(18)
+  }
+
+  private func deploySection<Content: View>(
+    title: String, @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 14) {
+      Text(title).font(.system(size: 11.5, weight: .semibold))
+      content()
+      Spacer(minLength: 0)
+    }
+    .padding(16)
+    .frame(maxWidth: .infinity, minHeight: 184, alignment: .topLeading)
+    .background(Studio.backdrop.opacity(0.7))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+  }
+
+  private func deployTextSection(title: String, detail: String) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(title).font(.system(size: 11.5, weight: .semibold))
+      Text(detail)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+    }
+    .padding(18)
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
 }
 
-private struct SyntheticProfileRow: View {
+private struct DeploySurface<Content: View>: View {
+  @ViewBuilder let content: () -> Content
+
+  var body: some View {
+    content()
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Studio.surface)
+      .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+      .overlay {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+          .stroke(Studio.separator, lineWidth: 1)
+      }
+  }
+}
+
+private struct DeployEmptyState: View {
   let symbol: String
   let title: String
   let detail: String
+
   var body: some View {
-    HStack(spacing: 10) {
-      Image(systemName: symbol).font(.system(size: 15)).frame(width: 22)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.system(size: 11, weight: .medium))
-        Text(detail).font(.system(size: 9)).foregroundStyle(.white.opacity(0.55))
-      }
-      Spacer()
-      Image(systemName: "chevron.right").font(.system(size: 9))
+    VStack(spacing: 9) {
+      Image(systemName: symbol)
+        .font(.system(size: 24, weight: .light))
+        .foregroundStyle(Studio.tertiary)
+      Text(title)
+        .font(.system(size: 12, weight: .semibold))
+      Text(detail)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 230)
     }
-    .foregroundStyle(.white).padding(.horizontal, 12).frame(height: 48)
-    .background(Color.white.opacity(0.065)).clipShape(RoundedRectangle(cornerRadius: 9))
+    .padding(22)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+}
+
+private struct DeployInfoRow: View {
+  let label: String
+  let value: String
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 10) {
+      Text(label)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .frame(width: 76, alignment: .leading)
+      Text(value)
+        .font(.system(size: 10.5, weight: .medium))
+        .lineLimit(1)
+      Spacer(minLength: 0)
+    }
+    .frame(minHeight: 34)
+  }
+}
+
+private struct WorkspaceHeader: View {
+  let symbol: String
+  let title: String
+  let detail: String
+
+  var body: some View {
+    HStack(spacing: 12) {
+      Image(systemName: symbol)
+        .font(.system(size: 17, weight: .medium))
+        .foregroundStyle(Studio.accent)
+        .frame(width: 32, height: 32)
+        .background(Studio.accentSoft)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title)
+          .font(.system(size: 18, weight: .bold))
+        Text(detail)
+          .font(.system(size: 11))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+      }
+    }
   }
 }
 
 private struct CodeWorkspace: View {
   @EnvironmentObject var model: AppModel
+
   var body: some View {
-    HStack(spacing: 0) {
-      FileBrowser().frame(width: 270)
+    VStack(spacing: 0) {
+      HStack(spacing: 16) {
+        WorkspaceHeader(
+          symbol: "chevron.left.forwardslash.chevron.right",
+          title: "Code",
+          detail: model.repository?.lastPathComponent ?? "Inspect source inside the current workspace"
+        )
+        Spacer(minLength: 0)
+        StatusBadge(
+          title: model.activeWorktree == nil ? "Read only" : "Task worktree",
+          state: model.activeWorktree == nil ? .neutral : .active
+        )
+        Button {
+          model.saveFile()
+        } label: {
+          Label("Save", systemImage: "checkmark")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(model.selectedFile == nil || model.activeWorktree == nil)
+        .help("Save this file to the isolated task worktree")
+      }
+      .padding(.horizontal, 24)
+      .frame(height: 72)
+      .background(Studio.surface)
       Divider().overlay(Studio.separator)
-      VStack(spacing: 0) {
-        HStack {
-          Text(model.selectedFile?.lastPathComponent ?? "Code")
-            .font(.system(size: 12, weight: .semibold))
-          Spacer()
-          Text(model.activeWorktree == nil ? "Read only" : "Task worktree")
-            .font(.system(size: 10)).foregroundStyle(Studio.secondary)
-          Button("Save", action: model.saveFile).disabled(
-            model.selectedFile == nil || model.activeWorktree == nil)
-        }
-        .padding(.horizontal, 16).frame(height: 48).background(Studio.surface)
+
+      HStack(spacing: 0) {
+        FileBrowser().frame(width: 286)
         Divider().overlay(Studio.separator)
-        if model.selectedFile == nil {
-          WorkspaceEmpty(
-            symbol: "doc.text.magnifyingglass", title: "Select a source file",
-            detail:
-              "The native editor supports line numbers, syntax color, find, undo, and save inside a task worktree."
-          )
-        } else {
-          CodeEditor(text: $model.source, readOnly: model.activeWorktree == nil)
+        VStack(spacing: 0) {
+          HStack(spacing: 9) {
+            Image(systemName: model.selectedFile == nil ? "doc" : "doc.text")
+              .foregroundStyle(Studio.secondary)
+            Text(model.selectedFile?.lastPathComponent ?? "No file selected")
+              .font(.system(size: 11.5, weight: .semibold))
+              .lineLimit(1)
+            Spacer()
+            if model.selectedFile != nil {
+              Text("\(lineCount) lines")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundStyle(Studio.tertiary)
+            }
+          }
+          .padding(.horizontal, 18)
+          .frame(height: 44)
+          .background(Studio.surface)
+          Divider().overlay(Studio.separator)
+          if model.selectedFile == nil {
+            WorkspaceEmpty(
+              symbol: "doc.text.magnifyingglass",
+              title: "Select a source file",
+              detail: "Choose a file from the browser to inspect it with line numbers, find, and syntax color."
+            )
+          } else {
+            CodeEditor(text: $model.source, readOnly: model.activeWorktree == nil)
+              .frame(maxWidth: .infinity, maxHeight: .infinity)
+              .clipped()
+          }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
     }
+    .background(Studio.backdrop)
   }
-}
 
-private struct FilesWorkspace: View {
-  @EnvironmentObject var model: AppModel
-  var body: some View {
-    HStack(spacing: 0) {
-      FileBrowser().frame(width: 300)
-      Divider().overlay(Studio.separator)
-      WorkspaceEmpty(
-        symbol: "folder", title: model.repository?.lastPathComponent ?? "No repository",
-        detail: model.repository?.path ?? "Open a project to inspect its files.")
-    }
+  private var lineCount: Int {
+    max(1, model.source.split(separator: "\n", omittingEmptySubsequences: false).count)
   }
 }
 
 private struct FileBrowser: View {
   @EnvironmentObject var model: AppModel
+
   var body: some View {
     VStack(spacing: 0) {
-      HStack {
-        Text(model.activeWorktree == nil ? "Repository" : "Task Files")
-          .font(.system(size: 12, weight: .semibold))
-        Spacer()
-        Button(action: model.chooseRepository) { Image(systemName: "folder.badge.plus") }
-          .buttonStyle(.plain).foregroundStyle(Studio.accent)
+      HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(model.activeWorktree == nil ? "Repository" : "Task Files")
+            .font(.system(size: 12, weight: .semibold))
+          if !model.files.isEmpty {
+            Text("\(model.files.count) top-level items")
+              .font(.system(size: 9.5))
+              .foregroundStyle(Studio.tertiary)
+          }
+        }
+        Spacer(minLength: 0)
+        Button(action: model.chooseRepository) {
+          Image(systemName: "folder.badge.plus")
+            .font(.system(size: 13, weight: .medium))
+            .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Studio.accent)
+        .help("Open a repository")
       }
-      .padding(.horizontal, 16).frame(height: 48)
+      .padding(.horizontal, 16)
+      .frame(height: 52)
+      .background(Studio.surface)
       Divider().overlay(Studio.separator)
       if model.files.isEmpty {
         WorkspaceEmpty(
-          symbol: "folder", title: "No files", detail: "Open a repository to browse files.")
+          symbol: "folder", title: "No files", detail: "Open a repository to browse files.",
+          actionTitle: "Open Repository…", action: model.chooseRepository)
       } else {
         ScrollView {
           OutlineGroup(model.files, children: \.children) { node in
+            let isSelected = model.selectedFile == node.url
             Button {
               model.selectFile(node.url)
             } label: {
@@ -2127,10 +3355,13 @@ private struct FileBrowser: View {
                 Image(systemName: node.children == nil ? fileSymbol(node.name) : "folder")
                   .foregroundStyle(node.children == nil ? Studio.secondary : Studio.accent)
                 Text(node.name).lineLimit(1)
-                Spacer()
+                Spacer(minLength: 0)
               }
-              .font(.system(size: 11))
-              .frame(height: 26)
+              .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+              .padding(.horizontal, 8)
+              .frame(height: 29)
+              .background(isSelected ? Studio.accentSoft : .clear)
+              .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
               .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -2141,6 +3372,7 @@ private struct FileBrowser: View {
     }
     .background(Studio.surface)
   }
+
   private func fileSymbol(_ name: String) -> String {
     if name.hasSuffix(".swift") { return "swift" }
     if name.hasSuffix(".json") { return "curlybraces" }
@@ -2150,40 +3382,83 @@ private struct FileBrowser: View {
 
 private struct GitWorkspace: View {
   @EnvironmentObject var model: AppModel
+
   var body: some View {
     VStack(spacing: 0) {
-      HStack {
-        VStack(alignment: .leading, spacing: 3) {
-          Text("Review Changes").font(.system(size: 18, weight: .bold))
-          Text(
-            "Compared with the exact task baseline; the original checkout is never overwritten on conflict."
-          )
-          .font(.system(size: 11)).foregroundStyle(Studio.secondary)
+      HStack(spacing: 16) {
+        WorkspaceHeader(
+          symbol: "arrow.triangle.branch",
+          title: "Changes",
+          detail: "Review the isolated task against its exact baseline"
+        )
+        Spacer(minLength: 0)
+        StatusBadge(
+          title: model.activeWorktree == nil ? "No task" : "Task worktree",
+          state: model.activeWorktree == nil ? .neutral : .active
+        )
+        Button {
+          model.reviewChanges()
+        } label: {
+          Label("Refresh", systemImage: "arrow.clockwise")
         }
-        Spacer()
-        Button("Refresh", action: model.reviewChanges)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help("Refresh the baseline-relative change set")
       }
-      .padding(.horizontal, 24).frame(height: 72).background(Studio.surface)
+      .padding(.horizontal, 24)
+      .frame(height: 72)
+      .background(Studio.surface)
       Divider().overlay(Studio.separator)
+
+      HStack(spacing: 0) {
+        changeMetric("Changed", count: modifiedCount, color: Studio.accent)
+        Divider().frame(height: 26).overlay(Studio.separator)
+        changeMetric("Added", count: addedCount, color: Studio.success)
+        Divider().frame(height: 26).overlay(Studio.separator)
+        changeMetric("Deleted", count: deletedCount, color: .red)
+        Spacer()
+        Text(model.activeWorktree?.lastPathComponent ?? "No isolated task selected")
+          .font(.system(size: 10, design: .monospaced))
+          .foregroundStyle(Studio.tertiary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .padding(.trailing, 24)
+      }
+      .padding(.leading, 24)
+      .frame(height: 58)
+      .background(Studio.surface)
+      Divider().overlay(Studio.separator)
+
       if model.proposedChanges.isEmpty {
         WorkspaceEmpty(
           symbol: "arrow.triangle.branch", title: "No proposed changes",
           detail: "Create an isolated task or refresh the baseline-relative change set.")
       } else {
         ScrollView {
-          LazyVStack(spacing: 1) {
+          LazyVStack(spacing: 0) {
             ForEach(model.proposedChanges) { change in
               HStack(spacing: 12) {
                 Text(change.kind.rawValue.uppercased())
                   .font(.system(size: 9, weight: .bold).monospaced())
-                  .foregroundStyle(changeColor(change.kind)).frame(width: 62, alignment: .leading)
-                Text(change.path).font(.system(size: 12))
-                Spacer()
+                  .foregroundStyle(changeColor(change.kind))
+                  .frame(width: 62, alignment: .leading)
+                Image(systemName: change.binary ? "shippingbox" : "doc.text")
+                  .foregroundStyle(Studio.secondary)
+                Text(change.path)
+                  .font(.system(size: 11.5, design: .monospaced))
+                  .lineLimit(1)
+                  .truncationMode(.middle)
+                Spacer(minLength: 0)
                 if change.binary {
-                  Text("Binary").font(.system(size: 10)).foregroundStyle(Studio.warning)
+                  Text("Binary")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Studio.warning)
                 }
               }
-              .padding(.horizontal, 24).frame(height: 48).background(Studio.surface)
+              .padding(.horizontal, 24)
+              .frame(height: 48)
+              .background(Studio.surface)
+              .overlay(alignment: .bottom) { Divider().overlay(Studio.separator) }
             }
             ForEach(model.applyConflicts) { conflict in
               VStack(alignment: .leading, spacing: 5) {
@@ -2197,15 +3472,31 @@ private struct GitWorkspace: View {
                   Text(artifact).font(.system(size: 10).monospaced()).textSelection(.enabled)
                 }
               }
-              .padding(16).frame(maxWidth: .infinity, alignment: .leading).background(
-                Color.orange.opacity(0.08))
+              .padding(16)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(Color.orange.opacity(0.08))
             }
           }
           .padding(20)
         }
       }
     }
+    .background(Studio.backdrop)
   }
+
+  private func changeMetric(_ title: String, count: Int, color: Color) -> some View {
+    HStack(spacing: 8) {
+      Circle().fill(color).frame(width: 7, height: 7)
+      Text(title).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Studio.secondary)
+      Text("\(count)").font(.system(size: 12, weight: .semibold).monospacedDigit())
+    }
+    .frame(width: 112, alignment: .leading)
+  }
+
+  private var addedCount: Int { model.proposedChanges.filter { $0.kind == .added }.count }
+  private var modifiedCount: Int { model.proposedChanges.filter { $0.kind == .modified }.count }
+  private var deletedCount: Int { model.proposedChanges.filter { $0.kind == .deleted }.count }
+
   private func changeColor(_ kind: ProposedChangeKind) -> Color {
     switch kind {
     case .added: Studio.success
@@ -2217,10 +3508,25 @@ private struct GitWorkspace: View {
 
 private struct SettingsWorkspace: View {
   @EnvironmentObject var model: AppModel
+
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 24) {
-        Text("Settings").font(.system(size: 24, weight: .bold))
+    VStack(spacing: 0) {
+      HStack(spacing: 16) {
+        WorkspaceHeader(
+          symbol: "gearshape",
+          title: "Settings",
+          detail: "Toolchain, agent connections, compatibility, and recovery"
+        )
+        Spacer(minLength: 0)
+        StatusBadge(title: "Local", state: .neutral)
+      }
+      .padding(.horizontal, 24)
+      .frame(height: 72)
+      .background(Studio.surface)
+      Divider().overlay(Studio.separator)
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 24) {
         SettingsGroup(title: "Apple toolchain") {
           SettingRow(
             symbol: "hammer",
@@ -2302,10 +3608,14 @@ private struct SettingsWorkspace: View {
           ) { Button("Export…", action: model.exportDiagnostics) }
         }
       }
-      .padding(32)
-      .frame(maxWidth: 900, alignment: .leading)
+        .padding(.horizontal, 32)
+        .padding(.vertical, 28)
+        .frame(maxWidth: 980, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .background(Studio.backdrop)
   }
   private var toolchainDetail: String {
     if let version = model.preflight?.xcodeVersion, let build = model.preflight?.xcodeBuild {
@@ -2361,7 +3671,7 @@ private struct SettingsGroup<Content: View>: View {
       VStack(spacing: 0) { content }
         .background(Studio.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .shadow(color: .black.opacity(0.035), radius: 12, y: 5)
+        .shadow(color: .black.opacity(0.018), radius: 11, y: 4)
     }
   }
 }
@@ -2410,6 +3720,7 @@ private struct SettingRow<Accessory: View>: View {
 
 private struct AgentMark: View {
   let id: String
+  var size: CGFloat = 22
   var body: some View {
     if let url = Bundle.module.url(
       forResource: id, withExtension: "svg", subdirectory: "AgentIcons")
@@ -2420,7 +3731,7 @@ private struct AgentMark: View {
         .renderingMode(.template)
         .resizable()
         .scaledToFit()
-        .frame(width: 22, height: 22)
+        .frame(width: size, height: size)
         .accessibilityHidden(true)
     } else {
       Image(systemName: "sparkles").font(.system(size: 17, weight: .regular))
@@ -2432,6 +3743,23 @@ private struct WorkspaceEmpty: View {
   let symbol: String
   let title: String
   let detail: String
+  let actionTitle: String?
+  let action: (() -> Void)?
+
+  init(
+    symbol: String,
+    title: String,
+    detail: String,
+    actionTitle: String? = nil,
+    action: (() -> Void)? = nil
+  ) {
+    self.symbol = symbol
+    self.title = title
+    self.detail = detail
+    self.actionTitle = actionTitle
+    self.action = action
+  }
+
   var body: some View {
     VStack(spacing: 12) {
       Image(systemName: symbol).font(.system(size: 30, weight: .light)).foregroundStyle(
@@ -2441,6 +3769,11 @@ private struct WorkspaceEmpty: View {
         .center
       )
       .frame(maxWidth: 460)
+      if let actionTitle, let action {
+        Button(actionTitle, action: action)
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
+      }
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity).padding(30)
   }
@@ -2472,11 +3805,17 @@ private struct StatusBadge: View {
 
 private struct PlanStateMark: View {
   let state: TaskPlanItem.State
+  var activeMarkComplete = false
   var body: some View {
     Group {
       switch state {
       case .complete: Image(systemName: "checkmark.circle.fill").foregroundStyle(Studio.success)
-      case .active: Circle().fill(Studio.accent).frame(width: 9, height: 9)
+      case .active:
+        if activeMarkComplete {
+          Image(systemName: "checkmark.circle.fill").foregroundStyle(Studio.success)
+        } else {
+          Circle().fill(Studio.accent).frame(width: 9, height: 9)
+        }
       case .waiting: Circle().stroke(Studio.tertiary, lineWidth: 1).frame(width: 11, height: 11)
       case .blocked: Image(systemName: "lock.circle").foregroundStyle(Studio.warning)
       }
