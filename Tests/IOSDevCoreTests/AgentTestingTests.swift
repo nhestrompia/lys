@@ -92,7 +92,7 @@ import Testing
     AgentToolTraceEntry(
       "flow.run",
       arguments: .object([
-        "goal": .string("Verify quiz scoring"), "blueprintID": .string("quiz.complete"),
+        "goal": .string("Verify quiz scoring"), "flowID": .string("quiz.complete"),
       ])),
     AgentToolTraceEntry("evidence.summary"),
   ]

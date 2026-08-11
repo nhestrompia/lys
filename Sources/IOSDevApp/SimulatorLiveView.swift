@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CoreGraphics
 import Darwin
+import IOSDevCore
 import QuartzCore
 import SwiftUI
 
@@ -67,7 +68,7 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
   @Published private(set) var measuredFPS = 0
 
   private let frameQueue = DispatchQueue(
-    label: "com.operate.simulator.frames", qos: .userInteractive)
+    label: "dev.lys.simulator.frames", qos: .userInteractive)
   private weak var renderer: SimulatorLiveNSView?
   private var streamProcess: Process?
   private var streamOutput: Pipe?
@@ -209,20 +210,16 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
   }
 
   func sendKeyboardEvent(_ event: NSEvent) {
-    guard
-      let simulator = NSRunningApplication.runningApplications(
-        withBundleIdentifier: "com.apple.iphonesimulator"
-      ).first,
-      let down = CGEvent(
-        keyboardEventSource: nil, virtualKey: CGKeyCode(event.keyCode), keyDown: true),
-      let up = CGEvent(
-        keyboardEventSource: nil, virtualKey: CGKeyCode(event.keyCode), keyDown: false)
-    else { return }
-    let flags = event.cgEvent?.flags ?? []
-    down.flags = flags
-    up.flags = flags
-    down.postToPid(simulator.processIdentifier)
-    up.postToPid(simulator.processIdentifier)
+    var modifiers: AxeKeyboardModifiers = []
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    if flags.contains(.shift) { modifiers.insert(.shift) }
+    if flags.contains(.control) { modifiers.insert(.control) }
+    if flags.contains(.option) { modifiers.insert(.option) }
+    if flags.contains(.command) { modifiers.insert(.command) }
+    hid.sendKeyboard(
+      macKeyCode: Int(event.keyCode), characters: event.characters,
+      charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+      modifiers: modifiers)
   }
 
   private func consume(
@@ -483,11 +480,13 @@ private struct SimulatorHIDHandshake: Codable { let ready: Bool }
 private struct SimulatorHIDResponse: Codable { let error: String? }
 
 private final class SimulatorHIDBrokerClient: @unchecked Sendable {
-  private let queue = DispatchQueue(label: "com.operate.simulator.hid", qos: .userInteractive)
+  private let queue = DispatchQueue(label: "dev.lys.simulator.hid", qos: .userInteractive)
   private let pendingLock = NSLock()
   private var udid: String?
   private var pointSize = CGSize(width: 402, height: 874)
   private var endpoint: String?
+  private var axe: URL?
+  private var developerDirectory: URL?
   private var brokerProcess: Process?
   private var pendingMove: CGPoint?
   private var movePumpRunning = false
@@ -503,6 +502,8 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
       guard let self else { return }
       self.failureHandler = completion
       self.udid = udid
+      self.axe = axe
+      self.developerDirectory = developerDirectory
       self.endpoint = Self.endpoint(udid: udid, developerDirectory: developerDirectory)
       guard let endpoint = self.endpoint else {
         completion(
@@ -593,6 +594,37 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
     queue.async { [weak self] in self?.drainScroll() }
   }
 
+  func sendKeyboard(
+    macKeyCode: Int, characters: String?, charactersIgnoringModifiers: String?,
+    modifiers: AxeKeyboardModifiers
+  ) {
+    queue.async { [weak self] in
+      guard let self, let axe = self.axe, let udid = self.udid,
+        let command = AppleCommandBuilder.axeKeyboard(
+          axe: axe, udid: udid, macKeyCode: macKeyCode, characters: characters,
+          charactersIgnoringModifiers: charactersIgnoringModifiers, modifiers: modifiers)
+      else { return }
+      let process = Process()
+      process.executableURL = command.executable
+      process.arguments = command.arguments
+      process.standardInput = FileHandle.nullDevice
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      process.environment = ProcessInfo.processInfo.environment.merging(
+        self.developerDirectory.map { ["DEVELOPER_DIR": $0.path] } ?? [:]
+      ) { _, selected in selected }
+      do {
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+          throw NSError(
+            domain: "SimulatorKeyboard", code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: "AXe keyboard input failed"])
+        }
+      } catch { self.reportFailure(error) }
+    }
+  }
+
   private func drainLatestMoves() {
     while true {
       pendingLock.lock()
@@ -663,6 +695,8 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
       self.brokerProcess = nil
       self.udid = nil
       self.endpoint = nil
+      self.axe = nil
+      self.developerDirectory = nil
       self.failureHandler = nil
       self.pendingLock.lock()
       self.pendingMove = nil

@@ -1,8 +1,8 @@
 import Foundation
 
-/// Optional, repository-owned interaction knowledge. Operate can discover the same information at
-/// runtime; a blueprint supplies stable names, setup/authentication, and acceptance criteria when a
-/// team or coding agent wants a contractual flow.
+/// Repository-owned Lys test knowledge. SDK declarations generate this compact contract so the
+/// host runner receives stable names, authenticated-session setup, bounded flows, and acceptance
+/// criteria without placing a model in the interaction loop.
 public struct InteractionBlueprint: Codable, Sendable {
   public var schemaVersion: Int
   public var app: BlueprintApp?
@@ -32,7 +32,7 @@ public struct InteractionBlueprint: Codable, Sendable {
 
   public func validate() throws {
     guard schemaVersion == 1 else {
-      throw RPCError(code: -32110, message: "Unsupported Operate blueprint schema version")
+      throw RPCError(code: -32110, message: "Unsupported Lys test contract schema version")
     }
     try requireUnique((routes ?? []).map(\.id), kind: "route")
     try requireUnique((capabilities ?? []).map(\.id), kind: "capability")
@@ -64,9 +64,38 @@ public struct InteractionBlueprint: Codable, Sendable {
       }
     }
     for context in contexts ?? [] {
+      try requireUnique(context.requiredSecrets ?? [], kind: "secret")
+      switch context.mode {
+      case .uiFlow:
+        guard context.session == nil else {
+          throw invalid("UI authentication context \(context.id) cannot declare a session fixture")
+        }
+      case .authenticatedSession:
+        guard let session = context.session, !session.environment.isEmpty else {
+          throw invalid(
+            "Authenticated context \(context.id) requires a non-empty session environment")
+        }
+        let declaredSecrets = Set(context.requiredSecrets ?? [])
+        for (key, input) in session.environment {
+          guard BlueprintEnvironmentKey.isValid(key) else {
+            throw invalid("Authenticated context \(context.id) has invalid environment key \(key)")
+          }
+          try input.validate(owner: "Authenticated context \(context.id) environment \(key)")
+          if let secret = input.secret, !declaredSecrets.contains(secret) {
+            throw invalid(
+              "Authenticated context \(context.id) must list session secret \(secret) in requiredSecrets"
+            )
+          }
+        }
+      }
       try validate(
         steps: context.prepare, owner: "Context \(context.id)", routes: routeIDs,
         capabilities: capabilityIDs)
+      let undeclaredContextSecrets = secrets(in: context.prepare)
+        .subtracting(context.requiredSecrets ?? [])
+      if let secret = undeclaredContextSecrets.sorted().first {
+        throw invalid("Context \(context.id) must list step secret \(secret) in requiredSecrets")
+      }
       guard !context.readyWhen.isEmpty else {
         throw invalid("Context \(context.id) requires a deterministic readyWhen condition")
       }
@@ -89,6 +118,11 @@ public struct InteractionBlueprint: Codable, Sendable {
       }
       for (name, parameter) in flow.parameters ?? [:] {
         try parameter.validate(owner: "Flow \(flow.id) parameter \(name)")
+      }
+      try requireUnique(flow.requiredSecrets ?? [], kind: "secret")
+      let undeclaredFlowSecrets = secrets(in: flow.steps).subtracting(flow.requiredSecrets ?? [])
+      if let secret = undeclaredFlowSecrets.sorted().first {
+        throw invalid("Flow \(flow.id) must list step secret \(secret) in requiredSecrets")
       }
       try validate(
         steps: flow.steps, owner: "Flow \(flow.id)", routes: routeIDs,
@@ -166,16 +200,56 @@ public struct InteractionBlueprint: Codable, Sendable {
     }
   }
 
+  private func secrets(in steps: [BlueprintStep]) -> Set<String> {
+    var result = Set(
+      steps.flatMap { step in
+        (step.arguments ?? [:]).values.compactMap(\.secret)
+      })
+    for step in steps { result.formUnion(secrets(in: step.steps ?? [])) }
+    return result
+  }
+
   private func invalid(_ message: String) -> RPCError { .init(code: -32111, message: message) }
 }
 
 public enum InteractionBlueprintDiscovery {
-  public static let relativePath = ".operate/blueprint.json"
+  public static let relativePath = ".lys/contract.json"
 
   public static func load(in workspace: URL) throws -> InteractionBlueprint? {
     let url = workspace.appending(path: relativePath)
     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
     return try InteractionBlueprint.load(from: url)
+  }
+}
+
+/// Deterministic, model-independent selection for natural-language requests. A match is returned
+/// only when one declared flow has a strictly better token overlap than every other flow.
+public enum LysFlowMatcher {
+  public static func match(goal: String, in flows: [BlueprintFlow]) -> BlueprintFlow? {
+    guard flows.count != 1 else { return flows[0] }
+    let goalTokens = semanticTokens(goal)
+    guard !goalTokens.isEmpty else { return nil }
+    let ranked: [(flow: BlueprintFlow, score: Int)] = flows.map { flow in
+      let text = [flow.id, flow.title, flow.description ?? ""].joined(separator: " ")
+      let candidateTokens = semanticTokens(text)
+      let score = goalTokens.intersection(candidateTokens).count
+      return (flow: flow, score: score)
+    }.sorted { lhs, rhs in
+      lhs.score == rhs.score ? lhs.flow.id < rhs.flow.id : lhs.score > rhs.score
+    }
+    guard let best = ranked.first, best.score > 0,
+      ranked.dropFirst().first?.score != best.score
+    else { return nil }
+    return best.flow
+  }
+
+  private static func semanticTokens(_ value: String) -> Set<String> {
+    let generic: Set<String> = [
+      "app", "check", "flow", "functionality", "test", "testing", "the", "validate", "verify",
+    ]
+    return Set(
+      value.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        .map(String.init).filter { $0.count > 2 && !generic.contains($0) })
   }
 }
 
@@ -193,11 +267,13 @@ public struct BlueprintRoute: Codable, Identifiable, Sendable {
   public var id: String
   public var title: String
   public var match: [BlueprintPredicate]
+  public var terminal: Bool?
 
-  public init(id: String, title: String, match: [BlueprintPredicate]) {
+  public init(id: String, title: String, match: [BlueprintPredicate], terminal: Bool? = nil) {
     self.id = id
     self.title = title
     self.match = match
+    self.terminal = terminal
   }
 }
 
@@ -297,22 +373,59 @@ public struct BlueprintSelector: Codable, Hashable, Sendable {
   }
 }
 
+public enum BlueprintContextMode: String, Codable, Sendable {
+  /// Prepare authentication through the ordinary UI. Use this when authentication is under test.
+  case uiFlow
+  /// Relaunch with a protected, host-injected test session. Use this for gated product flows.
+  case authenticatedSession
+}
+
+public struct BlueprintAuthenticatedSession: Codable, Sendable {
+  public var environment: [String: BlueprintInput]
+  public var arguments: [String]?
+
+  public init(environment: [String: BlueprintInput], arguments: [String]? = nil) {
+    self.environment = environment
+    self.arguments = arguments
+  }
+}
+
 public struct BlueprintContext: Codable, Identifiable, Sendable {
   public var id: String
   public var title: String
+  public var mode: BlueprintContextMode
   public var requiredSecrets: [String]?
   public var prepare: [BlueprintStep]
   public var readyWhen: [BlueprintPredicate]
+  public var session: BlueprintAuthenticatedSession?
 
   public init(
-    id: String, title: String, requiredSecrets: [String]? = nil,
-    prepare: [BlueprintStep], readyWhen: [BlueprintPredicate]
+    id: String, title: String, mode: BlueprintContextMode = .uiFlow,
+    requiredSecrets: [String]? = nil, prepare: [BlueprintStep] = [],
+    readyWhen: [BlueprintPredicate], session: BlueprintAuthenticatedSession? = nil
   ) {
     self.id = id
     self.title = title
+    self.mode = mode
     self.requiredSecrets = requiredSecrets
     self.prepare = prepare
     self.readyWhen = readyWhen
+    self.session = session
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, title, mode, requiredSecrets, prepare, readyWhen, session
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(String.self, forKey: .id)
+    title = try values.decode(String.self, forKey: .title)
+    mode = try values.decodeIfPresent(BlueprintContextMode.self, forKey: .mode) ?? .uiFlow
+    requiredSecrets = try values.decodeIfPresent([String].self, forKey: .requiredSecrets)
+    prepare = try values.decodeIfPresent([BlueprintStep].self, forKey: .prepare) ?? []
+    readyWhen = try values.decode([BlueprintPredicate].self, forKey: .readyWhen)
+    session = try values.decodeIfPresent(BlueprintAuthenticatedSession.self, forKey: .session)
   }
 }
 
@@ -323,13 +436,14 @@ public struct BlueprintFlow: Codable, Identifiable, Sendable {
   public var context: String?
   public var startRoute: String?
   public var parameters: [String: BlueprintParameter]?
+  public var requiredSecrets: [String]?
   public var steps: [BlueprintStep]
   public var acceptance: [BlueprintPredicate]
 
   public init(
     id: String, title: String, description: String? = nil, context: String? = nil,
     startRoute: String? = nil, parameters: [String: BlueprintParameter]? = nil,
-    steps: [BlueprintStep], acceptance: [BlueprintPredicate]
+    requiredSecrets: [String]? = nil, steps: [BlueprintStep], acceptance: [BlueprintPredicate]
   ) {
     self.id = id
     self.title = title
@@ -337,6 +451,7 @@ public struct BlueprintFlow: Codable, Identifiable, Sendable {
     self.context = context
     self.startRoute = startRoute
     self.parameters = parameters
+    self.requiredSecrets = requiredSecrets
     self.steps = steps
     self.acceptance = acceptance
   }
@@ -463,3 +578,20 @@ private enum BlueprintIdentifier {
     }
   }
 }
+
+private enum BlueprintEnvironmentKey {
+  static func isValid(_ value: String) -> Bool {
+    guard let first = value.unicodeScalars.first,
+      CharacterSet.letters.union(CharacterSet(charactersIn: "_")).contains(first)
+    else { return false }
+    return value.unicodeScalars.allSatisfy {
+      CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).contains($0)
+    }
+  }
+}
+
+public typealias LysTestContract = InteractionBlueprint
+public typealias LysScreen = BlueprintRoute
+public typealias LysAction = BlueprintCapability
+public typealias LysContext = BlueprintContext
+public typealias LysFlow = BlueprintFlow

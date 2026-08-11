@@ -83,7 +83,7 @@ public actor WorkspaceManager {
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601
     return directories.compactMap { worktree in
-      let manifestURL = worktree.appending(path: ".iosdev-baseline.json")
+      let manifestURL = worktree.appending(path: ".lys-baseline.json")
       guard let data = try? Data(contentsOf: manifestURL),
         let manifest = try? decoder.decode(BaselineManifest.self, from: data),
         FileManager.default.fileExists(atPath: manifest.repositoryRoot),
@@ -117,7 +117,7 @@ public actor WorkspaceManager {
       let manifest = try await makeManifest(
         root: canonical, revision: revision, ignoredOverlayPaths: ignoredOverlayPaths)
       try snapshotBaseline(manifest, from: canonical, into: activeWorktree)
-      let manifestURL = activeWorktree.appending(path: ".iosdev-baseline.json")
+      let manifestURL = activeWorktree.appending(path: ".lys-baseline.json")
       let data = try JSONEncoder.pretty.encode(manifest)
       try data.write(to: manifestURL, options: .atomic)
       return (activeWorktree, manifest)
@@ -165,11 +165,11 @@ public actor WorkspaceManager {
         let path = url.standardizedFileURL.pathComponents.dropFirst(
           canonicalWorktree.pathComponents.count
         ).joined(separator: "/")
-        if path == ".iosdev" || path == ".git" {
+        if path == ".lys" || path == ".git" {
           enumerator.skipDescendants()
           continue
         }
-        if path == ".iosdev-baseline.json" || path.hasPrefix(".iosdev/")
+        if path == ".lys-baseline.json" || path.hasPrefix(".lys/")
           || path.hasPrefix(".git/")
           || baseline.ignoredOverlayPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }
           )
@@ -320,7 +320,7 @@ public actor WorkspaceManager {
   )
     throws
   {
-    let snapshotRoot = worktree.appending(path: ".iosdev/baseline", directoryHint: .isDirectory)
+    let snapshotRoot = worktree.appending(path: ".lys/baseline", directoryHint: .isDirectory)
     for path in manifest.entries.keys {
       let source = try safeURL(path, under: original)
       guard FileManager.default.fileExists(atPath: source.path) else { continue }
@@ -344,7 +344,7 @@ public actor WorkspaceManager {
           "The original checkout changed and this deletion, addition, symlink, or binary change cannot be merged automatically."
       )
     }
-    let baselineFile = try safeURL(path, under: worktree.appending(path: ".iosdev/baseline"))
+    let baselineFile = try safeURL(path, under: worktree.appending(path: ".lys/baseline"))
     guard FileManager.default.fileExists(atPath: baselineFile.path) else {
       throw WorkspaceError.missingBaseline(path)
     }
@@ -354,7 +354,7 @@ public actor WorkspaceManager {
     guard merge.terminationStatus == 0 || merge.terminationStatus == 1 else {
       return .init(path: path, reason: "git merge-file failed: \(merge.stderr)")
     }
-    let artifact = try safeURL(path, under: worktree.appending(path: ".iosdev/conflicts"))
+    let artifact = try safeURL(path, under: worktree.appending(path: ".lys/conflicts"))
     try FileManager.default.createDirectory(
       at: artifact.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data(merge.stdout.utf8).write(to: artifact, options: .atomic)

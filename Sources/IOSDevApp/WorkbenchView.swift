@@ -24,7 +24,7 @@ public struct WorkbenchView: View {
   public var body: some View {
     GeometryReader { viewport in
       VStack(spacing: 0) {
-        OperateToolbar()
+        LysToolbar()
           .layoutPriority(2)
         Divider().overlay(Studio.separator)
         HStack(spacing: 0) {
@@ -49,7 +49,7 @@ public struct WorkbenchView: View {
     .foregroundStyle(Color(nsColor: .labelColor))
     .tint(Studio.accent)
     .alert(
-      "Operate",
+      "Lys",
       isPresented: Binding(
         get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })
     ) {
@@ -172,13 +172,13 @@ private struct TerminalDrawer: View {
   }
 }
 
-private struct OperateToolbar: View {
+private struct LysToolbar: View {
   @EnvironmentObject var model: AppModel
 
   var body: some View {
     HStack(spacing: 12) {
       Spacer().frame(width: 102)
-      Text("Operate")
+      Text("Lys")
         .font(.system(size: 18, weight: .bold))
         .padding(.trailing, 20)
       Divider().frame(height: 24).overlay(Studio.separator)
@@ -817,7 +817,7 @@ private struct ExpoSetupCallout: View {
         Text("Expo needs an iOS project")
           .font(.system(size: 12, weight: .semibold))
         Text(
-          "No .xcworkspace or .xcodeproj was found. Generate it here, then Operate will discover the scheme automatically."
+          "No .xcworkspace or .xcodeproj was found. Generate it here, then Lys will discover the scheme automatically."
         )
         .font(.system(size: 10.5)).foregroundStyle(Studio.secondary)
         .fixedSize(horizontal: false, vertical: true)
@@ -1253,7 +1253,7 @@ private struct EmbeddedSimulatorSurface: View {
       return "Select full Xcode to discover Simulator destinations."
     }
     if model.needsExpoPreparation {
-      return "Generate the native iOS workspace once; Operate will detect it automatically."
+      return "Generate the native iOS workspace once; Lys will detect it automatically."
     }
     if model.selectedDestination == nil { return "Choose a Simulator from the toolbar." }
     if model.selectedContainer == nil {
@@ -2323,6 +2323,8 @@ private struct GitWorkspace: View {
 
 private struct SettingsWorkspace: View {
   @EnvironmentObject var model: AppModel
+  @State private var testSecretID = ""
+  @State private var testSecretValue = ""
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
@@ -2378,6 +2380,46 @@ private struct SettingsWorkspace: View {
                 .foregroundStyle(wdaColor)
             }
           }
+        }
+        SettingsGroup(title: "Authenticated test sessions") {
+          VStack(alignment: .leading, spacing: 12) {
+            Text(
+              "Store the logical secret IDs declared by .lys/contract.json. Values remain in Keychain and are injected only into -LysTesting app launches."
+            )
+            .font(.system(size: 11))
+            .foregroundStyle(Studio.secondary)
+
+            HStack(spacing: 10) {
+              TextField("Secret ID, for example test.student.session", text: $testSecretID)
+                .textFieldStyle(.roundedBorder)
+              SecureField("Secret value", text: $testSecretValue)
+                .textFieldStyle(.roundedBorder)
+              Button("Save") {
+                model.saveTestSecret(id: testSecretID, value: testSecretValue)
+                testSecretValue = ""
+              }
+              .disabled(
+                testSecretID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  || testSecretValue.isEmpty)
+            }
+
+            if model.testSecretIDs.isEmpty {
+              Text("No Lys test-session secrets saved.")
+                .font(.system(size: 11))
+                .foregroundStyle(Studio.tertiary)
+            } else {
+              ForEach(model.testSecretIDs, id: \.self) { id in
+                HStack {
+                  Image(systemName: "key.fill").foregroundStyle(Studio.success)
+                  Text(id).font(.system(size: 11, design: .monospaced))
+                  Spacer()
+                  Text("Stored").font(.system(size: 11)).foregroundStyle(Studio.secondary)
+                  Button("Remove", role: .destructive) { model.deleteTestSecret(id: id) }
+                }
+              }
+            }
+          }
+          .padding(16)
         }
         SettingsGroup(title: "Crash recovery") {
           if model.recoverableWorkspaces.isEmpty {

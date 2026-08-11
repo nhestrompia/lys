@@ -8,12 +8,16 @@ import Testing
     .deletingLastPathComponent()
     .deletingLastPathComponent()
     .deletingLastPathComponent()
-  let blueprint = try InteractionBlueprint.load(
-    from: repository.appending(path: "Examples/operate-blueprint.json"))
+  let blueprint = try LysTestContract.load(
+    from: repository.appending(path: "Examples/lys-contract.json"))
 
   #expect(blueprint.schemaVersion == 1)
-  #expect(blueprint.flows.map(\.id) == ["quiz.complete"])
-  #expect(blueprint.contexts?.first?.requiredSecrets == ["test.email", "test.password"])
+  #expect(blueprint.flows.map(\.id) == ["auth.login", "quiz.complete"])
+  #expect(blueprint.contexts?.first?.requiredSecrets == ["test.session"])
+  #expect(blueprint.contexts?.first?.mode == .authenticatedSession)
+  #expect(
+    blueprint.contexts?.first?.session?.environment["LYS_TEST_SESSION_TOKEN"]?.secret
+      == "test.session")
   #expect(
     blueprint.capabilities?.contains {
       $0.id == "home.openQuiz" && $0.route == "home" && $0.resultsIn == "quiz.setup"
@@ -73,10 +77,47 @@ import Testing
 
 @Test func blueprintDiscoveryIsOptionalAndUsesOneCanonicalPath() throws {
   let root = FileManager.default.temporaryDirectory.appending(
-    path: "operate-blueprint-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    path: "lys-contract-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
 
   #expect(try InteractionBlueprintDiscovery.load(in: root) == nil)
-  #expect(InteractionBlueprintDiscovery.relativePath == ".operate/blueprint.json")
+  #expect(InteractionBlueprintDiscovery.relativePath == ".lys/contract.json")
+}
+
+@Test func authenticatedContextRequiresAProtectedSessionEnvironment() {
+  let contract = LysTestContract(
+    routes: [
+      .init(
+        id: "home", title: "Home",
+        match: [.init(kind: .visible, selector: .init(identifier: "home"))])
+    ],
+    contexts: [
+      .init(
+        id: "authenticated", title: "Authenticated", mode: .authenticatedSession,
+        readyWhen: [.init(kind: .route, route: "home")])
+    ],
+    flows: [
+      .init(
+        id: "home.check", title: "Check home", context: "authenticated",
+        steps: [.init(id: "home", title: "Reach home", kind: .navigate, route: "home")],
+        acceptance: [.init(kind: .route, route: "home")])
+    ])
+
+  #expect(throws: RPCError.self) { try contract.validate() }
+}
+
+@Test func naturalLanguageSelectsOneDeclaredFlowWithoutAModel() {
+  let flows = [
+    BlueprintFlow(
+      id: "auth.login", title: "Test sign in", description: "Authenticate a user",
+      steps: [], acceptance: []),
+    BlueprintFlow(
+      id: "quiz.complete", title: "Complete a quiz", description: "Answer every quiz question",
+      steps: [], acceptance: []),
+  ]
+
+  #expect(LysFlowMatcher.match(goal: "test the quiz", in: flows)?.id == "quiz.complete")
+  #expect(LysFlowMatcher.match(goal: "verify sign in authentication", in: flows)?.id == "auth.login")
+  #expect(LysFlowMatcher.match(goal: "test the app", in: flows) == nil)
 }

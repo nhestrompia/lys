@@ -1,5 +1,5 @@
 {
-  "$schema": "../Schemas/operate-blueprint.schema.json",
+  "$schema": "../Schemas/lys-test-contract.schema.json",
   "schemaVersion": 1,
   "app": {
     "bundleIdentifier": "com.example.learning",
@@ -29,6 +29,7 @@
     {
       "id": "quiz.results",
       "title": "Quiz results",
+      "terminal": true,
       "match": [{ "kind": "visible", "selector": { "identifier": "quiz.results" } }]
     }
   ],
@@ -58,6 +59,15 @@
       "resultsIn": "home",
       "action": "tap",
       "selector": { "identifier": "auth.submit" },
+      "risk": "reversible"
+    },
+    {
+      "id": "account.signOut",
+      "title": "Sign out test user",
+      "route": "home",
+      "resultsIn": "auth.login",
+      "action": "tap",
+      "selector": { "identifier": "account.signOut" },
       "risk": "reversible"
     },
     {
@@ -91,8 +101,43 @@
     {
       "id": "authenticated.testUser",
       "title": "Authenticated test user",
+      "mode": "authenticatedSession",
+      "requiredSecrets": ["test.session"],
+      "prepare": [],
+      "session": {
+        "environment": {
+          "LYS_TEST_SESSION_TOKEN": { "secret": "test.session" }
+        },
+        "arguments": ["-LysTesting"]
+      },
+      "readyWhen": [{ "kind": "route", "route": "home" }]
+    },
+    {
+      "id": "signedOut",
+      "title": "Signed-out user",
+      "mode": "uiFlow",
       "requiredSecrets": ["test.email", "test.password"],
       "prepare": [
+        {
+          "id": "auth.ensureSignedOut",
+          "title": "Return to signed-out state",
+          "kind": "invoke",
+          "capability": "account.signOut",
+          "expect": [{ "kind": "route", "route": "auth.login" }]
+        }
+      ],
+      "readyWhen": [{ "kind": "route", "route": "auth.login" }]
+    }
+  ],
+  "flows": [
+    {
+      "id": "auth.login",
+      "title": "Test sign in",
+      "description": "Exercises the real authentication interface and verifies the signed-in home screen.",
+      "context": "signedOut",
+      "requiredSecrets": ["test.email", "test.password"],
+      "startRoute": "auth.login",
+      "steps": [
         {
           "id": "auth.email",
           "title": "Fill email",
@@ -115,10 +160,11 @@
           "expect": [{ "kind": "route", "route": "home" }]
         }
       ],
-      "readyWhen": [{ "kind": "route", "route": "home" }]
-    }
-  ],
-  "flows": [
+      "acceptance": [
+        { "kind": "route", "route": "home" },
+        { "kind": "noCrash" }
+      ]
+    },
     {
       "id": "quiz.complete",
       "title": "Complete a quiz",

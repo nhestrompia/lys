@@ -39,7 +39,7 @@ private final class ACPUpdateRecorder: @unchecked Sendable {
 @Test func acpInitializeUsesOfficialV1CapabilityShape() throws {
   let value = try jsonValue(ACPInitialize(clientVersion: "0.1.0", allowWrites: true))
   #expect(value["protocolVersion"] == .number(1))
-  #expect(value["clientInfo"]?["name"] == .string("iosdev-workbench"))
+  #expect(value["clientInfo"]?["name"] == .string("lys"))
   #expect(value["clientCapabilities"]?["terminal"] == .bool(false))
   #expect(value["clientCapabilities"]?["fs"]?["readTextFile"] == .bool(true))
   #expect(value["clientCapabilities"]?["fs"]?["writeTextFile"] == .bool(true))
@@ -48,13 +48,13 @@ private final class ACPUpdateRecorder: @unchecked Sendable {
 @Test func acpStdioMCPEnvironmentUsesOfficialNameValueArray() throws {
   let value = try jsonValue(
     ACPMCPServer(
-      name: "iOS Runtime", command: "/absolute/iosdev-mcp",
-      env: ["IOSDEVD_TASK_TOKEN": "token", "IOSDEVD_SOCKET": "/tmp/runtime.sock"]))
-  #expect(value["command"] == .string("/absolute/iosdev-mcp"))
+      name: "Lys Runtime", command: "/absolute/lys-mcp",
+      env: ["LYS_TASK_TOKEN": "token", "LYS_RUNTIME_SOCKET": "/tmp/runtime.sock"]))
+  #expect(value["command"] == .string("/absolute/lys-mcp"))
   #expect(
     value["env"] == .array([
-      .object(["name": .string("IOSDEVD_SOCKET"), "value": .string("/tmp/runtime.sock")]),
-      .object(["name": .string("IOSDEVD_TASK_TOKEN"), "value": .string("token")]),
+      .object(["name": .string("LYS_RUNTIME_SOCKET"), "value": .string("/tmp/runtime.sock")]),
+      .object(["name": .string("LYS_TASK_TOKEN"), "value": .string("token")]),
     ]))
 }
 
@@ -113,7 +113,7 @@ private final class ACPUpdateRecorder: @unchecked Sendable {
 @Test func configurationRejectsUnknownSchema() throws {
   let url = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   try Data(#"{"schemaVersion":2,"scheme":"Demo"}"#.utf8).write(to: url)
-  #expect(throws: (any Error).self) { try IOSDevConfiguration.load(from: url) }
+  #expect(throws: (any Error).self) { try LysConfiguration.load(from: url) }
 }
 
 @Test func modelAgnosticACPAdapterCompletesAFullSessionOverStdio() async throws {

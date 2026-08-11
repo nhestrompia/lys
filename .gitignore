@@ -1,6 +1,9 @@
 .build/
 .swiftpm/
+node_modules/
 .DS_Store
 *.xcresult
 DerivedData/
-.iosdev/cache/
+.lys/cache/
+.lys/artifacts/
+.lys-baseline.json

@@ -15,7 +15,7 @@ for line in sys.stdin:
         if method == "initialize":
             result = {
                 "protocolVersion": 1,
-                "agentInfo": {"name": "iosdev-fake-agent", "version": "1"},
+                "agentInfo": {"name": "lys-fake-agent", "version": "1"},
                 "agentCapabilities": {},
             }
         elif method == "session/new":

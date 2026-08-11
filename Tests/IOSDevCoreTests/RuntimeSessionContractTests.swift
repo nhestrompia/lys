@@ -5,7 +5,7 @@ import Testing
 
 private func temporaryRuntimeRoot() throws -> URL {
   let root = URL(fileURLWithPath: NSTemporaryDirectory())
-    .appending(path: "iosdev-runtime-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    .appending(path: "lys-runtime-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   return root
 }

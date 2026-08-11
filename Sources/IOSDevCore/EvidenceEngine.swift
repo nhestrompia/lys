@@ -73,12 +73,23 @@ public actor EvidenceLedger {
     }
     if requirement.uiChanged {
       if !passed.contains(.launch) { missing.append("Fresh successful launch") }
-      if !current.contains(where: {
-        $0.kind == .uiAssertion && $0.status == .passed && $0.deterministic
-          && (requirement.criterionIDs.isEmpty
-            || ($0.criterionID.map(requirement.criterionIDs.contains) ?? false))
-      }) {
+      let passedCriterionIDs = Set(
+        current.compactMap { item in
+          guard item.kind == .uiAssertion, item.status == .passed, item.deterministic else {
+            return nil as String?
+          }
+          return item.criterionID
+        })
+      if requirement.criterionIDs.isEmpty,
+        !current.contains(where: {
+          $0.kind == .uiAssertion && $0.status == .passed && $0.deterministic
+        })
+      {
         missing.append("Deterministic UI assertion tied to an acceptance criterion")
+      } else {
+        for criterionID in requirement.criterionIDs where !passedCriterionIDs.contains(criterionID) {
+          missing.append("Acceptance criterion \(criterionID)")
+        }
       }
       if !passed.contains(.screenshot) { missing.append("Fresh screenshot") }
     }

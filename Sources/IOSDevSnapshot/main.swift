@@ -10,7 +10,7 @@ enum IOSDevSnapshotMain {
     let arguments = Array(CommandLine.arguments.dropFirst())
     let output =
       arguments.first.map(URL.init(fileURLWithPath:))
-      ?? URL(fileURLWithPath: "/tmp/iosdev-workbench.png")
+      ?? URL(fileURLWithPath: "/tmp/lys-workbench.png")
     let requestedSize = arguments.first(where: { $0.hasPrefix("--size=") })
       .map { String($0.dropFirst("--size=".count)) }
       .flatMap(parseSize)

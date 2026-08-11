@@ -27,7 +27,7 @@ public actor RuntimeService {
   private var lastDevelopmentLaunch: DevelopmentLaunchContext?
   private var sessionConfiguration: RuntimeSessionConfiguration?
   private var interactionBlueprint: InteractionBlueprint?
-  private var projectConfiguration: IOSDevConfiguration?
+  private var projectConfiguration: LysConfiguration?
   private var sessionStoppedByHost = false
   private var activeJourney: JourneyRecord?
   private var runtimeEvents: [RuntimeEvent] = []
@@ -47,9 +47,9 @@ public actor RuntimeService {
         create: true)) ?? URL(fileURLWithPath: NSTemporaryDirectory())
     wda = WDAController(
       stateRoot: support.appending(
-        path: "IOSDevWorkbench/WebDriverAgent", directoryHint: .isDirectory))
+        path: "Lys/WebDriverAgent", directoryHint: .isDirectory))
     store = try? SQLiteStore(
-      url: (stateRoot ?? support.appending(path: "IOSDevWorkbench/Runtime"))
+      url: (stateRoot ?? support.appending(path: "Lys/Runtime"))
         .appending(path: "metadata.sqlite3"))
   }
 
@@ -217,10 +217,10 @@ public actor RuntimeService {
       let configuration: RuntimeSessionConfiguration = try decode(params)
       sessionConfiguration = configuration
       interactionBlueprint = try InteractionBlueprintDiscovery.load(in: workspace)
-      let projectConfigurationURL = workspace.appending(path: ".iosdev/config.json")
+      let projectConfigurationURL = workspace.appending(path: ".lys/config.json")
       projectConfiguration =
         FileManager.default.fileExists(atPath: projectConfigurationURL.path)
-        ? try IOSDevConfiguration.load(from: projectConfigurationURL) : nil
+        ? try LysConfiguration.load(from: projectConfigurationURL) : nil
       sessionStoppedByHost = false
       activeJourney = nil
       rejectedActionStates = [:]
@@ -290,7 +290,7 @@ public actor RuntimeService {
       snapshot.result?["elements"].flatMap { try? decode($0) } ?? []
     let currentRoute = interactionBlueprint.flatMap { blueprintRoute(in: elements, blueprint: $0) }
     let declaredCapabilities = (interactionBlueprint?.capabilities ?? []).map { capability in
-      JSONValue.object([
+      return JSONValue.object([
         "id": .string(capability.id),
         "title": .string(capability.title),
         "route": capability.route.map(JSONValue.string) ?? .null,
@@ -311,7 +311,7 @@ public actor RuntimeService {
     return success(
       request.id,
       .object([
-        "blueprint": .bool(interactionBlueprint != nil),
+        "contract": .bool(interactionBlueprint != nil),
         "currentRoute": currentRoute.map { .string($0.id) } ?? .null,
         "routes": .array(routes),
         "capabilities": .array(declaredCapabilities + observedCapabilities),
@@ -319,27 +319,33 @@ public actor RuntimeService {
         "stateVersion": snapshot.result?["fingerprint"]?["digest"] ?? .null,
         "message": .string(
           interactionBlueprint == nil
-            ? "Observed the current app without a repository blueprint. Use flow.run to start automatic exploration."
-            : "Merged the repository blueprint with current executable controls."),
+            ? "No Lys contract was found; only exploratory interaction is available."
+            : "Merged the Lys contract with current executable controls."),
       ]))
   }
 
   private func listFlows(_ request: RPCEnvelope) -> RPCEnvelope {
     let flows = (interactionBlueprint?.flows ?? []).map { flow in
-      JSONValue.object([
+      let context = flow.context.flatMap { id in
+        interactionBlueprint?.contexts?.first(where: { $0.id == id })
+      }
+      return JSONValue.object([
         "id": .string(flow.id), "title": .string(flow.title),
         "description": flow.description.map(JSONValue.string) ?? .null,
         "context": flow.context.map(JSONValue.string) ?? .null,
+        "contextMode": context.map { .string($0.mode.rawValue) } ?? .null,
+        "trusted": .bool(true),
+        "requiredSecrets": .array((flow.requiredSecrets ?? []).map(JSONValue.string)),
         "parameters": (try? jsonValue(flow.parameters ?? [:])) ?? .object([:]),
       ])
     }
     return success(
       request.id,
       .object([
-        "flows": .array(flows), "blueprintAvailable": .bool(interactionBlueprint != nil),
+        "flows": .array(flows), "contractAvailable": .bool(interactionBlueprint != nil),
         "message": .string(
           flows.isEmpty
-            ? "No declared flows; Operate will discover the requested flow from the live app."
+            ? "No declared Lys flows; only exploratory testing is available."
             : "Found \(flows.count) declared flow(s)."),
       ]))
   }
@@ -349,29 +355,44 @@ public actor RuntimeService {
       codeChanged: sessionConfiguration?.intent.allowsSourceWrites == true,
       uiChanged: sessionConfiguration?.intent.requiresRunningApp == true,
       testsChanged: sessionConfiguration?.intent.kind == .runTests,
-      criterionIDs: activeJourney?.steps.filter { $0.status == .passed }
-        .compactMap { $0.step.criterionID } ?? [])
+      criterionIDs: activeJourney?.steps.compactMap { $0.step.criterionID } ?? [])
     let report = await ledger.verify(requirement)
     let journeyStatus = activeJourney?.status.rawValue ?? "notStarted"
+    let trusted = activeJourney?.status == .passed && report.status == .verified
+    let status: VerificationStatus = trusted
+      ? .verified
+      : (activeJourney?.status == .failed ? .failed : report.status)
+    var missing = report.missing
+    if !trusted, activeJourney?.status != .passed {
+      missing.append("A declared Lys flow reaching its terminal state")
+    }
     return success(
       request.id,
       .object([
-        "status": .string(report.status.rawValue),
+        "status": .string(status.rawValue),
         "flowStatus": .string(journeyStatus),
-        "missing": .array(report.missing.map(JSONValue.string)),
+        "missing": .array(missing.map(JSONValue.string)),
         "evidenceCount": .number(Double(report.currentEvidence.count)),
         "message": .string(
-          report.status == .verified
-            ? "The host verified the requested flow."
-            : "Host verification still needs: \(report.missing.joined(separator: "; "))."),
+          trusted
+            ? "Lys verified the requested flow."
+            : "Lys verification still needs: \(missing.joined(separator: "; "))."),
       ]))
   }
 
   private func runFlow(_ request: RPCEnvelope) async -> RPCEnvelope {
-    if let blueprintID = request.params?["blueprintID"]?.stringValue {
-      guard let blueprint = interactionBlueprint,
-        let flow = blueprint.flows.first(where: { $0.id == blueprintID })
-      else { return failure(request.id, -32112, "Unknown blueprint flow \(blueprintID)") }
+    if let blueprint = interactionBlueprint {
+      let requestedID = request.params?["flowID"]?.stringValue
+      let goal = request.params?["goal"]?.stringValue ?? ""
+      let flow = requestedID.flatMap { id in blueprint.flows.first { $0.id == id } }
+        ?? LysFlowMatcher.match(goal: goal, in: blueprint.flows)
+      guard let flow else {
+        let available = blueprint.flows.map(\.id).joined(separator: ", ")
+        return failure(
+          request.id, -32112,
+          requestedID.map { "Unknown Lys flow \($0). Available flows: \(available)" }
+            ?? "The goal did not uniquely match a declared Lys flow. Available flows: \(available)")
+      }
       let parameters = request.params?["parameters"]?.objectValue ?? [:]
       return await runBlueprintFlow(
         request, blueprint: blueprint, flow: flow, parameters: parameters)
@@ -431,7 +452,7 @@ public actor RuntimeService {
     {
       return failure(
         request.id, -32124,
-        "Blueprint expects \(expectedBundleID), but the selected app is \(selectedBundleID)")
+        "Lys contract expects \(expectedBundleID), but the selected app is \(selectedBundleID)")
     }
     for (name, parameter) in flow.parameters ?? [:]
     where parameter.required == true && parameters[name] == nil {
@@ -446,7 +467,7 @@ public actor RuntimeService {
       if parameter.sensitive == true {
         return failure(
           request.id, -32114,
-          "Sensitive input \(name) must be a blueprint secret, not an agent-supplied parameter")
+          "Sensitive input \(name) must be a Lys secret, not an agent-supplied parameter")
       }
       if !blueprintParameterValue(value, satisfies: parameter) {
         return failure(
@@ -458,6 +479,15 @@ public actor RuntimeService {
     activeJourney = journey
     emit(.journeyStarted, message: flow.title, journeyID: journey.id)
     do {
+      for secret in flow.requiredSecrets ?? [] {
+        guard blueprintSecret(secret) != nil else {
+          throw RPCError(
+            code: -32114,
+            message:
+              "Flow \(flow.id) requires secret \(secret). Add it through Lys's Keychain-backed secret settings."
+          )
+        }
+      }
       let ready = try await ensureJourneyApp(configuration: &configuration, journeyID: journey.id)
       sessionConfiguration = configuration
       journey.currentFingerprint = ready.fingerprint
@@ -476,9 +506,14 @@ public actor RuntimeService {
               throw RPCError(
                 code: -32114,
                 message:
-                  "Authentication context \(context.id) requires secret \(secret). Add it through Operate's Keychain-backed secret settings."
+                  "Authentication context \(context.id) requires secret \(secret). Add it through Lys's Keychain-backed secret settings."
               )
             }
+          }
+          if context.mode == .authenticatedSession, let session = context.session {
+            try await launchAuthenticatedTestSession(
+              session, parameters: parameters, configuration: configuration,
+              journeyID: journey.id)
           }
           try await executeBlueprintSteps(
             context.prepare, blueprint: blueprint, parameters: parameters, journey: &journey)
@@ -522,6 +557,14 @@ public actor RuntimeService {
             : "Blueprint acceptance \(index + 1) failed",
           deterministic: true)
         try await ledger.record(item)
+        journey.steps.append(
+          .init(
+            step: .init(
+              id: "acceptance.\(index + 1)", title: "Acceptance \(index + 1)",
+              criterionID: criterionID),
+            status: passed ? .passed : .failed, detail: item.diagnosticSummary,
+            evidenceIDs: [item.id]))
+        activeJourney = journey
         if !passed {
           throw RPCError(code: -32117, message: item.diagnosticSummary)
         }
@@ -544,7 +587,7 @@ public actor RuntimeService {
         journeyID: journey.id)
       var result = try jsonValue(journey)
       if case .object(var object) = result {
-        object["blueprintID"] = .string(flow.id)
+        object["flowID"] = .string(flow.id)
         object["verification"] = try jsonValue(report)
         object["message"] = .string(
           journey.status == .passed
@@ -674,6 +717,75 @@ public actor RuntimeService {
     }
   }
 
+  /// Starts a protected test session without asking the agent to type credentials through the UI.
+  /// Values are resolved inside the host and reach the Simulator only through SIMCTL_CHILD_ launch
+  /// environment entries. Authentication itself remains testable with a separate `.uiFlow`
+  /// context that drives the real login controls.
+  private func launchAuthenticatedTestSession(
+    _ session: BlueprintAuthenticatedSession, parameters: [String: JSONValue],
+    configuration: RuntimeSessionConfiguration, journeyID: UUID
+  ) async throws {
+    guard let destination = configuration.destination, let target = configuration.target else {
+      throw RPCError(code: -32125, message: "Lys cannot prepare authentication without an app")
+    }
+    let preflight = await resolvedToolchainPreflight()
+    guard let simctlPath = preflight.simctlPath,
+      let developerDirectory = preflight.developerDirectory
+    else { throw RPCError(code: -32050, message: "Full Xcode is unavailable") }
+
+    let resolved = try resolveBlueprintInputs(session.environment, parameters: parameters)
+    var values: [String: String] = [:]
+    for (key, value) in resolved {
+      guard let string = value.stringValue else {
+        throw RPCError(
+          code: -32113,
+          message: "Authenticated session environment \(key) must resolve to a string")
+      }
+      values[key] = string
+    }
+
+    let simctl = URL(fileURLWithPath: simctlPath)
+    let terminate = AppleCommandBuilder.terminate(
+      simctl: simctl, udid: destination.udid, bundleID: target.bundleID)
+    _ = try? await runner.run(
+      executable: terminate.executable, arguments: terminate.arguments,
+      workingDirectory: workspace, environment: ["DEVELOPER_DIR": developerDirectory])
+
+    var launchArguments = session.arguments ?? []
+    if !launchArguments.contains("-LysTesting") { launchArguments.append("-LysTesting") }
+    let launch = AppleCommandBuilder.authenticatedLaunch(
+      simctl: simctl, udid: destination.udid, bundleID: target.bundleID,
+      developerDirectory: developerDirectory, values: values,
+      arguments: launchArguments)
+    let outcome = try await runner.run(
+      executable: launch.executable, arguments: launch.arguments, workingDirectory: workspace,
+      environment: launch.environment)
+    let evidence = Evidence(
+      kind: .launch, status: outcome.succeeded ? .passed : .failed,
+      taskGeneration: await ledger.generation, destinationUDID: destination.udid,
+      diagnosticSummary: outcome.succeeded
+        ? "Lys prepared the authenticated test session"
+        : "Authenticated test session launch failed: \(outcome.stderr)")
+    try await ledger.record(evidence)
+    guard outcome.succeeded else {
+      throw RPCError(code: -32125, message: evidence.diagnosticSummary)
+    }
+    lastLaunchedBundleID = target.bundleID
+    emit(
+      .appLaunched, message: "Authenticated test session ready for validation.",
+      journeyID: journeyID, target: target, destinationUDID: destination.udid)
+
+    // Force WDA to observe the relaunched process before context readyWhen is evaluated.
+    for _ in 0..<20 {
+      if (try? await wda.snapshot(
+        udid: destination.udid, runtime: destination.runtime, bundleID: target.bundleID,
+        preflight: preflight)) != nil
+      { return }
+      try await Task.sleep(for: .milliseconds(150))
+    }
+    throw RPCError(code: -32125, message: "Authenticated test session did not become observable")
+  }
+
   private func executeBlueprintCapability(
     _ declared: BlueprintStep, capability: BlueprintCapability,
     blueprint: InteractionBlueprint, parameters: [String: JSONValue], journeyID: UUID
@@ -682,7 +794,7 @@ public actor RuntimeService {
       throw RPCError(
         code: -32123,
         message:
-          "Capability \(capability.id) is \(capability.risk?.rawValue ?? "restricted") and requires explicit user approval in Operate. Agents cannot self-approve it."
+          "Capability \(capability.id) is \(capability.risk?.rawValue ?? "restricted") and requires explicit user approval in Lys. Agents cannot self-approve it."
       )
     }
     let elements = try await currentBlueprintElements()
@@ -903,6 +1015,17 @@ public actor RuntimeService {
           && !$0.acknowledged
       }
     }
+    if predicate.kind == .appIdle {
+      guard let context = try? await automationContext(.init()) else { return false }
+      let first = UIInteractionStateFingerprint.make(elements: elements)
+      try? await Task.sleep(for: .milliseconds(160))
+      guard
+        let next = try? await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+      else { return false }
+      return UIInteractionStateFingerprint.make(elements: next) == first
+    }
     return blueprintPredicatePassesSynchronously(
       predicate, elements: elements, blueprint: blueprint)
   }
@@ -944,7 +1067,7 @@ public actor RuntimeService {
     case .progressComplete:
       return UIFlowProgressDetector.detect(in: elements)?.isComplete == true
     case .appIdle:
-      return true  // uiSnapshot is captured only after the host's stability boundary.
+      return false  // Evaluated asynchronously using two matching runtime snapshots.
     case .noCrash:
       return true  // The asynchronous ledger check is performed by blueprintPredicatePasses.
     }
@@ -1051,13 +1174,14 @@ public actor RuntimeService {
   }
 
   private func blueprintSecret(_ name: String) -> String? {
+    if let value = BlueprintSecretStore.read(account: name) { return value }
     if let reference = projectConfiguration?.secrets?.first(where: {
       $0.environmentKey == name
     }), let value = BlueprintSecretStore.read(account: reference.keychainAccount) {
       return value
     }
     let key =
-      "OPERATE_SECRET_"
+      "LYS_SECRET_"
       + name.uppercased().map { character in
         character.isLetter || character.isNumber ? character : "_"
       }
@@ -1176,16 +1300,17 @@ public actor RuntimeService {
         let requirement = VerificationRequirement(
           codeChanged: configuration.intent.allowsSourceWrites,
           uiChanged: configuration.intent.requiresRunningApp, testsChanged: false,
-          criterionIDs: journey.steps.filter { $0.status == .passed }
-            .compactMap { $0.step.criterionID })
-        let report = await ledger.verify(requirement)
-        journey.status = report.status == .verified ? .passed : .failed
+          criterionIDs: journey.steps.compactMap { $0.step.criterionID })
+        _ = await ledger.verify(requirement)
+        // A model-guided discovery may produce a useful draft and evidence, but it is not a Lys
+        // contract run. Only declared host-owned flows can become trusted green verification.
+        journey.status = .failed
         journey.updatedAt = Date()
         activeJourney = journey
         emit(
           .journeyFinished,
-          message: journey.status == .passed
-            ? "Journey verified." : report.missing.joined(separator: "; "),
+          message:
+            "Exploratory interaction finished without a Lys contract; trusted verification was not granted.",
           journeyID: journey.id)
       }
 
@@ -1592,14 +1717,14 @@ public actor RuntimeService {
     {
       return failure(
         request.id, -32059,
-        "CocoaPods dependencies are not installed for \(requirement.projectDirectory.path). \(requirement.reason) Approve CocoaPods installation in Operate, or run `pod \(requirement.installArguments.joined(separator: " "))` in that directory."
+        "CocoaPods dependencies are not installed for \(requirement.projectDirectory.path). \(requirement.reason) Approve CocoaPods installation in Lys, or run `pod \(requirement.installArguments.joined(separator: " "))` in that directory."
       )
     }
     do {
       let generation = await ledger.generation
       let resultPath = workspace.appending(
-        path: ".iosdev/artifacts/build-\(UUID().uuidString).xcresult")
-      let derived = workspace.appending(path: ".iosdev/cache/DerivedData")
+        path: ".lys/artifacts/build-\(UUID().uuidString).xcresult")
+      let derived = workspace.appending(path: ".lys/cache/DerivedData")
       try FileManager.default.createDirectory(
         at: resultPath.deletingLastPathComponent(), withIntermediateDirectories: true)
       try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
@@ -1631,7 +1756,7 @@ public actor RuntimeService {
             ?? sessionConfiguration?.configuration ?? "Debug",
           destination: destination, xcodebuild: URL(fileURLWithPath: xcodebuild),
           developerDirectory: URL(fileURLWithPath: developer),
-          derivedData: workspace.appending(path: ".iosdev/cache/DerivedData"))
+          derivedData: workspace.appending(path: ".lys/cache/DerivedData"))
         result["appTargets"] = (try? jsonValue(targets ?? [])) ?? .array([])
       }
       return success(
@@ -2304,7 +2429,7 @@ public actor RuntimeService {
       let outcome = try await runner.run(
         executable: spec.executable, arguments: spec.arguments, workingDirectory: workspace,
         environment: ["DEVELOPER_DIR": developer], maximumOutputBytes: 4 * 1_024 * 1_024)
-      let artifact = workspace.appending(path: ".iosdev/artifacts/log-\(UUID().uuidString).txt")
+      let artifact = workspace.appending(path: ".lys/artifacts/log-\(UUID().uuidString).txt")
       try FileManager.default.createDirectory(
         at: artifact.deletingLastPathComponent(), withIntermediateDirectories: true)
       let contents = outcome.stdout + outcome.stderr
@@ -2355,7 +2480,7 @@ public actor RuntimeService {
         configuration: request.params?["configuration"]?.stringValue ?? "Debug",
         destination: destination, xcodebuild: URL(fileURLWithPath: path),
         developerDirectory: URL(fileURLWithPath: developer),
-        derivedData: workspace.appending(path: ".iosdev/cache/DerivedData"))
+        derivedData: workspace.appending(path: ".lys/cache/DerivedData"))
       return success(request.id, try jsonValue(targets))
     } catch { return failure(request.id, -32055, error.localizedDescription) }
   }
@@ -2821,7 +2946,7 @@ public actor RuntimeService {
     }
     let simctl = URL(fileURLWithPath: path)
     let environment = ["DEVELOPER_DIR": developer]
-    let artifacts = workspace.appending(path: ".iosdev/artifacts", directoryHint: .isDirectory)
+    let artifacts = workspace.appending(path: ".lys/artifacts", directoryHint: .isDirectory)
     let output = artifacts.appending(path: "screenshot-\(UUID().uuidString).png")
     let settleDelay = min(max(Int(request.params?["settleDelayMS"]?.numberValue ?? 0), 0), 10_000)
     var temporaryFiles: [URL] = []
@@ -2906,7 +3031,7 @@ public actor RuntimeService {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
     let previewDirectory = workspace.appending(
-      path: ".iosdev/cache/Preview", directoryHint: .isDirectory)
+      path: ".lys/cache/Preview", directoryHint: .isDirectory)
     let output = previewDirectory.appending(path: "preview-\(UUID().uuidString).png")
     let started = DispatchTime.now().uptimeNanoseconds
     do {

@@ -4,16 +4,16 @@ import IOSDevCore
 @main
 enum IOSDevMCPMain {
   static var tools: [AgentRuntimeToolDefinition] {
-    let raw = ProcessInfo.processInfo.environment["IOSDEV_INTENT_KIND"]
+    let raw = ProcessInfo.processInfo.environment["LYS_INTENT_KIND"]
     return AgentRuntimeToolCatalog.tools(for: raw.flatMap(AgentTaskKind.init(rawValue:)))
   }
 
   static func main() {
-    guard let socket = ProcessInfo.processInfo.environment["IOSDEVD_SOCKET"],
-      let token = ProcessInfo.processInfo.environment["IOSDEVD_TASK_TOKEN"]
+    guard let socket = ProcessInfo.processInfo.environment["LYS_RUNTIME_SOCKET"],
+      let token = ProcessInfo.processInfo.environment["LYS_TASK_TOKEN"]
     else {
       FileHandle.standardError.write(
-        Data("iosdev-mcp requires IOSDEVD_SOCKET and IOSDEVD_TASK_TOKEN\n".utf8))
+        Data("lys-mcp requires LYS_RUNTIME_SOCKET and LYS_TASK_TOKEN\n".utf8))
       exit(64)
     }
     var framer = LineFramer()
@@ -37,7 +37,7 @@ enum IOSDevMCPMain {
         id: request.id,
         result: .object([
           "protocolVersion": .string("2025-03-26"),
-          "serverInfo": .object(["name": .string("iosdev-mcp"), "version": .string("0.1.0")]),
+          "serverInfo": .object(["name": .string("lys-mcp"), "version": .string("0.1.0")]),
           "capabilities": .object(["tools": .object(["listChanged": .bool(false)])]),
         ]))
     case "notifications/initialized": return nil
@@ -48,7 +48,7 @@ enum IOSDevMCPMain {
       guard let toolName = request.params?["name"]?.stringValue else {
         return .init(id: request.id, error: .init(code: -32602, message: "Tool name is required"))
       }
-      let rawIntent = ProcessInfo.processInfo.environment["IOSDEV_INTENT_KIND"]
+      let rawIntent = ProcessInfo.processInfo.environment["LYS_INTENT_KIND"]
       let intent = rawIntent.flatMap(AgentTaskKind.init(rawValue:))
       guard let tool = AgentRuntimeToolCatalog.definition(named: toolName, for: intent) else {
         return toolError(

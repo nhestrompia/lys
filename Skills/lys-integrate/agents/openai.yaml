@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrate Lys"
+  short_description: "Add deterministic Lys app testing contracts"
+  default_prompt: "Use $lys-integrate to add a minimal validated Lys test flow to this app."

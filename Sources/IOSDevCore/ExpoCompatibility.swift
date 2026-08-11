@@ -12,7 +12,7 @@ public enum ExpoCompatibilityError: Error, LocalizedError {
 }
 
 public enum ExpoCompatibility {
-  private static let fmtMarker = "// iosdev: Apple Clang 21 fmt consteval compatibility"
+  private static let fmtMarker = "// lys: Apple Clang 21 fmt consteval compatibility"
   private static let fmtAnchor =
     "#elif defined(__apple_build_version__) && __apple_build_version__ < 14000029L"
   private static let fmtReplacement = """
@@ -20,7 +20,7 @@ public enum ExpoCompatibility {
     #  define FMT_USE_CONSTEVAL 0  \(fmtMarker)
     \(fmtAnchor)
     """
-  private static let mmkvMarker = "// iosdev: Apple Clang 21 MMKV secure-wipe compatibility"
+  private static let mmkvMarker = "// lys: Apple Clang 21 MMKV secure-wipe compatibility"
   private static let mmkvAnchor = """
     #elif defined(__STDC_LIB_EXT1__) || defined(MMKV_APPLE)
         // C11 Annex K, if the implementation actually provides it.

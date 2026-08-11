@@ -2,15 +2,15 @@
 import PackageDescription
 
 let package = Package(
-  name: "IOSDevWorkbench",
+  name: "Lys",
   platforms: [.macOS(.v26)],
   products: [
     .library(name: "IOSDevCore", targets: ["IOSDevCore"]),
     .library(name: "IOSDevUI", targets: ["IOSDevUI"]),
-    .executable(name: "IOSDevApp", targets: ["IOSDevApp"]),
-    .executable(name: "IOSDevSnapshot", targets: ["IOSDevSnapshot"]),
-    .executable(name: "iosdevd", targets: ["IOSDevRuntime"]),
-    .executable(name: "iosdev-mcp", targets: ["IOSDevMCP"]),
+    .executable(name: "Lys", targets: ["IOSDevApp"]),
+    .executable(name: "LysSnapshot", targets: ["IOSDevSnapshot"]),
+    .executable(name: "lysd", targets: ["IOSDevRuntime"]),
+    .executable(name: "lys-mcp", targets: ["IOSDevMCP"]),
   ],
   targets: [
     .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),

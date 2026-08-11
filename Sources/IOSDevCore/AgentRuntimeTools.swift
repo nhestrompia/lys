@@ -44,39 +44,39 @@ public enum AgentRuntimeToolCatalog {
         properties: [:], readOnly: true),
       tool(
         "app.describe",
-        "Read the current logical route and executable capabilities. Operate merges an optional repository blueprint with automatically observed accessibility and visual state.",
+        "Read the current logical screen and executable capabilities. Lys merges its repository test contract with the live accessibility state.",
         properties: [:], readOnly: true,
         output: object(
           [
-            "blueprint": boolean("Whether a repository blueprint was loaded"),
+            "contract": boolean("Whether a Lys test contract was loaded"),
             "currentRoute": nullableString("Current stable route ID when known"),
             "routes": array(items: openObject()),
             "capabilities": array(items: openObject()),
             "progress": openValue(), "stateVersion": openValue(),
             "message": string("Short host explanation"),
-          ], required: ["blueprint", "routes", "capabilities", "message"])),
+          ], required: ["contract", "routes", "capabilities", "message"])),
       tool(
         "flow.list",
-        "List repository-declared flows. An empty list means Operate will discover the requested flow from the live app without requiring code changes.",
+        "List flows declared by the Lys SDK contract. An empty list means only exploratory testing is available.",
         properties: [:], readOnly: true,
         output: object(
           [
             "flows": array(items: openObject()),
-            "blueprintAvailable": boolean("Whether a blueprint exists"),
+            "contractAvailable": boolean("Whether a Lys contract exists"),
             "message": string("Short host explanation"),
-          ], required: ["flows", "blueprintAvailable", "message"])),
+          ], required: ["flows", "contractAvailable", "message"])),
       tool(
         "flow.run",
-        "Run a complete host-owned flow. Pass blueprintID to execute a declared flow including authentication, loops, and acceptance criteria. Without blueprintID, Operate starts zero-integration discovery from the current app.",
+        "Run one complete host-owned Lys flow, including authenticated-session setup, bounded loops, every acceptance criterion, evidence, and terminal completion. Omit flowID only for explicitly exploratory testing.",
         properties: [
           "goal": string("Natural-language outcome to test"),
-          "blueprintID": string("Optional exact ID returned by flow.list"),
+          "flowID": string("Optional exact ID returned by flow.list"),
           "parameters": openObject(),
         ], required: ["goal"], readOnly: false, destructive: false, idempotent: false,
         output: openObject()),
       tool(
         "flow.step",
-        "Continue a zero-integration discovery flow with one exact capability from the latest app state. Declared blueprint flows do not need this tool.",
+        "Continue an exploratory flow with one exact capability from the latest app state. Declared Lys flows never need this tool.",
         properties: [
           "flowID": string("Active flow ID"),
           "stepID": string("Stable step name for evidence"),

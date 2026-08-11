@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://operate.local/schemas/blueprint-v1.json",
-  "title": "Operate interaction blueprint",
+  "$id": "https://lys.dev/schemas/test-contract-v1.json",
+  "title": "Lys test contract",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "flows"],
@@ -89,6 +89,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "title": { "type": "string", "minLength": 1 },
+        "terminal": { "type": "boolean" },
         "match": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } }
       }
     },
@@ -139,13 +140,35 @@
     "context": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "title", "prepare", "readyWhen"],
+      "required": ["id", "title", "mode", "readyWhen"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "title": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["uiFlow", "authenticatedSession"] },
         "requiredSecrets": { "type": "array", "items": { "$ref": "#/$defs/id" } },
         "prepare": { "type": "array", "items": { "$ref": "#/$defs/step" } },
-        "readyWhen": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } }
+        "readyWhen": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } },
+        "session": { "$ref": "#/$defs/authenticatedSession" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "authenticatedSession" } } },
+          "then": { "required": ["session"] }
+        }
+      ]
+    },
+    "authenticatedSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment"],
+      "properties": {
+        "environment": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "$ref": "#/$defs/input" }
+        },
+        "arguments": { "type": "array", "items": { "type": "string" } }
       }
     },
     "flow": {
@@ -158,6 +181,7 @@
         "description": { "type": "string" },
         "context": { "$ref": "#/$defs/id" },
         "startRoute": { "$ref": "#/$defs/id" },
+        "requiredSecrets": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
         "parameters": { "type": "object", "additionalProperties": { "$ref": "#/$defs/parameter" } },
         "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } },
         "acceptance": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } }

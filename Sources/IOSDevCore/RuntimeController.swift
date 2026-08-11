@@ -10,8 +10,8 @@ public enum RuntimeControllerError: Error, LocalizedError {
 
   public var errorDescription: String? {
     switch self {
-    case .executableMissing(let path): "The bundled iosdevd executable is missing at \(path)"
-    case .startupTimedOut: "iosdevd did not create its task socket before the startup deadline"
+    case .executableMissing(let path): "The bundled lysd executable is missing at \(path)"
+    case .startupTimedOut: "lysd did not create its task socket before the startup deadline"
     case .notRunning: "The task runtime is not running"
     case .authenticationFailed(let message): "Runtime authentication failed: \(message)"
     case .remote(let error): error.message
@@ -90,7 +90,7 @@ public actor RuntimeController {
     guard let socketPath, let token, process?.isRunning == true else {
       throw RuntimeControllerError.notRunning
     }
-    return ["IOSDEVD_SOCKET": socketPath, "IOSDEVD_TASK_TOKEN": token]
+    return ["LYS_RUNTIME_SOCKET": socketPath, "LYS_TASK_TOKEN": token]
   }
 
   public func stop() async {

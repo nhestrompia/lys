@@ -364,7 +364,7 @@ public enum AgentToolTraceValidator {
     }
 
     let declaredFlow = trace.contains {
-      $0.name == "flow.run" && $0.arguments["blueprintID"]?.stringValue != nil
+      $0.name == "flow.run" && $0.arguments["flowID"]?.stringValue != nil
     }
     let submittedCompletion = declaredFlow || trace.contains { $0.name == "flow.finish" }
     let discoverySteps = trace.filter { $0.name == "flow.step" }

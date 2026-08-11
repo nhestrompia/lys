@@ -1,0 +1,14 @@
+{
+  "name": "lys-monorepo",
+  "private": true,
+  "workspaces": ["Packages/LysExpo"],
+  "devDependencies": {
+    "ajv": "^8.17.1"
+  },
+  "scripts": {
+    "test:swift-sdk": "swift test --package-path Packages/LysSwift",
+    "build:expo-sdk": "tsc --project Packages/LysExpo/tsconfig.json",
+    "check:expo-sdk": "node Packages/LysExpo/scripts/check.mjs && node Packages/LysExpo/scripts/test.mjs",
+    "check:contract": "node Scripts/validate-contract.mjs"
+  }
+}

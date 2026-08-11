@@ -10,7 +10,7 @@ enum IOSDevRuntimeMain {
       let token = value(after: "--token", in: arguments), !token.isEmpty
     else {
       FileHandle.standardError.write(
-        Data("usage: iosdevd --socket PATH --workspace PATH --token TOKEN\n".utf8))
+        Data("usage: lysd --socket PATH --workspace PATH --token TOKEN\n".utf8))
       exit(64)
     }
     do {
@@ -23,7 +23,7 @@ enum IOSDevRuntimeMain {
         Task.detached { await serve(connection, using: service) }
       }
     } catch {
-      FileHandle.standardError.write(Data("iosdevd: \(error.localizedDescription)\n".utf8))
+      FileHandle.standardError.write(Data("lysd: \(error.localizedDescription)\n".utf8))
       exit(1)
     }
   }

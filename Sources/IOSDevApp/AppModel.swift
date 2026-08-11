@@ -245,6 +245,7 @@ public final class AppModel: ObservableObject {
     availability: .unsupported, title: "Checking semantic UI automation",
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
   @Published var recoverableWorkspaces: [RecoverableWorkspace] = []
+  @Published var testSecretIDs: [String] = BlueprintSecretStore.accounts()
   @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
@@ -414,7 +415,7 @@ public final class AppModel: ObservableObject {
       (try? FileManager.default.url(
         for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil,
         create: true)) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-    let root = support.appending(path: "IOSDevWorkbench", directoryHint: .isDirectory)
+    let root = support.appending(path: "Lys", directoryHint: .isDirectory)
     taskRoot = root.appending(path: "Tasks", directoryHint: .isDirectory)
     runtimeRoot = root.appending(path: "Runtime", directoryHint: .isDirectory)
     adapterRoot = root.appending(path: "Adapters", directoryHint: .isDirectory)
@@ -457,6 +458,36 @@ public final class AppModel: ObservableObject {
     panel.prompt = "Open Repository"
     guard panel.runModal() == .OK, let url = panel.url else { return }
     openRepository(url)
+  }
+
+  func saveTestSecret(id: String, value: String) {
+    let identifier = id.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !identifier.isEmpty, !value.isEmpty,
+      identifier.unicodeScalars.allSatisfy({
+        CharacterSet.alphanumerics.contains($0)
+          || CharacterSet(charactersIn: "._-").contains($0)
+      })
+    else {
+      notice = "Use a dot-separated secret ID and provide a non-empty value."
+      return
+    }
+    do {
+      try BlueprintSecretStore.write(value, account: identifier)
+      testSecretIDs = BlueprintSecretStore.accounts()
+      notice = "Saved \(identifier) in Keychain. The value is never shown to agents."
+    } catch {
+      notice = error.localizedDescription
+    }
+  }
+
+  func deleteTestSecret(id: String) {
+    do {
+      try BlueprintSecretStore.delete(account: id)
+      testSecretIDs = BlueprintSecretStore.accounts()
+      notice = "Removed \(id) from Keychain."
+    } catch {
+      notice = error.localizedDescription
+    }
   }
 
   func chooseXcode() {
@@ -581,12 +612,12 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Prepare this Expo project for iOS?"
     confirmation.informativeText =
-      "Operate will run npm ci when node_modules is missing, then npm exec -- expo prebuild --platform ios. This executes the repository's package scripts and may download dependencies."
+      "Lys will run npm ci when node_modules is missing, then npm exec -- expo prebuild --platform ios. This executes the repository's package scripts and may download dependencies."
     confirmation.addButton(withTitle: "Prepare iOS Project")
     confirmation.addButton(withTitle: "Cancel")
     guard confirmation.runModal() == .alertFirstButtonReturn else { return }
     guard let npm = npmExecutable() else {
-      notice = "npm was not found. Install Node.js, then reopen Operate."
+      notice = "npm was not found. Install Node.js, then reopen Lys."
       return
     }
     isBusy = true
@@ -912,7 +943,7 @@ public final class AppModel: ObservableObject {
       : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
     let journeyPolicy =
       intent.requiresRunningApp
-      ? "Call app.describe and flow.list first. If flow.list returns a matching declared flow, call flow.run once with its exact blueprintID and required parameters; the host owns authentication, every interaction, loops, assertions, evidence, and completion. Otherwise call flow.run with the user's goal, then use only exact capability IDs and advertised actions returned by the host through flow.step. Re-read app.describe after state changes, continue all reported progress to a terminal state, and call flow.finish for host validation. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
+      ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host owns authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. If no contract flow exists, say that only exploratory testing is available before using flow.run without flowID. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
     return """
       \(prompt)
@@ -967,8 +998,8 @@ public final class AppModel: ObservableObject {
         finishAgentMessage()
         timeline.append(
           .init(
-            time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
-            state: reason == "end_turn" || reason == "completed" ? .complete : .warning))
+            time: Self.now(), title: "Agent response ended", detail: "Stop reason: \(reason)",
+            state: activeTaskIntent?.kind == .verifyCurrentApp ? .warning : .complete))
         try await continueIncompleteTestingSession(client: client, sessionID: sessionID)
         if activeTaskIntent?.allowsSourceWrites == true { try await refreshProposedChanges() }
         await refreshEvidence()
@@ -1715,7 +1746,7 @@ public final class AppModel: ObservableObject {
 
   func exportDiagnostics() {
     let panel = NSSavePanel()
-    panel.nameFieldStringValue = "iosdev-diagnostics.json"
+    panel.nameFieldStringValue = "lys-diagnostics.json"
     guard panel.runModal() == .OK, let url = panel.url else { return }
     do {
       let redactor = SecretRedactor(repositoryRoots: [repository].compactMap { $0 })
@@ -1755,7 +1786,7 @@ public final class AppModel: ObservableObject {
         workingDirectory: "/Synthetic/TravelApp", state: .succeeded)
     ]
     terminalEntries[0].output = "** BUILD SUCCEEDED **\n"
-    isTerminalExpanded = ProcessInfo.processInfo.environment["IOSDEV_SNAPSHOT_TERMINAL"] == "1"
+    isTerminalExpanded = ProcessInfo.processInfo.environment["LYS_SNAPSHOT_TERMINAL"] == "1"
     taskTitle =
       "Add dark mode support to the Profile screen and verify it on small and large iPhones."
     activeTaskIntent = AgentTaskIntentRouter.classify(taskTitle)
@@ -2112,9 +2143,9 @@ public final class AppModel: ObservableObject {
       throw RPCError(code: -32091, message: "The selected agent did not negotiate ACP v1")
     }
     let mcp = ACPMCPServer(
-      name: "iOS Development Runtime", command: try mcpExecutable().path,
+      name: "Lys Runtime", command: try mcpExecutable().path,
       env: try await runtime.mcpEnvironment().merging(
-        ["IOSDEV_INTENT_KIND": intent.kind.rawValue], uniquingKeysWith: { _, task in task }))
+        ["LYS_INTENT_KIND": intent.kind.rawValue], uniquingKeysWith: { _, task in task }))
     let session = try await client.request(
       method: "session/new", params: try jsonValue(ACPNewSession(cwd: workspace, mcpServers: [mcp]))
     )
@@ -2140,47 +2171,13 @@ public final class AppModel: ObservableObject {
     finishAgentMessage()
     timeline.append(
       .init(
-        time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
-        state: reason == "end_turn" || reason == "completed" ? .complete : .warning))
+        time: Self.now(), title: "Agent response ended", detail: "Stop reason: \(reason)",
+        state: intent.kind == .verifyCurrentApp ? .warning : .complete))
     try await continueIncompleteTestingSession(client: client, sessionID: sessionID)
   }
 
   private func continueIncompleteTestingSession(client: ACPClient, sessionID: String) async throws {
     guard activeTaskIntent?.kind == .verifyCurrentApp, !agentStopRequested else { return }
-    for attempt in 1...2 {
-      guard !agentStopRequested else { return }
-      let value = try? await runtime.request(method: "flow.status")
-      let journey: JourneyRecord? = value.flatMap { try? decodeRuntimeValue($0) }
-      if let journey {
-        activeJourney = journey
-        if journey.status == .passed || journey.status == .failed || journey.status == .cancelled {
-          return
-        }
-      } else if attempt > 1 {
-        break
-      }
-
-      timeline.append(
-        .init(
-          time: Self.now(), title: "Host requested journey recovery",
-          detail:
-            "The app flow is still active. Continue from the current UI until the terminal result and host verification pass.",
-          state: .warning))
-      status = "Agent continuing incomplete test"
-      let continuation = """
-        The host has not accepted completion. Read flow.status and app.describe, continue the existing flow using only exact capability IDs and advertised actions, and recover any rejected step from the refreshed app description. If progress such as “1 of 10” is present, exercise every remaining item and reach the terminal result screen. Do not stop at an intermediate screen. Call flow.finish only at the terminal state, then call evidence.summary.
-        """
-      let result = try await client.request(
-        method: "session/prompt",
-        params: try jsonValue(ACPPrompt(sessionID: sessionID, text: continuation)))
-      guard !agentStopRequested else { return }
-      let reason = result.result?["stopReason"]?.stringValue ?? "completed"
-      finishAgentMessage()
-      timeline.append(
-        .init(
-          time: Self.now(), title: "Recovery turn finished",
-          detail: "Attempt \(attempt) · stop reason: \(reason)", state: .complete))
-    }
     guard let value = try? await runtime.request(method: "flow.status"),
       let journey: JourneyRecord = try? decodeRuntimeValue(value)
     else {
@@ -2193,7 +2190,7 @@ public final class AppModel: ObservableObject {
       throw RPCError(
         code: -32096,
         message:
-          "The agent stopped twice before the host accepted the complete app flow. The app remains attached for another recovery turn."
+          "The agent response ended before Lys reached the flow's terminal state. The app remains attached and no additional model turns were started."
       )
     }
   }
@@ -2213,7 +2210,13 @@ public final class AppModel: ObservableObject {
     let hasLaunch = currentEvidence.contains { $0.kind == .launch && $0.status == .passed }
     let hasScreenshot = currentEvidence.contains { $0.kind == .screenshot && $0.status == .passed }
     let verified: Bool
-    if case .verified? = verificationReport?.status { verified = true } else { verified = false }
+    if case .verified? = verificationReport?.status,
+      activeTaskIntent?.kind != .verifyCurrentApp || activeJourney?.status == .passed
+    {
+      verified = true
+    } else {
+      verified = false
+    }
 
     let done: String
     if stopped {
@@ -2527,7 +2530,7 @@ public final class AppModel: ObservableObject {
       }
       return (
         "Allow app testing?",
-        "\(selectedAgentDisplayName) wants to \(action.lowercased()) using Operate's iOS runtime.",
+        "\(selectedAgentDisplayName) wants to \(action.lowercased()) using Lys's iOS runtime.",
         scopeLabel, scopeDetail, nil
       )
     }
@@ -2962,7 +2965,7 @@ public final class AppModel: ObservableObject {
       container.pathExtension == "xcworkspace" ? "-workspace" : "-project", container.path,
       "-scheme", selectedScheme, "-configuration", "Debug", "-destination",
       "platform=iOS Simulator,id=\(destination.udid)", "-derivedDataPath",
-      taskWorkspace?.appending(path: ".iosdev/cache/DerivedData").path ?? "<derived-data>",
+      taskWorkspace?.appending(path: ".lys/cache/DerivedData").path ?? "<derived-data>",
       "build",
     ]
     let terminalID = beginTerminal(
@@ -3127,7 +3130,7 @@ public final class AppModel: ObservableObject {
         evidence.reversed().first(where: {
           $0.kind == .screenshot && $0.status == .passed && $0.taskGeneration == generation
         }).flatMap { $0.artifactPaths.first.map(URL.init(fileURLWithPath:)) })
-      verificationReport = try await runtime.request(
+      var report: VerificationReport = try await runtime.request(
         VerificationReport.self, method: "verification.status",
         params: .object([
           "codeChanged": .bool(
@@ -3135,6 +3138,13 @@ public final class AppModel: ObservableObject {
           "uiChanged": .bool(requiresUIVerification),
           "testsChanged": .bool(false),
         ]))
+      if activeTaskIntent?.kind == .verifyCurrentApp, activeJourney?.status != .passed {
+        report.status = activeJourney?.status == .failed ? .failed : .partiallyVerified
+        if !report.missing.contains("A declared Lys flow reaching its terminal state") {
+          report.missing.append("A declared Lys flow reaching its terminal state")
+        }
+      }
+      verificationReport = report
     } catch {
       verificationReport = nil
     }
@@ -3163,27 +3173,27 @@ public final class AppModel: ObservableObject {
   private func runtimeExecutable() throws -> URL {
     let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent()
     let candidates = [
-      executableDirectory?.appending(path: "iosdevd"),
-      Bundle.main.resourceURL?.appending(path: "bin/iosdevd"),
+      executableDirectory?.appending(path: "lysd"),
+      Bundle.main.resourceURL?.appending(path: "bin/lysd"),
     ].compactMap { $0 }
     if let match = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }
     ) {
       return match
     }
-    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "iosdevd")
+    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "lysd")
   }
 
   private func mcpExecutable() throws -> URL {
     let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent()
     let candidates = [
-      executableDirectory?.appending(path: "iosdev-mcp"),
-      Bundle.main.resourceURL?.appending(path: "bin/iosdev-mcp"),
+      executableDirectory?.appending(path: "lys-mcp"),
+      Bundle.main.resourceURL?.appending(path: "bin/lys-mcp"),
     ].compactMap { $0 }
     if let match = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }
     ) {
       return match
     }
-    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "iosdev-mcp")
+    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "lys-mcp")
   }
 
   private func npmExecutable() -> URL? {
@@ -3212,7 +3222,7 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Install CocoaPods dependencies?"
     confirmation.informativeText =
-      "The selected app cannot build because \(requirement.reason) Operate will run `\(command)` in \(requirement.projectDirectory.path). This executes the Podfile and may access the network."
+      "The selected app cannot build because \(requirement.reason) Lys will run `\(command)` in \(requirement.projectDirectory.path). This executes the Podfile and may access the network."
     confirmation.addButton(withTitle: "Install Pods and Continue")
     confirmation.addButton(withTitle: "Cancel")
     return confirmation.runModal() == .alertFirstButtonReturn
@@ -3285,7 +3295,7 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Update Podfile.lock?"
     confirmation.informativeText =
-      "CocoaPods refused the locked installation because the Podfile or CocoaPods version changed. Operate can run `pod install` in \(directory.path). This may modify the tracked Podfile.lock and generated support files; review the Git diff afterward."
+      "CocoaPods refused the locked installation because the Podfile or CocoaPods version changed. Lys can run `pod install` in \(directory.path). This may modify the tracked Podfile.lock and generated support files; review the Git diff afterward."
     confirmation.addButton(withTitle: "Update Lockfile and Continue")
     confirmation.addButton(withTitle: "Cancel")
     return confirmation.runModal() == .alertFirstButtonReturn
@@ -3325,7 +3335,7 @@ public final class AppModel: ObservableObject {
     let confirmation = NSAlert()
     confirmation.messageText = "Apply the Expo compatibility repairs?"
     confirmation.informativeText =
-      "This project includes generated fmt or MMKV sources that Apple Clang 21 cannot compile. Operate will apply narrow repairs inside ios/Pods only. Regenerating ios/Pods removes them."
+      "This project includes generated fmt or MMKV sources that Apple Clang 21 cannot compile. Lys will apply narrow repairs inside ios/Pods only. Regenerating ios/Pods removes them."
     confirmation.addButton(withTitle: "Apply and Run")
     confirmation.addButton(withTitle: "Cancel")
     guard confirmation.runModal() == .alertFirstButtonReturn else { return false }
@@ -3347,7 +3357,7 @@ public final class AppModel: ObservableObject {
     guard let workspace = expoProjectRoot, let npm = npmExecutable() else {
       throw RPCError(
         code: -32096,
-        message: "npm was not found. Install Node.js, then reopen Operate.")
+        message: "npm was not found. Install Node.js, then reopen Lys.")
     }
 
     if metroTask != nil, metroWorkspace?.standardizedFileURL != workspace.standardizedFileURL {

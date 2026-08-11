@@ -1,6 +1,6 @@
 import Foundation
 
-public struct IOSDevConfiguration: Codable, Sendable {
+public struct LysConfiguration: Codable, Sendable {
   public struct SecretReference: Codable, Sendable {
     public var environmentKey: String
     public var keychainAccount: String
@@ -32,7 +32,7 @@ public struct IOSDevConfiguration: Codable, Sendable {
     let data = try Data(contentsOf: url)
     let probe = try JSONDecoder().decode([String: JSONValue].self, from: data)
     guard probe["schemaVersion"] == .number(1) else {
-      throw RPCError(code: -32040, message: "Unsupported .iosdev configuration schema version")
+      throw RPCError(code: -32040, message: "Unsupported .lys configuration schema version")
     }
     return try JSONDecoder().decode(Self.self, from: data)
   }
