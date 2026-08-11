@@ -96,6 +96,9 @@ const contract = defineContract({ routes, capabilities, contexts, flows });
 await writeContract(contract); // .lys/contract.json
 ```
 
+The Node export does not load `expo-modules-core`; do not mock the module or patch Node's loader.
+Only `testSession` lazily resolves the native bridge inside the running Expo app.
+
 The native Expo module only exposes the test-session flag and a requested launch credential. It
 contains no general command or automation channel.
 
@@ -114,6 +117,18 @@ anchor stays discoverable while nested Pressables remain separate actionable ele
 - Authenticated setup and UI authentication are separate flows.
 - A model ending its response never marks a flow complete.
 - Runs without a Lys contract are exploratory and cannot become trusted green verification.
+- Partial contracts remain partial: an unmatched goal may be explored, but only a uniquely matched
+  declared flow can produce trusted verification.
+
+For every outcome promised by an integration, audit the emitted contract:
+
+```sh
+node Skills/lys-integrate/scripts/check-contract-goal.mjs .lys/contract.json "test numbers"
+```
+
+Exit 0 means one declared flow covers the goal. Route/action-only coverage is exploratory; missing
+semantics or ambiguous matches fail with a nonzero exit. A general "test the app" integration must
+first inventory the app router/navigation destinations and run the audit for every coverage row.
 
 ## Verification
 

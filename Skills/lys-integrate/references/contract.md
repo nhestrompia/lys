@@ -33,3 +33,7 @@ A trusted green result requires the declared flow to finish, every current-gener
 criterion to pass, no unacknowledged crash, and required launch/screenshot evidence. Exploratory
 runs without a contract cannot produce trusted verification. An agent ending its turn is not a test
 result.
+
+A partial contract is valid but must remain visibly partial. If the requested goal does not uniquely
+match a declared flow, Lys may explore host-discovered UI actions, but the result cannot be reported
+as deterministic or complete. Add the missing flow when the outcome needs trusted verification.

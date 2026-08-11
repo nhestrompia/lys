@@ -10,6 +10,42 @@ private func temporaryRuntimeRoot() throws -> URL {
   return root
 }
 
+@Test func unmatchedGoalUsesExplorationAlongsidePartialContract() async throws {
+  let root = try temporaryRuntimeRoot()
+  let contractURL = root.appending(path: ".lys/contract.json")
+  try FileManager.default.createDirectory(
+    at: contractURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let noCrash = BlueprintPredicate(kind: .noCrash)
+  let contract = InteractionBlueprint(
+    flows: [
+      .init(
+        id: "quiz.complete", title: "Complete quiz",
+        steps: [
+          .init(id: "noCrash", title: "App remains healthy", kind: .assert, predicate: noCrash)
+        ], acceptance: [noCrash])
+    ])
+  try JSONEncoder().encode(contract).write(to: contractURL)
+
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Run the unit test suite"), container: nil,
+    scheme: "Demo", destination: nil, target: nil, startDevelopmentServer: false)
+  _ = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+
+  let result = await service.handle(
+    .init(
+      id: .int(2), method: "flow.run",
+      params: .object(["goal": .string("Test the numbers page")])),
+    authenticated: &authenticated)
+
+  #expect(result.error == nil)
+  #expect(result.result?["goal"] == .string("Test the numbers page"))
+  #expect(result.result?["mode"] == .string("exploratory"))
+}
+
 @Test func runtimeSessionEnforcesHostIntentAndPublishesEvents() async throws {
   let root = try temporaryRuntimeRoot()
   let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)

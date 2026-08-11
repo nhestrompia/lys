@@ -196,6 +196,7 @@ private struct LysToolbar: View {
           Button("Prepare Expo iOS Project…", systemImage: "hammer") {
             model.prepareExpoProject()
           }
+          .disabled(model.isBusy || model.appOperation != .idle)
         }
       } label: {
         ToolbarControl(

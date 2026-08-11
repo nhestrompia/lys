@@ -1,4 +1,6 @@
-import { requireNativeModule } from "expo-modules-core";
+declare const require: (module: "expo-modules-core") => {
+  requireNativeModule<T>(name: string): T;
+};
 
 export type LysRisk = "readOnly" | "reversible" | "destructive" | "external";
 export type LysActionKind =
@@ -375,7 +377,9 @@ type NativeLysModule = {
 
 let nativeModule: NativeLysModule | undefined;
 function native(): NativeLysModule {
-  nativeModule ??= requireNativeModule<NativeLysModule>("Lys");
+  // Keep the contract/export surface Node-safe. Metro still sees the static module name, while
+  // Node contract scripts never load ExpoModulesCore unless they explicitly call testSession.
+  nativeModule ??= require("expo-modules-core").requireNativeModule<NativeLysModule>("Lys");
   return nativeModule;
 }
 

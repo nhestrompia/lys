@@ -6,12 +6,31 @@ private struct DevelopmentLaunchContext: Sendable {
   var bundleID: String
 }
 
+private struct XcodeOperationKey: Hashable, Sendable {
+  var action: String
+  var container: String
+  var scheme: String
+  var configuration: String
+  var destination: String
+  var generation: Int
+}
+
+private struct XcodeExecution: Sendable {
+  var outcome: ProcessOutcome
+  var resultPath: URL
+  var evidenceID: UUID
+  var appTargets: [AppTarget]
+}
+
 public actor RuntimeService {
   public let workspace: URL
   public let token: String
   private let runner = ProcessRunner()
   private let devServerRunner = ProcessRunner()
   private let ledger = EvidenceLedger()
+  private let operationCoordinator: WorkspaceOperationCoordinator
+  private let xcodeOperations = CoalescingOperationRegistry<XcodeOperationKey, XcodeExecution>()
+  private let artifactCache: BuildArtifactCache
   private let appGraph = AppGraph()
   private let store: SQLiteStore?
   private let wda: WDAController
@@ -41,6 +60,8 @@ public actor RuntimeService {
   public init(workspace: URL, token: String, stateRoot: URL? = nil) {
     self.workspace = workspace.standardizedFileURL
     self.token = token
+    operationCoordinator = WorkspaceOperationCoordinator(workspace: workspace)
+    artifactCache = BuildArtifactCache(workspace: workspace)
     let support =
       (try? FileManager.default.url(
         for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil,
@@ -346,7 +367,7 @@ public actor RuntimeService {
         "message": .string(
           flows.isEmpty
             ? "No declared Lys flows; only exploratory testing is available."
-            : "Found \(flows.count) declared flow(s)."),
+            : "Found \(flows.count) declared flow(s). Goals that do not uniquely match one of them run as exploratory and cannot receive trusted verification."),
       ]))
   }
 
@@ -358,13 +379,17 @@ public actor RuntimeService {
       criterionIDs: activeJourney?.steps.compactMap { $0.step.criterionID } ?? [])
     let report = await ledger.verify(requirement)
     let journeyStatus = activeJourney?.status.rawValue ?? "notStarted"
-    let trusted = activeJourney?.status == .passed && report.status == .verified
+    let trusted = activeJourney?.mode == .declared && activeJourney?.status == .passed
+      && report.status == .verified
     let status: VerificationStatus = trusted
       ? .verified
       : (activeJourney?.status == .failed ? .failed : report.status)
     var missing = report.missing
-    if !trusted, activeJourney?.status != .passed {
-      missing.append("A declared Lys flow reaching its terminal state")
+    if !trusted {
+      missing.append(
+        activeJourney?.mode == .exploratory
+          ? "A declared Lys flow for trusted verification"
+          : "The declared Lys flow reaching its terminal state")
     }
     return success(
       request.id,
@@ -384,18 +409,28 @@ public actor RuntimeService {
     if let blueprint = interactionBlueprint {
       let requestedID = request.params?["flowID"]?.stringValue
       let goal = request.params?["goal"]?.stringValue ?? ""
-      let flow = requestedID.flatMap { id in blueprint.flows.first { $0.id == id } }
-        ?? LysFlowMatcher.match(goal: goal, in: blueprint.flows)
-      guard let flow else {
-        let available = blueprint.flows.map(\.id).joined(separator: ", ")
-        return failure(
-          request.id, -32112,
-          requestedID.map { "Unknown Lys flow \($0). Available flows: \(available)" }
-            ?? "The goal did not uniquely match a declared Lys flow. Available flows: \(available)")
+      if let requestedID {
+        guard let flow = blueprint.flows.first(where: { $0.id == requestedID }) else {
+          let available = blueprint.flows.map(\.id).joined(separator: ", ")
+          return failure(
+            request.id, -32112,
+            "Unknown Lys flow \(requestedID). Available flows: \(available)")
+        }
+        let parameters = request.params?["parameters"]?.objectValue ?? [:]
+        return await runBlueprintFlow(
+          request, blueprint: blueprint, flow: flow, parameters: parameters)
       }
-      let parameters = request.params?["parameters"]?.objectValue ?? [:]
-      return await runBlueprintFlow(
-        request, blueprint: blueprint, flow: flow, parameters: parameters)
+      if let flow = LysFlowMatcher.match(goal: goal, in: blueprint.flows) {
+        let parameters = request.params?["parameters"]?.objectValue ?? [:]
+        return await runBlueprintFlow(
+          request, blueprint: blueprint, flow: flow, parameters: parameters)
+      }
+      // A partial contract must not make the rest of the app untestable. Unmatched goals run in
+      // exploratory mode and can collect useful evidence, but they never become trusted green.
+      return await runJourney(
+        .init(
+          id: request.id, method: "flow.run",
+          params: .object(["goal": .string(goal.isEmpty ? "Explore and test the app" : goal)])))
     }
     return await runJourney(
       .init(
@@ -475,7 +510,7 @@ public actor RuntimeService {
           "Flow parameter \(name) does not satisfy type \(parameter.type)")
       }
     }
-    var journey = JourneyRecord(goal: flow.title)
+    var journey = JourneyRecord(goal: flow.title, mode: .declared)
     activeJourney = journey
     emit(.journeyStarted, message: flow.title, journeyID: journey.id)
     do {
@@ -1416,6 +1451,16 @@ public actor RuntimeService {
     if let error = booted.error { throw error }
 
     let generation = await ledger.generation
+    let selectedProductExists =
+      configuration.target?.productPath.map { FileManager.default.fileExists(atPath: $0.path) }
+      ?? false
+    if !selectedProductExists, let container = configuration.container,
+      let destination = configuration.destinationSpecifier
+    {
+      configuration.target = artifactCache.load(
+        container: container, scheme: configuration.scheme,
+        configuration: configuration.configuration, destination: destination)
+    }
     let targetPathExists =
       configuration.target?.productPath.map {
         FileManager.default.fileExists(atPath: $0.path)
@@ -1722,47 +1767,97 @@ public actor RuntimeService {
     }
     do {
       let generation = await ledger.generation
-      let resultPath = workspace.appending(
-        path: ".lys/artifacts/build-\(UUID().uuidString).xcresult")
-      let derived = workspace.appending(path: ".lys/cache/DerivedData")
-      try FileManager.default.createDirectory(
-        at: resultPath.deletingLastPathComponent(), withIntermediateDirectories: true)
-      try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
-      let flag = container.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
-      let outcome = try await runner.run(
-        executable: URL(fileURLWithPath: xcodebuild),
-        arguments: [
-          flag, container, "-scheme", scheme, "-configuration",
-          request.params?["configuration"]?.stringValue ?? "Debug", "-destination", destination,
-          "-derivedDataPath", derived.path, "-resultBundlePath", resultPath.path, action,
-        ], workingDirectory: workspace, environment: ["DEVELOPER_DIR": developer])
-      let item = Evidence(
-        kind: evidenceKind, status: outcome.succeeded ? .passed : .failed,
-        taskGeneration: generation,
-        artifactPaths: [resultPath.path],
-        diagnosticSummary: outcome.succeeded ? "xcodebuild \(action) completed" : outcome.stderr)
-      try await ledger.record(item)
+      let configuration =
+        request.params?["configuration"]?.stringValue
+        ?? sessionConfiguration?.configuration ?? "Debug"
+      let key = XcodeOperationKey(
+        action: action, container: URL(fileURLWithPath: container).standardizedFileURL.path,
+        scheme: scheme, configuration: configuration, destination: destination,
+        generation: generation)
+      let workspace = workspace
+      let coordinator = operationCoordinator
+      let runner = runner
+      let ledger = ledger
+      let artifactCache = artifactCache
+      let previouslySelectedTarget = sessionConfiguration?.target
+      let execution = try await xcodeOperations.run(key: key) {
+        let lease = try await coordinator.acquire(action == "test" ? .test : .build)
+        defer { lease.release() }
+        guard FileManager.default.fileExists(atPath: container) else {
+          throw RPCError(
+            code: -32098,
+            message:
+              "The selected Xcode container disappeared before \(action): \(container). Lys did not start xcodebuild; finish or rerun Expo preparation, then select the generated workspace."
+          )
+        }
+        let resultPath = workspace.appending(
+          path: ".lys/artifacts/build-\(UUID().uuidString).xcresult")
+        let derived = workspace.appending(path: ".lys/cache/DerivedData")
+        try FileManager.default.createDirectory(
+          at: resultPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
+        let flag = container.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
+        let outcome = try await runner.run(
+          executable: URL(fileURLWithPath: xcodebuild),
+          arguments: [
+            flag, container, "-scheme", scheme, "-configuration", configuration,
+            "-destination", destination, "-derivedDataPath", derived.path,
+            "-resultBundlePath", resultPath.path, action,
+          ], workingDirectory: workspace, environment: ["DEVELOPER_DIR": developer])
+        let diagnostic = outcome.stdout + outcome.stderr
+        if !outcome.succeeded && WorkspaceOperationDiagnostics.isBuildDatabaseLock(diagnostic) {
+          throw RPCError(
+            code: -32098,
+            message:
+              "Lys detected an overlapping Xcode operation (build.db is locked). This is a host orchestration error, not an app build failure; the last successful app remains available."
+          )
+        }
+        var targets: [AppTarget] = []
+        if outcome.succeeded, action == "build" {
+          targets = (try? await ToolchainDiscovery.appTargets(
+            container: URL(fileURLWithPath: container), scheme: scheme,
+            configuration: configuration, destination: destination,
+            xcodebuild: URL(fileURLWithPath: xcodebuild),
+            developerDirectory: URL(fileURLWithPath: developer), derivedData: derived)) ?? []
+          if targets.isEmpty, let target = previouslySelectedTarget,
+            target.productPath.map({ FileManager.default.fileExists(atPath: $0.path) }) == true
+          {
+            targets = [target]
+          }
+          if let target = targets.first {
+            try? artifactCache.save(
+              .init(
+                container: container, scheme: scheme, configuration: configuration,
+                destination: destination, target: target))
+          }
+        }
+        let item = Evidence(
+          kind: evidenceKind, status: outcome.succeeded ? .passed : .failed,
+          taskGeneration: generation, artifactPaths: [resultPath.path],
+          diagnosticSummary: outcome.succeeded ? "xcodebuild \(action) completed" : outcome.stderr)
+        try await ledger.record(item)
+        return XcodeExecution(
+          outcome: outcome, resultPath: resultPath, evidenceID: item.id, appTargets: targets)
+      }
       var result: [String: JSONValue] = [
-        "succeeded": .bool(outcome.succeeded),
-        "evidenceIDs": .array([.string(item.id.uuidString)]),
-        "log": .string(outcome.stdout + outcome.stderr),
+        "succeeded": .bool(execution.outcome.succeeded),
+        "evidenceIDs": .array([.string(execution.evidenceID.uuidString)]),
+        "log": .string(execution.outcome.stdout + execution.outcome.stderr),
         "message": .string(
-          outcome.succeeded ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
+          execution.outcome.succeeded
+            ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
       ]
-      if outcome.succeeded, action == "build" {
-        let targets = try? await ToolchainDiscovery.appTargets(
-          container: URL(fileURLWithPath: container), scheme: scheme,
-          configuration: request.params?["configuration"]?.stringValue
-            ?? sessionConfiguration?.configuration ?? "Debug",
-          destination: destination, xcodebuild: URL(fileURLWithPath: xcodebuild),
-          developerDirectory: URL(fileURLWithPath: developer),
-          derivedData: workspace.appending(path: ".lys/cache/DerivedData"))
-        result["appTargets"] = (try? jsonValue(targets ?? [])) ?? .array([])
+      if execution.outcome.succeeded, action == "build" {
+        result["appTargets"] = (try? jsonValue(execution.appTargets)) ?? .array([])
       }
       return success(
         request.id,
         .object(result))
-    } catch { return failure(request.id, -32052, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32052, error.localizedDescription)
+    }
   }
 
   private func uiSnapshot(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -2397,6 +2492,13 @@ public actor RuntimeService {
     }
     let flag = container.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
     do {
+      let lease = try await operationCoordinator.acquire(.testDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: container) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists: \(container)")
+      }
       let outcome = try await runner.run(
         executable: URL(fileURLWithPath: path),
         arguments: [flag, container, "-scheme", scheme, "-showTestPlans"],
@@ -2407,7 +2509,11 @@ public actor RuntimeService {
         $0.trimmingCharacters(in: .whitespacesAndNewlines)
       }.filter { !$0.isEmpty && !$0.hasPrefix("Test plans associated") }
       return success(request.id, .object(["testPlans": .array(plans.map(JSONValue.string))]))
-    } catch { return failure(request.id, -32057, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32057, error.localizedDescription)
+    }
   }
 
   private func queryLogs(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -2458,11 +2564,22 @@ public actor RuntimeService {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
     do {
+      let lease = try await operationCoordinator.acquire(.projectDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: containerPath) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists: \(containerPath)")
+      }
       let listing = try await ToolchainDiscovery.listProject(
         container: URL(fileURLWithPath: containerPath), xcodebuild: URL(fileURLWithPath: path),
         developerDirectory: URL(fileURLWithPath: developer))
       return success(request.id, try jsonValue(listing))
-    } catch { return failure(request.id, -32055, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32055, error.localizedDescription)
+    }
   }
 
   private func discoverTargets(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -2475,6 +2592,13 @@ public actor RuntimeService {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
     do {
+      let lease = try await operationCoordinator.acquire(.targetDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: containerPath) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists: \(containerPath)")
+      }
       let targets = try await ToolchainDiscovery.appTargets(
         container: URL(fileURLWithPath: containerPath), scheme: scheme,
         configuration: request.params?["configuration"]?.stringValue ?? "Debug",
@@ -2482,7 +2606,11 @@ public actor RuntimeService {
         developerDirectory: URL(fileURLWithPath: developer),
         derivedData: workspace.appending(path: ".lys/cache/DerivedData"))
       return success(request.id, try jsonValue(targets))
-    } catch { return failure(request.id, -32055, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32055, error.localizedDescription)
+    }
   }
 
   private func submitVerification(_ request: RPCEnvelope) async -> RPCEnvelope {

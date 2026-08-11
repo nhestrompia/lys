@@ -29,6 +29,8 @@ await writeContract(contract); // writes .lys/contract.json
 
 `defineContract` and `writeContract` validate cross-references and bounded execution. Type-check the
 package, run the export script, parse the emitted JSON, and inspect an iOS accessibility snapshot.
+The `@lys/testkit/node` export is Node-safe and must work without mocking `expo-modules-core` or
+patching Node's module loader. Treat either workaround as a broken SDK installation.
 
 The native module exposes only the test-session flag and requested environment credential. Do not
 add general command execution, arbitrary storage access, or an automation transport to the app.

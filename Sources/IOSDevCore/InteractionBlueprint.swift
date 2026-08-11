@@ -226,7 +226,6 @@ public enum InteractionBlueprintDiscovery {
 /// only when one declared flow has a strictly better token overlap than every other flow.
 public enum LysFlowMatcher {
   public static func match(goal: String, in flows: [BlueprintFlow]) -> BlueprintFlow? {
-    guard flows.count != 1 else { return flows[0] }
     let goalTokens = semanticTokens(goal)
     guard !goalTokens.isEmpty else { return nil }
     let ranked: [(flow: BlueprintFlow, score: Int)] = flows.map { flow in

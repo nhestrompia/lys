@@ -608,7 +608,10 @@ public final class AppModel: ObservableObject {
   }
 
   func prepareExpoProject() {
-    guard let repository, needsExpoPreparation else { return }
+    guard let repository, needsExpoPreparation, !isBusy, appOperation == .idle else {
+      notice = "Wait for the current build, test, or preparation operation to finish."
+      return
+    }
     let confirmation = NSAlert()
     confirmation.messageText = "Prepare this Expo project for iOS?"
     confirmation.informativeText =
@@ -628,6 +631,9 @@ public final class AppModel: ObservableObject {
         detail: "Dependency installation and native project generation may run.", state: .active))
     Task {
       do {
+        let coordinator = WorkspaceOperationCoordinator(workspace: repository)
+        let lease = try await coordinator.acquire(.expoPrebuild, wait: false)
+        defer { lease.release() }
         let environment = ["PATH": executableSearchPath()]
         if !FileManager.default.fileExists(atPath: repository.appending(path: "node_modules").path)
         {
@@ -672,12 +678,20 @@ public final class AppModel: ObservableObject {
         }
         selectedContainer = first
         files = Self.children(of: repository, depth: 0)
+        lease.release()
         await refreshProjectSelection()
         status = "Expo iOS project ready"
         timeline.append(
           .init(
             time: Self.now(), title: "iOS project generated",
             detail: first.path, state: .complete))
+      } catch let error as WorkspaceOperationBusyError {
+        status = "Expo setup blocked"
+        notice = error.localizedDescription
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Expo setup blocked", detail: error.localizedDescription,
+            state: .warning))
       } catch let error as RPCError {
         status = "Expo setup failed"
         notice = error.data?.stringValue.map { "\(error.message)\n\n\($0)" } ?? error.message
@@ -943,7 +957,7 @@ public final class AppModel: ObservableObject {
       : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
     let journeyPolicy =
       intent.requiresRunningApp
-      ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host owns authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. If no contract flow exists, say that only exploratory testing is available before using flow.run without flowID. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
+      ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host owns authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. If no declared flow matches the requested goal, state that the run is exploratory, then call flow.run without flowID and continue only through host-returned actions. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
     return """
       \(prompt)
@@ -2036,6 +2050,16 @@ public final class AppModel: ObservableObject {
       return
     }
     do {
+      let workspace = repository ?? container.deletingLastPathComponent()
+      let coordinator = WorkspaceOperationCoordinator(workspace: workspace)
+      let lease = try await coordinator.acquire(.projectDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: container.path) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists. Refresh the generated project before continuing."
+        )
+      }
       let listing = try await ToolchainDiscovery.listProject(
         container: container, xcodebuild: URL(fileURLWithPath: xcodebuild),
         developerDirectory: URL(fileURLWithPath: developer))
@@ -3237,6 +3261,11 @@ public final class AppModel: ObservableObject {
           "CocoaPods is required for this project but `pod` was not found. Install CocoaPods, then Run again."
       )
     }
+
+    let workspace = taskWorkspace ?? repository ?? requirement.projectDirectory
+    let coordinator = WorkspaceOperationCoordinator(workspace: workspace)
+    let lease = try await coordinator.acquire(.cocoaPodsInstall)
+    defer { lease.release() }
 
     status = "Installing CocoaPods dependencies"
     appOperation = .preparing

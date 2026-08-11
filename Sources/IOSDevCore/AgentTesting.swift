@@ -225,6 +225,11 @@ public enum JourneyStatus: String, Codable, Equatable, Sendable {
   case cancelled
 }
 
+public enum JourneyMode: String, Codable, Equatable, Sendable {
+  case declared
+  case exploratory
+}
+
 public enum JourneyStepStatus: String, Codable, Equatable, Sendable {
   case waiting
   case running
@@ -253,15 +258,20 @@ public struct JourneyStepResult: Codable, Identifiable, Sendable {
 public struct JourneyRecord: Codable, Identifiable, Sendable {
   public var id: UUID
   public var goal: String
+  public var mode: JourneyMode
   public var status: JourneyStatus
   public var steps: [JourneyStepResult]
   public var currentFingerprint: ScreenFingerprint?
   public var startedAt: Date
   public var updatedAt: Date
 
-  public init(id: UUID = UUID(), goal: String, status: JourneyStatus = .preparing) {
+  public init(
+    id: UUID = UUID(), goal: String, mode: JourneyMode = .exploratory,
+    status: JourneyStatus = .preparing
+  ) {
     self.id = id
     self.goal = goal
+    self.mode = mode
     self.status = status
     self.steps = []
     self.startedAt = Date()

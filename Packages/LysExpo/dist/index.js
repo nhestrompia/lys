@@ -11,7 +11,6 @@ exports.stateProps = stateProps;
 exports.authenticatedContext = authenticatedContext;
 exports.signedOutContext = signedOutContext;
 exports.defineContract = defineContract;
-const expo_modules_core_1 = require("expo-modules-core");
 class LysContractValidationError extends Error {
     constructor(message) {
         super(message);
@@ -269,7 +268,9 @@ function defineContract(contract) {
 }
 let nativeModule;
 function native() {
-    nativeModule ?? (nativeModule = (0, expo_modules_core_1.requireNativeModule)("Lys"));
+    // Keep the contract/export surface Node-safe. Metro still sees the static module name, while
+    // Node contract scripts never load ExpoModulesCore unless they explicitly call testSession.
+    nativeModule ?? (nativeModule = require("expo-modules-core").requireNativeModule("Lys"));
     return nativeModule;
 }
 exports.testSession = {

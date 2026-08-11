@@ -50,6 +50,18 @@ uses `flow.run`, bounded `flow.step` calls with exact host IDs, then `flow.finis
 and correctness in the host and makes model choice an orchestration detail rather than a testing
 capability decision.
 
+## Workspace operation ownership
+
+The macOS host and `lysd` share one advisory lock at `.lys/cache/workspace-operation.lock`.
+Expo prebuild, CocoaPods installation, project/test/target discovery, build, and test all acquire it
+before touching generated native state. Duplicate in-flight builds with the same generation and
+destination share one task and one result instead of queueing a second `xcodebuild`. After acquiring
+the lock, Lys rechecks that the selected container still exists.
+
+A successful target is persisted in `.lys/cache/last-successful-build.json` and reused while its app
+product still exists. An external `build.db` lock conflict is reported as host orchestration and
+does not create failed app evidence or discard the last successful artifact.
+
 ## Invariants
 
 1. Agent writes resolve inside a detached task worktree.
@@ -65,6 +77,7 @@ capability decision.
 11. Destructive and external Lys actions require explicit host approval; agent arguments cannot self-authorize risk.
 12. A flow cannot complete without non-empty deterministic acceptance criteria and fresh host evidence.
 13. Every acceptance criterion must pass; an agent response ending or an exploratory run can never produce trusted verification.
+14. Only one generated-workspace operation may run at a time; duplicate builds coalesce and host orchestration failures never count as app failures.
 
 ## Persistence
 

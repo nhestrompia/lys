@@ -120,4 +120,11 @@ import Testing
   #expect(LysFlowMatcher.match(goal: "test the quiz", in: flows)?.id == "quiz.complete")
   #expect(LysFlowMatcher.match(goal: "verify sign in authentication", in: flows)?.id == "auth.login")
   #expect(LysFlowMatcher.match(goal: "test the app", in: flows) == nil)
+  #expect(
+    LysFlowMatcher.match(
+      goal: "test the numbers page",
+      in: [
+        BlueprintFlow(
+          id: "quiz.complete", title: "Complete a quiz", steps: [], acceptance: [])
+      ]) == nil)
 }

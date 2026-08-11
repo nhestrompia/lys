@@ -1,18 +1,9 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import Module from "node:module";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-
-const originalLoad = Module._load;
-Module._load = function (request, parent, isMain) {
-  if (request === "expo-modules-core") {
-    return { requireNativeModule: () => ({ isTestSession: () => false, credential: () => null }) };
-  }
-  return originalLoad.call(this, request, parent, isMain);
-};
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -60,5 +51,4 @@ await lysNode.writeContract(contract, exportPath);
 assert.equal(JSON.parse(await readFile(exportPath, "utf8")).flows[0].id, "flow.finish");
 await rm(exportRoot, { recursive: true, force: true });
 
-Module._load = originalLoad;
 console.log("Lys Expo SDK behavior tests passed");
