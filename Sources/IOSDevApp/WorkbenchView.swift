@@ -618,6 +618,15 @@ private struct JourneyProgressSection: View {
           }
         }
       }
+      if hasRecoverableStep {
+        Label(
+          "Actions refreshed. The agent can retry from the app's current screen.",
+          systemImage: "arrow.clockwise.circle.fill"
+        )
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(Studio.warning)
+        .fixedSize(horizontal: false, vertical: true)
+      }
       if let fingerprint = journey.currentFingerprint {
         Text("Screen \(String(fingerprint.digest.prefix(10)))")
           .font(.system(size: 9).monospaced())
@@ -631,11 +640,16 @@ private struct JourneyProgressSection: View {
     journey.steps.filter { $0.status == .passed }.count
   }
   private var progressLabel: String {
+    if hasRecoverableStep { return "Retry ready" }
     if journey.steps.isEmpty { return journey.status.rawValue.replacingOccurrences(of: "CurrentApp", with: "") }
     return "\(completedCount)/\(journey.steps.count) · \(journey.status.rawValue)"
   }
+  private var hasRecoverableStep: Bool {
+    journey.status == .ready && journey.steps.contains { $0.status == .failed }
+  }
   private var statusColor: Color {
-    switch journey.status {
+    if hasRecoverableStep { return Studio.warning }
+    return switch journey.status {
     case .passed: Studio.success
     case .failed, .cancelled: Studio.warning
     case .preparing, .ready, .running: Studio.accent
@@ -809,17 +823,24 @@ private struct AppStage: View {
           }
           if let journey = model.activeJourney {
             let completed = journey.steps.filter { $0.status == .passed }.count
+            let retryReady = journey.status == .ready
+              && journey.steps.contains { $0.status == .failed }
             Label {
               Text(
-                journey.steps.isEmpty
+                retryReady
+                  ? "Agent retry ready"
+                  : (journey.steps.isEmpty
                   ? "Agent testing"
-                  : "Agent testing \(completed)/\(journey.steps.count)"
+                  : "Agent testing \(completed)/\(journey.steps.count)")
               )
             } icon: {
-              Image(systemName: journey.status == .passed ? "checkmark.circle.fill" : "scope")
+              Image(
+                systemName: retryReady ? "arrow.clockwise.circle.fill"
+                  : (journey.status == .passed ? "checkmark.circle.fill" : "scope"))
             }
             .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(journey.status == .failed ? Studio.warning : Studio.accent)
+            .foregroundStyle(
+              retryReady || journey.status == .failed ? Studio.warning : Studio.accent)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Studio.accentSoft)

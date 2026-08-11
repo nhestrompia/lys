@@ -5,10 +5,28 @@ import Testing
 @Test func verificationCatalogHidesLifecycleAndBuildPrimitives() {
   let names = Set(AgentRuntimeToolCatalog.tools(for: .verifyCurrentApp).map(\.name))
   #expect(names.contains("journey.run"))
+  #expect(names.contains("ui.actions"))
   #expect(names.contains("ui.perform"))
   #expect(!names.contains("build.run"))
   #expect(!names.contains("devserver.stop"))
   #expect(!names.contains("app.terminate"))
+}
+
+@Test func directUIActionsRequireHostIssuedOpaqueIDs() throws {
+  let perform = try #require(
+    AgentRuntimeToolCatalog.definition(named: "ui.perform", for: .verifyCurrentApp))
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: perform,
+      arguments: .object([
+        "selector": .object(["label": .string("Start quiz"), "type": .string("Button")]),
+        "action": .string("tap"),
+      ])) == "arguments.actionID is required")
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: perform,
+      arguments: .object(["actionID": .string("action_123"), "action": .string("tap")]))
+      == nil)
 }
 
 @Test func mutationCatalogStillPrefersJourneyButPermitsExplicitBuildAndTests() {
@@ -52,6 +70,7 @@ import Testing
         "steps": .array([
           .object([
             "id": .string("start"), "title": .string("Start quiz"),
+            "actionID": .string("action_start"),
             "selector": .object([
               "identifier": .string("quiz.start"), "coordinate": .number(0.5),
             ]),

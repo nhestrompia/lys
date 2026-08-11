@@ -861,7 +861,7 @@ public final class AppModel: ObservableObject {
       ? "Source edits are allowed only inside the isolated worktree at \(workspace.path)."
       : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
     let journeyPolicy = intent.requiresRunningApp
-      ? "Call journey.run first with the user's goal and no steps. It attaches to the compatible current app and returns its semantic UI. Choose semantic actions using accessibility identifiers or unique label/type selectors. Continue the same journey with journeyID and short asserted steps, then call journey.run with complete=true. Never start, stop, install, terminate, or rebuild app infrastructure yourself."
+      ? "Call journey.run first with the user's goal and no steps. It attaches to the compatible current app and returns currentUI.actions. Use only exact actionID and advertised action values from that array—never invent a label, role, selector, or coordinate. Submit one screen-changing action per journey.run call, read the refreshed actions, and continue the same journeyID. For proof, submit a no-action step with a currently visible actionID and assertVisible=true, or provide an explicit postcondition. A rejected step is recoverable: read the refreshed currentUI.actions and retry. Call complete=true only after current assertions pass. Never start, stop, install, terminate, or rebuild app infrastructure yourself."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
     return """
       \(prompt)
@@ -1774,6 +1774,28 @@ public final class AppModel: ObservableObject {
       missing: ["Fresh successful build", "Launch and UI evidence are stale"])
   }
 
+  public func loadJourneyRecoveryPreview() {
+    loadDesignPreview()
+    isBusy = false
+    status = "Testing · retry ready"
+    guard var journey = activeJourney else { return }
+    journey.status = .ready
+    journey.steps = [
+      .init(
+        step: .init(
+          id: "open-quiz", title: "Open Practice Quiz", actionID: "action_start",
+          action: "tap", expectScreenChanged: true),
+        status: .failed,
+        detail: "That action is stale. Current app actions were refreshed."),
+      .init(
+        step: .init(
+          id: "quiz-visible", title: "Quiz controls are visible",
+          actionID: "action_answer_a", assertVisible: true),
+        status: .waiting),
+    ]
+    activeJourney = journey
+  }
+
   public func loadDesignBuildPreview() {
     loadDesignPreview()
     setCurrentScreenshot(nil)
@@ -2504,6 +2526,7 @@ public final class AppModel: ObservableObject {
     "app.terminate": "Stopping the app",
     "app.reset_data": "Resetting app data",
     "ui.snapshot": "Inspecting the app",
+    "ui.actions": "Reading available app actions",
     "ui.find": "Finding an interface element",
     "ui.perform": "Interacting with the app",
     "ui.wait": "Waiting for the app",
@@ -2517,7 +2540,7 @@ public final class AppModel: ObservableObject {
 
   private static let routineTestingTools: Set<String> = [
     "workspace.describe", "journey.run", "journey.status", "journey.cancel", "build.run",
-    "test.list", "test.run", "ui.snapshot", "ui.find", "ui.perform", "ui.wait", "ui.assert", "ui.navigate",
+    "test.list", "test.run", "ui.snapshot", "ui.actions", "ui.find", "ui.perform", "ui.wait", "ui.assert", "ui.navigate",
     "screenshot.capture", "logs.query", "verification.status", "verification.submit",
   ]
 

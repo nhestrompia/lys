@@ -22,12 +22,14 @@ public struct UIElement: Codable, Identifiable, Hashable, Sendable {
   public var hittable: Bool
   public var frame: ElementFrame
   public var childPath: String
+  public var xpath: String?
   public var owningApplication: String
   public var availableActions: [String]
   public init(
     type: String, identifier: String? = nil, label: String? = nil, value: String? = nil,
     enabled: Bool = true, selected: Bool = false, hittable: Bool = true, frame: ElementFrame,
-    childPath: String, owningApplication: String, availableActions: [String] = []
+    childPath: String, xpath: String? = nil, owningApplication: String,
+    availableActions: [String] = []
   ) {
     self.type = type
     self.identifier = identifier
@@ -38,6 +40,7 @@ public struct UIElement: Codable, Identifiable, Hashable, Sendable {
     self.hittable = hittable
     self.frame = frame
     self.childPath = childPath
+    self.xpath = xpath
     self.owningApplication = owningApplication
     self.availableActions = availableActions
   }
@@ -87,6 +90,137 @@ public enum ElementSelector: Codable, Hashable, Sendable {
   public var deterministic: Bool { if case .coordinate = self { false } else { true } }
 }
 
+public enum UIActionResolution: String, Codable, Hashable, Sendable {
+  /// WDA can address the element by accessibility identifier or unique label and role.
+  case semantic
+  /// The host resolves a stable hierarchy path against the exact current screen, then acts at
+  /// the element's frame. The model never supplies a coordinate.
+  case screenBound
+}
+
+public struct UIActionCapability: Codable, Identifiable, Hashable, Sendable {
+  public var id: String
+  public var title: String
+  public var role: String
+  public var actions: [String]
+  public var resolution: UIActionResolution
+  public var enabled: Bool
+
+  public init(
+    id: String, title: String, role: String, actions: [String],
+    resolution: UIActionResolution, enabled: Bool
+  ) {
+    self.id = id
+    self.title = title
+    self.role = role
+    self.actions = actions
+    self.resolution = resolution
+    self.enabled = enabled
+  }
+}
+
+public struct ResolvedUIAction: Sendable {
+  public var capability: UIActionCapability
+  public var element: UIElement
+  public var selector: ElementSelector
+}
+
+public enum UIActionCatalog {
+  public static func capabilities(
+    elements: [UIElement], fingerprint: ScreenFingerprint
+  ) -> [UIActionCapability] {
+    let rawCandidates = elements.filter { element in
+      element.enabled && element.hittable && element.frame.width > 1 && element.frame.height > 1
+        && (!supportedActions(for: element).isEmpty)
+    }
+    let controlsByTitle = Dictionary(
+      grouping: rawCandidates.filter { !$0.availableActions.isEmpty },
+      by: { element in
+        normalized(element.label) ?? normalized(element.identifier) ?? ""
+      })
+    let candidates = rawCandidates.filter { element in
+      guard element.availableActions.isEmpty else { return true }
+      let title = normalized(element.label) ?? normalized(element.identifier)
+      let centerX = element.frame.x + element.frame.width / 2
+      let centerY = element.frame.y + element.frame.height / 2
+      return !(controlsByTitle[title ?? ""] ?? []).contains { control in
+        control.childPath != element.childPath
+          && (normalized(control.label) == title || normalized(control.identifier) == title)
+          && control.frame.x <= centerX && centerX <= control.frame.x + control.frame.width
+          && control.frame.y <= centerY && centerY <= control.frame.y + control.frame.height
+      }
+    }
+    let identifierCounts = Dictionary(
+      grouping: elements.compactMap { element in
+        normalized(element.identifier).map { ($0, element) }
+      }, by: \.0).mapValues(\.count)
+    let labelRoleCounts = Dictionary(
+      grouping: elements.compactMap { element in
+        normalized(element.label).map { ("\($0)|\(element.type)", element) }
+      }, by: \.0).mapValues(\.count)
+    var seen = Set<String>()
+    return candidates.compactMap { element -> (UIActionCapability, ElementFrame)? in
+      let actions = supportedActions(for: element)
+      let title = normalized(element.label) ?? normalized(element.identifier)
+        ?? normalized(element.value) ?? element.type
+      let identity = "\(element.childPath)|\(title)|\(element.type)"
+      guard seen.insert(identity).inserted else { return nil }
+      let semantic = normalized(element.identifier).map { identifierCounts[$0] == 1 } == true
+        || normalized(element.label).map { labelRoleCounts["\($0)|\(element.type)"] == 1 } == true
+      return (UIActionCapability(
+        id: actionID(fingerprint: fingerprint, childPath: element.childPath), title: title,
+        role: element.type, actions: actions, resolution: semantic ? .semantic : .screenBound,
+        enabled: element.enabled), element.frame)
+    }.sorted {
+      if $0.1.y == $1.1.y { return $0.1.x < $1.1.x }
+      return $0.1.y < $1.1.y
+    }.map(\.0)
+  }
+
+  public static func resolve(
+    actionID: String, action: String, elements: [UIElement], fingerprint: ScreenFingerprint
+  ) -> ResolvedUIAction? {
+    guard let capability = capabilities(elements: elements, fingerprint: fingerprint)
+      .first(where: { $0.id == actionID }), capability.actions.contains(action),
+      let element = elements.first(where: {
+        self.actionID(fingerprint: fingerprint, childPath: $0.childPath) == actionID
+      })
+    else { return nil }
+    let selector: ElementSelector
+    let identifierMatches = elements.filter { $0.identifier == element.identifier }
+    if let identifier = normalized(element.identifier), identifierMatches.count == 1 {
+      selector = .accessibilityIdentifier(identifier)
+    } else if let label = normalized(element.label),
+      elements.filter({ $0.label == label && $0.type == element.type }).count == 1
+    {
+      selector = .labelType(label: label, type: element.type)
+    } else {
+      selector = .hierarchyPath(element.xpath ?? element.childPath)
+    }
+    return .init(capability: capability, element: element, selector: selector)
+  }
+
+  private static func supportedActions(for element: UIElement) -> [String] {
+    if !element.availableActions.isEmpty { return element.availableActions }
+    if normalized(element.label) != nil || normalized(element.identifier) != nil {
+      return ["tap"]
+    }
+    return []
+  }
+
+  public static func actionID(fingerprint: ScreenFingerprint, childPath: String) -> String {
+    let digest = SHA256.hash(data: Data("\(fingerprint.digest)|\(childPath)".utf8))
+      .prefix(10).map { String(format: "%02x", $0) }.joined()
+    return "action_\(digest)"
+  }
+
+  private static func normalized(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+}
+
 public struct ScreenFingerprint: Codable, Hashable, Sendable {
   public var digest: String
   public var owningApplication: String
@@ -124,10 +258,14 @@ public struct ScreenNode: Codable, Identifiable, Hashable, Sendable {
   public var fingerprint: ScreenFingerprint
   public var name: String
   public var lastObservedAt: Date
-  public init(fingerprint: ScreenFingerprint, name: String) {
+  public var actions: [UIActionCapability]?
+  public init(
+    fingerprint: ScreenFingerprint, name: String, actions: [UIActionCapability] = []
+  ) {
     self.fingerprint = fingerprint
     self.name = name
     self.lastObservedAt = Date()
+    self.actions = actions
   }
 }
 
@@ -183,6 +321,14 @@ public actor AppGraph {
   public func replace(with snapshot: AppGraphSnapshot) {
     nodes = Dictionary(snapshot.nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
     edges = Dictionary(snapshot.edges.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+  }
+
+  public func observeScreen(
+    _ fingerprint: ScreenFingerprint, name: String = "Observed screen",
+    actions: [UIActionCapability]
+  ) {
+    nodes[fingerprint.digest] = ScreenNode(
+      fingerprint: fingerprint, name: name, actions: actions)
   }
 
   @discardableResult public func observe(

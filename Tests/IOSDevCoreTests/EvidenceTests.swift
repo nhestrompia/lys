@@ -58,6 +58,24 @@ import Testing
   #expect(report.status == .verified)
 }
 
+@Test func successfulJourneyRetrySupersedesItsEarlierFailedAssertion() async throws {
+  let ledger = EvidenceLedger()
+  for item in [
+    Evidence(kind: .launch, status: .passed, taskGeneration: 0),
+    Evidence(
+      kind: .uiAssertion, status: .failed, taskGeneration: 0, criterionID: "journey-1",
+      diagnosticSummary: "First action did not change the screen"),
+    Evidence(
+      kind: .uiAssertion, status: .passed, taskGeneration: 0, criterionID: "journey-1",
+      diagnosticSummary: "Retry reached the quiz"),
+    Evidence(kind: .screenshot, status: .passed, taskGeneration: 0),
+  ] { try await ledger.record(item) }
+  let report = await ledger.verify(
+    .init(codeChanged: false, uiChanged: true, testsChanged: false))
+  #expect(report.status == .verified)
+  #expect(report.currentEvidence.first { $0.status == .failed }?.acknowledged == true)
+}
+
 @Test func hierarchyInspectorHidesEmptyStructuralNodes() {
   let frame = ElementFrame(x: 0, y: 0, width: 100, height: 40)
   let elements = [

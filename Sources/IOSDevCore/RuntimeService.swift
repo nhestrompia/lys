@@ -180,6 +180,7 @@ public actor RuntimeService {
       case "journey.status": return await journeyStatus(request)
       case "journey.cancel": return await cancelJourney(request)
       case "ui.snapshot": return await uiSnapshot(request)
+      case "ui.actions": return await uiSnapshot(request)
       case "ui.prepare": return await uiPrepare(request)
       case "ui.find": return await uiFind(request)
       case "ui.perform": return await uiPerform(request)
@@ -295,6 +296,7 @@ public actor RuntimeService {
       }
 
       let steps: [JourneyStep] = try decodeOptionalArray(request.params?["steps"]) ?? []
+      var needsRecovery = false
       if !steps.isEmpty {
         journey.status = .running
         for step in steps {
@@ -315,15 +317,20 @@ public actor RuntimeService {
           emit(
             .journeyStepFinished, message: result.detail, journeyID: journey.id, stepID: step.id)
           if result.status == .failed {
-            journey.status = .failed
+            journey.status = .ready
             activeJourney = journey
-            emit(.journeyFinished, message: "Journey failed at \(step.title).", journeyID: journey.id)
-            return success(request.id, try jsonValue(journey))
+            needsRecovery = true
+            emit(
+              .warning,
+              message:
+                "\(step.title) needs a different current action. The app remains attached for recovery.",
+              journeyID: journey.id, stepID: step.id)
+            break
           }
         }
       }
 
-      if request.params?["complete"]?.boolValue == true {
+      if request.params?["complete"]?.boolValue == true, !needsRecovery {
         if configuration.intent.requiresRunningApp, let udid = configuration.destination?.udid {
           _ = await captureStableScreenshot(
             .init(id: nil, method: "screenshot.capture", params: .object(["udid": .string(udid)])),
@@ -332,7 +339,8 @@ public actor RuntimeService {
         let requirement = VerificationRequirement(
           codeChanged: configuration.intent.allowsSourceWrites,
           uiChanged: configuration.intent.requiresRunningApp, testsChanged: false,
-          criterionIDs: journey.steps.compactMap { $0.step.criterionID })
+          criterionIDs: journey.steps.filter { $0.status == .passed }
+            .compactMap { $0.step.criterionID })
         let report = await ledger.verify(requirement)
         journey.status = report.status == .verified ? .passed : .failed
         journey.updatedAt = Date()
@@ -347,10 +355,13 @@ public actor RuntimeService {
         ? await uiSnapshot(.init(id: nil, method: "ui.snapshot")) : nil
       var result = (try? jsonValue(journey)) ?? .object([:])
       if case .object(var object) = result {
+        object["recoverable"] = .bool(needsRecovery)
         object["message"] = .string(
-          journey.status == .ready
-            ? "App attached. Continue this journey with semantic steps; no rebuild was needed."
-            : "Journey \(journey.status.rawValue).")
+          needsRecovery
+            ? "The attempted step was not valid on the current screen. Choose an exact actionID from currentUI.actions and retry in this journey."
+            : (journey.status == .ready
+              ? "App attached. Choose exact actionID values from currentUI.actions; submit one screen-changing interaction at a time."
+              : "Journey \(journey.status.rawValue)."))
         if let currentUI = snapshot?.result { object["currentUI"] = currentUI }
         result = .object(object)
       }
@@ -509,42 +520,88 @@ public actor RuntimeService {
 
   private func executeJourneyStep(_ step: JourneyStep, journeyID: UUID) async -> JourneyStepResult {
     var evidenceIDs: [UUID] = []
-    guard let selector = step.selector,
-      selector.identifier?.isEmpty == false || selector.label?.isEmpty == false
-    else {
-      return .init(step: step, status: .failed, detail: "A deterministic selector is required.")
+    guard step.actionID?.isEmpty == false || step.selector != nil else {
+      return .init(
+        step: step, status: .failed,
+        detail: "Choose an exact actionID from currentUI.actions and retry.")
     }
-    let selectorValue = (try? jsonValue(selector)) ?? .object([:])
+    let selectorValue = step.selector.flatMap { try? jsonValue($0) }
+    var screenChanged = false
     if let action = step.action {
-      var params: [String: JSONValue] = ["selector": selectorValue, "action": .string(action)]
+      var params: [String: JSONValue] = ["action": .string(action)]
+      if let actionID = step.actionID { params["actionID"] = .string(actionID) }
+      if let selectorValue { params["selector"] = selectorValue }
       if let text = step.text { params["text"] = .string(text) }
       let performed = await uiPerform(
         .init(id: nil, method: "ui.perform", params: .object(params)))
       if let error = performed.error {
-        return .init(step: step, status: .failed, detail: error.message)
+        return .init(
+          step: step, status: .failed,
+          detail: "\(error.message) The host refreshed currentUI.actions for recovery.")
       }
       evidenceIDs += uuidValues(performed.result?["evidenceIDs"])
+      screenChanged = performed.result?["screenChanged"]?.boolValue
+        ?? (performed.result?["beforeFingerprint"] != performed.result?["afterFingerprint"])
     }
-    if step.assertVisible {
+
+    if let expected = step.expectVisible {
+      let expectedValue = (try? jsonValue(expected)) ?? .object([:])
       let asserted = await uiAssert(
         .init(
           id: nil, method: "ui.assert",
           params: .object([
-            "selector": selectorValue,
-            "criterionID": .string(step.criterionID ?? step.id),
+            "selector": expectedValue,
+            "criterionID": .string(step.criterionID ?? journeyID.uuidString),
           ])))
-      if let error = asserted.error {
-        return .init(step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
-      }
+      if let error = asserted.error { return .init(
+        step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs) }
       evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
-      guard asserted.result?["passed"]?.boolValue == true else {
+      if asserted.result?["passed"]?.boolValue != true {
         return .init(
-          step: step, status: .failed, detail: "The final assertion did not pass.",
+          step: step, status: .failed, detail: "The expected post-action element is not visible.",
+          evidenceIDs: evidenceIDs)
+      }
+    } else if step.assertsCurrentActionVisibility {
+      var assertion: [String: JSONValue] = [
+        "criterionID": .string(step.criterionID ?? journeyID.uuidString)
+      ]
+      if let actionID = step.actionID { assertion["actionID"] = .string(actionID) }
+      if let selectorValue { assertion["selector"] = selectorValue }
+      let asserted = await uiAssert(
+        .init(id: nil, method: "ui.assert", params: .object(assertion)))
+      if let error = asserted.error { return .init(
+        step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs) }
+      evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
+      if asserted.result?["passed"]?.boolValue != true {
+        return .init(
+          step: step, status: .failed, detail: "The current action is no longer visible.",
+          evidenceIDs: evidenceIDs)
+      }
+    } else if step.requiresScreenChange {
+      let item = Evidence(
+        kind: .uiAssertion, status: screenChanged ? .passed : .failed,
+        taskGeneration: await ledger.generation,
+        criterionID: step.criterionID ?? journeyID.uuidString,
+        destinationUDID: sessionConfiguration?.destination?.udid,
+        diagnosticSummary: screenChanged
+          ? "The screen changed after \(step.title)."
+          : "The screen did not change after \(step.title).",
+        deterministic: true)
+      try? await ledger.record(item)
+      evidenceIDs.append(item.id)
+      emit(
+        .assertion, message: item.diagnosticSummary, journeyID: journeyID,
+        stepID: step.id, destinationUDID: sessionConfiguration?.destination?.udid)
+      if !screenChanged {
+        return .init(
+          step: step, status: .failed,
+          detail: "The action ran, but its required screen change did not occur.",
           evidenceIDs: evidenceIDs)
       }
     }
     return .init(
-      step: step, status: .passed, detail: "\(step.title) completed.",
+      step: step, status: .passed,
+      detail: screenChanged ? "\(step.title) completed; the screen changed." : "\(step.title) completed.",
       evidenceIDs: evidenceIDs)
   }
 
@@ -640,12 +697,17 @@ public actor RuntimeService {
         preflight: context.preflight)
       let fingerprint = ScreenFingerprint.make(
         elements: elements, modal: false, navigationTitle: nil)
+      let actions = UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint)
+      await appGraph.observeScreen(fingerprint, actions: actions)
+      await persistAppGraph()
       return success(
         request.id,
         .object([
-          "elements": try jsonValue(elements),
+          "actions": try jsonValue(actions),
+          "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: elements)),
           "fingerprint": try jsonValue(fingerprint),
-          "message": .string("Captured \(elements.count) semantic UI elements."),
+          "message": .string(
+            "Captured \(actions.count) host-resolved actions and \(elements.count) UI elements. Use actionID values exactly as returned."),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
       return failure(request.id, -32077, error.localizedDescription)
@@ -698,13 +760,40 @@ public actor RuntimeService {
       let identifier = selectorIdentifier(request.params)
       let label = selectorLabel(request.params)
       let type = selectorType(request.params)
+      let path = selectorPath(request.params)
       let coordinate = selectorCoordinate(request.params)
       let swipe = selectorSwipe(request.params)
-      guard identifier != nil || label != nil || coordinate != nil || swipe != nil else {
+      let actionID = request.params?["actionID"]?.stringValue
+      guard actionID != nil || identifier != nil || label != nil || path != nil || coordinate != nil
+        || swipe != nil
+      else {
         return failure(
-          request.id, -32602, "selector identifier, label, or coordinate gesture is required")
+          request.id, -32602,
+          "actionID from the current action catalog, or a legacy selector, is required")
       }
       let context = try await automationContext(request)
+      if let actionID {
+        return await performCatalogAction(
+          request, actionID: actionID, action: action, context: context)
+      }
+      if let path {
+        let elements = try await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+        let fingerprint = ScreenFingerprint.make(
+          elements: elements, modal: false, navigationTitle: nil)
+        let actions = UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint)
+        guard let element = elements.first(where: { $0.childPath == path || $0.xpath == path }),
+          let capability = actions.first(where: {
+            $0.id == UIActionCatalog.actionID(
+              fingerprint: fingerprint, childPath: element.childPath)
+          })
+        else {
+          return failure(request.id, -32086, "The recorded graph action is stale on this screen")
+        }
+        return await performCatalogAction(
+          request, actionID: capability.id, action: action, context: context, before: elements)
+      }
       if let coordinate {
         guard action == "tap" else {
           return failure(request.id, -32602, "Coordinate selectors support tap only")
@@ -803,25 +892,187 @@ public actor RuntimeService {
     }
   }
 
+  private func performCatalogAction(
+    _ request: RPCEnvelope, actionID: String, action: String,
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight),
+    before suppliedBefore: [UIElement]? = nil
+  ) async -> RPCEnvelope {
+    do {
+      let before: [UIElement]
+      if let suppliedBefore {
+        before = suppliedBefore
+      } else {
+        before = try await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+      }
+      let beforeFingerprint = ScreenFingerprint.make(
+        elements: before, modal: false, navigationTitle: nil)
+      guard let resolved = UIActionCatalog.resolve(
+        actionID: actionID, action: action, elements: before, fingerprint: beforeFingerprint)
+      else {
+        return failure(
+          request.id, -32086,
+          "That actionID is stale or does not support \(action). Read currentUI.actions and retry with one of the returned IDs.")
+      }
+
+      let text = request.params?["text"]?.stringValue
+      switch resolved.selector {
+      case .hierarchyPath(let path):
+        if path.hasPrefix("/"), !["scrollUp", "scrollDown"].contains(action) {
+          do {
+            try await wda.performXPath(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              xpath: path, action: action, text: text, preflight: context.preflight)
+          } catch where action == "tap" {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: resolved.element.frame, action: action, preflight: context.preflight)
+          }
+        } else {
+          try await wda.performFrameAction(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            frame: resolved.element.frame, action: action, preflight: context.preflight)
+        }
+      case .accessibilityIdentifier(let identifier):
+        if ["scrollUp", "scrollDown"].contains(action) {
+          try await wda.performFrameAction(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            frame: resolved.element.frame, action: action, preflight: context.preflight)
+        } else {
+          do {
+            try await wda.perform(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              identifier: identifier, action: action, text: text, preflight: context.preflight)
+          } catch where action == "tap" {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: resolved.element.frame, action: action, preflight: context.preflight)
+          }
+        }
+      case .labelType(let label, let type):
+        if ["scrollUp", "scrollDown"].contains(action) {
+          try await wda.performFrameAction(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            frame: resolved.element.frame, action: action, preflight: context.preflight)
+        } else {
+          do {
+            try await wda.perform(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              label: label, type: type, action: action, text: text,
+              preflight: context.preflight)
+          } catch where action == "tap" {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: resolved.element.frame, action: action, preflight: context.preflight)
+          }
+        }
+      case .ancestor, .coordinate:
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: resolved.element.frame, action: action, preflight: context.preflight)
+      }
+
+      var after = try await wda.snapshot(
+        udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+        preflight: context.preflight)
+      for _ in 0..<10 {
+        try await Task.sleep(for: .milliseconds(150))
+        let next = try await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+        if ScreenFingerprint.make(elements: after, modal: false, navigationTitle: nil)
+          == ScreenFingerprint.make(elements: next, modal: false, navigationTitle: nil)
+        {
+          after = next
+          break
+        }
+        after = next
+      }
+      let afterFingerprint = ScreenFingerprint.make(
+        elements: after, modal: false, navigationTitle: nil)
+      let item = Evidence(
+        kind: .uiAction, status: .passed, taskGeneration: await ledger.generation,
+        destinationUDID: context.udid,
+        diagnosticSummary:
+          "Host-resolved \(action) on \(resolved.capability.title) (\(resolved.capability.role))",
+        deterministic: true)
+      try await ledger.record(item)
+      _ = await appGraph.observe(
+        from: beforeFingerprint, to: afterFingerprint, selector: resolved.selector,
+        build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+      let actions = UIActionCatalog.capabilities(elements: after, fingerprint: afterFingerprint)
+      await appGraph.observeScreen(afterFingerprint, actions: actions)
+      await persistAppGraph()
+      if var journey = activeJourney {
+        journey.currentFingerprint = afterFingerprint
+        journey.updatedAt = Date()
+        activeJourney = journey
+      }
+      emit(
+        .uiAction, message: item.diagnosticSummary, journeyID: activeJourney?.id,
+        destinationUDID: context.udid)
+      return success(
+        request.id,
+        .object([
+          "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "beforeFingerprint": try jsonValue(beforeFingerprint),
+          "afterFingerprint": try jsonValue(afterFingerprint),
+          "screenChanged": .bool(beforeFingerprint != afterFingerprint),
+          "actions": try jsonValue(actions),
+          "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: after)),
+          "message": .string(item.diagnosticSummary),
+        ]))
+    } catch let error as RPCError {
+      return failure(request.id, error.code, error.message)
+    } catch {
+      return failure(request.id, -32077, error.localizedDescription)
+    }
+  }
+
   private func uiAssert(_ request: RPCEnvelope) async -> RPCEnvelope {
     do {
       let identifier = selectorIdentifier(request.params)
       let label = selectorLabel(request.params)
       let type = selectorType(request.params)
-      guard identifier != nil || label != nil else {
-        return failure(request.id, -32602, "selector identifier or label is required")
+      let actionID = request.params?["actionID"]?.stringValue
+      guard actionID != nil || identifier != nil || label != nil else {
+        return failure(
+          request.id, -32602,
+          "actionID from the current action catalog, or a legacy selector, is required")
       }
       let context = try await automationContext(request)
       let elements = try await wda.snapshot(
         udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
         preflight: context.preflight)
-      let matches = elements.filter {
-        (identifier == nil || $0.identifier == identifier)
-          && (label == nil || $0.label == label)
-          && (type == nil || $0.type == type)
+      let fingerprint = ScreenFingerprint.make(
+        elements: elements, modal: false, navigationTitle: nil)
+      let capability = actionID.flatMap { id in
+        UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint)
+          .first(where: { $0.id == id })
+      }
+      let resolvedElement = capability.flatMap { capability in
+        capability.actions.first.flatMap { action in
+          UIActionCatalog.resolve(
+            actionID: capability.id, action: action, elements: elements,
+            fingerprint: fingerprint)?.element
+        }
+      }
+      let matches: [UIElement]
+      if let resolvedElement {
+        matches = [resolvedElement]
+      } else if actionID != nil {
+        matches = []
+      } else {
+        matches = elements.filter {
+          (identifier == nil || $0.identifier == identifier)
+            && (label == nil || $0.label == label)
+            && (type == nil || $0.type == type)
+        }
       }
       let found = matches.count == 1
-      let selectorSummary = identifier ?? [type, label].compactMap { $0 }.joined(separator: " · ")
+      let selectorSummary = capability?.title ?? identifier ?? actionID
+        ?? [type, label].compactMap { $0 }.joined(separator: " · ")
       let item = Evidence(
         kind: .uiAssertion, status: found ? .passed : .failed,
         taskGeneration: await ledger.generation,
@@ -915,6 +1166,10 @@ public actor RuntimeService {
     params?["selector"]?["type"]?.stringValue ?? params?["type"]?.stringValue
   }
 
+  private func selectorPath(_ params: JSONValue?) -> String? {
+    params?["selector"]?["path"]?.stringValue ?? params?["path"]?.stringValue
+  }
+
   private func graphSelector(identifier: String?, label: String?, type: String?) -> ElementSelector? {
     if let identifier, !identifier.isEmpty { return .accessibilityIdentifier(identifier) }
     if let label, let type, !label.isEmpty, !type.isEmpty {
@@ -969,7 +1224,9 @@ public actor RuntimeService {
       let performed = await uiPerform(
         .init(
           id: nil, method: "ui.perform",
-          params: .object(["selector": selector, "action": .string("tap")])))
+          params: .object([
+            "selector": selector, "action": .string(edge.action ?? "tap"),
+          ])))
       if let error = performed.error {
         await appGraph.recordFailure(edge.id)
         await persistAppGraph()

@@ -97,8 +97,71 @@ public actor WDAController {
       _ = try await request(
         method: "POST", path: "/session/\(sessionID)/element/\(elementID)/value",
         body: ["text": text, "value": text.map { String($0) }])
+    case "clear":
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/element/\(elementID)/clear", body: [:])
     default:
-      throw RPCError(code: -32602, message: "Supported UI actions are tap and type")
+      throw RPCError(code: -32602, message: "Supported semantic actions are tap, type, and clear")
+    }
+  }
+
+  public func performXPath(
+    udid: String, runtime: String, bundleID: String, xpath: String, action: String,
+    text: String?, preflight: ToolchainPreflight
+  ) async throws {
+    try await ensureSession(
+      udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
+    guard let sessionID else { throw RPCError(code: -32077, message: "WDA session is missing") }
+    let found = try await request(
+      method: "POST", path: "/session/\(sessionID)/element",
+      body: ["using": "xpath", "value": xpath])
+    guard let value = found["value"] as? [String: Any],
+      let elementID = (value["element-6066-11e4-a52e-4f735466cecf"] ?? value["ELEMENT"])
+        as? String
+    else { throw RPCError(code: -32078, message: "The screen-bound element is no longer present") }
+    switch action {
+    case "tap":
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/element/\(elementID)/click", body: [:])
+    case "type":
+      guard let text else { throw RPCError(code: -32602, message: "text is required for type") }
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/element/\(elementID)/value",
+        body: ["text": text, "value": text.map { String($0) }])
+    case "clear":
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/element/\(elementID)/clear", body: [:])
+    default:
+      throw RPCError(code: -32602, message: "The screen-bound element does not support \(action)")
+    }
+  }
+
+  public func performFrameAction(
+    udid: String, runtime: String, bundleID: String, frame: ElementFrame, action: String,
+    preflight: ToolchainPreflight
+  ) async throws {
+    try await ensureSession(
+      udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
+    guard let sessionID else { throw RPCError(code: -32077, message: "WDA session is missing") }
+    let centerX = frame.x + frame.width / 2
+    let centerY = frame.y + frame.height / 2
+    switch action {
+    case "tap":
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/wda/tap",
+        body: ["x": centerX, "y": centerY])
+    case "scrollUp", "scrollDown":
+      let upperY = frame.y + frame.height * 0.3
+      let lowerY = frame.y + frame.height * 0.7
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/wda/dragfromtoforduration",
+        body: [
+          "fromX": centerX, "fromY": action == "scrollUp" ? lowerY : upperY,
+          "toX": centerX, "toY": action == "scrollUp" ? upperY : lowerY,
+          "duration": 0.35,
+        ])
+    default:
+      throw RPCError(code: -32602, message: "The resolved frame does not support \(action)")
     }
   }
 
@@ -272,6 +335,8 @@ private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
   private var elements: [UIElement] = []
   private var indices: [Int] = []
   private var childCounts: [Int] = [0]
+  private var typeCounts: [[String: Int]] = [[:]]
+  private var typePath: [String] = []
   private var owningApplication = "unknown"
 
   static func parse(_ xml: String) throws -> [UIElement] {
@@ -295,12 +360,24 @@ private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
     childCounts.append(0)
     if let bundle = attributes["bundleId"] { owningApplication = bundle }
     let type = attributes["type"] ?? elementName
+    let typeIndex = (typeCounts[typeCounts.count - 1][type] ?? 0) + 1
+    typeCounts[typeCounts.count - 1][type] = typeIndex
+    typePath.append("\(type)[\(typeIndex)]")
+    typeCounts.append([:])
     let visible = attributes["visible"] != "false"
     let enabled = attributes["enabled"] != "false"
     let actions: [String]
-    if type.contains("TextField") || type.contains("SearchField") {
-      actions = ["tap", "type"]
-    } else if type.contains("Button") || type.contains("Cell") {
+    if type.contains("TextField") || type.contains("SearchField")
+      || type.contains("SecureTextField") || type.contains("TextView")
+    {
+      actions = ["tap", "type", "clear"]
+    } else if type.contains("ScrollView") || type.contains("CollectionView")
+      || type.contains("Table") || type.contains("WebView")
+    {
+      actions = ["scrollUp", "scrollDown"]
+    } else if type.contains("Button") || type.contains("Cell") || type.contains("Link")
+      || type.contains("Switch") || type.contains("Toggle") || type.contains("Tab")
+    {
       actions = ["tap"]
     } else {
       actions = []
@@ -316,6 +393,7 @@ private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
           width: Double(attributes["width"] ?? "") ?? 0,
           height: Double(attributes["height"] ?? "") ?? 0),
         childPath: indices.map(String.init).joined(separator: "."),
+        xpath: "/" + typePath.joined(separator: "/"),
         owningApplication: owningApplication, availableActions: actions))
   }
 
@@ -325,6 +403,8 @@ private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
   ) {
     _ = indices.popLast()
     _ = childCounts.popLast()
+    _ = typeCounts.popLast()
+    _ = typePath.popLast()
   }
 
   private func nonempty(_ value: String?) -> String? {

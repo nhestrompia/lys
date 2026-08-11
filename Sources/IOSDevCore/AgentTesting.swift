@@ -149,22 +149,41 @@ public struct JourneyStep: Codable, Identifiable, Hashable, Sendable {
   public var id: String
   public var title: String
   public var criterionID: String?
+  /// Opaque, screen-bound ID returned by currentUI.actions. Preferred over model-authored selectors.
+  public var actionID: String?
   public var selector: JourneySelector?
   public var action: String?
   public var text: String?
+  /// Optional post-action assertion. Unlike the legacy assertVisible flag, this does not re-assert
+  /// the control that was just tapped and may have disappeared during navigation.
+  public var expectVisible: JourneySelector?
+  public var expectScreenChanged: Bool?
   public var assertVisible: Bool
 
   public init(
-    id: String, title: String, criterionID: String? = nil, selector: JourneySelector? = nil,
-    action: String? = nil, text: String? = nil, assertVisible: Bool = false
+    id: String, title: String, criterionID: String? = nil, actionID: String? = nil,
+    selector: JourneySelector? = nil, action: String? = nil, text: String? = nil,
+    expectVisible: JourneySelector? = nil, expectScreenChanged: Bool? = nil,
+    assertVisible: Bool = false
   ) {
     self.id = id
     self.title = title
     self.criterionID = criterionID
+    self.actionID = actionID
     self.selector = selector
     self.action = action
     self.text = text
+    self.expectVisible = expectVisible
+    self.expectScreenChanged = expectScreenChanged
     self.assertVisible = assertVisible
+  }
+
+  public var assertsCurrentActionVisibility: Bool {
+    action == nil && assertVisible && expectVisible == nil
+  }
+
+  public var requiresScreenChange: Bool {
+    expectScreenChanged == true || (action != nil && assertVisible && expectVisible == nil)
   }
 }
 
@@ -317,6 +336,23 @@ public enum AgentToolTraceValidator {
 
     let submittedCompletion = trace.contains {
       $0.name == "journey.run" && $0.arguments["complete"]?.boolValue == true
+    }
+    let journeySteps = trace.filter { $0.name == "journey.run" }
+      .flatMap { $0.arguments["steps"]?.arrayValue ?? [] }
+    for step in journeySteps where step["action"]?.stringValue != nil
+      && step["actionID"]?.stringValue == nil
+    {
+      violations.append("a journey action used a model-authored selector instead of actionID")
+    }
+    if submittedCompletion, intent.requiresRunningApp {
+      if !journeySteps.contains(where: { $0["action"]?.stringValue != nil }) {
+        violations.append("the completed journey did not exercise a host-issued app action")
+      }
+      if !journeySteps.contains(where: {
+        $0["assertVisible"]?.boolValue == true || $0["expectScreenChanged"]?.boolValue == true
+      }) {
+        violations.append("the completed journey did not record a deterministic postcondition")
+      }
     }
     if requiresCompletion, intent.requiresRunningApp, !submittedCompletion {
       violations.append("the journey was not completed with host-validated evidence")

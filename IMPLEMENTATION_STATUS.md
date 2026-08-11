@@ -53,8 +53,8 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 | Capability | Status | Remaining work |
 | --- | --- | --- |
 | WDA compatibility/checksum model | **Implemented** | The exact Xcode 26.6/iOS 26.5/WDA 16.1.3 entry is promoted; all other tuples fail closed. |
-| Hierarchy normalization/selectors/fingerprints | **Implemented** | Structured XML hierarchy decoding, useful-node filtering, identifier and unique label/type actions, fingerprints, ambiguity checks, and post-action stability waits are wired. Add ancestor-qualified and stable-path actions. |
-| Observed App Graph and deterministic BFS | **Implemented** | Semantic actions automatically record build-keyed screen transitions, interactive state participates in fingerprints, snapshots persist in SQLite, and only safe tap edges are eligible for replay. Add a dedicated graph inspector for stale/confidence state. |
+| Hierarchy normalization/action capabilities/fingerprints | **Implemented** | Every current visible control receives a host-issued opaque action ID. Accessibility locators are preferred; exact screen-bound XPath/frame resolution covers duplicate labels and React Native/Expo pressables. Tap, type, clear, and scroll capabilities, fingerprints, ambiguity checks, and post-action stability waits are wired. |
+| Observed App Graph and deterministic BFS | **Implemented** | Every observed screen persists its action catalog; successful actions record build-keyed transitions, interactive state participates in fingerprints, snapshots persist in SQLite, and safe actions replay without model-authored selectors. Add a dedicated graph inspector for stale/confidence state. |
 | Evidence generations/completion contract | **Implemented** | Integrate mutations from agent filesystem notifications and configuration changes; validate submitted evidence IDs. |
 
 ## Agent integration

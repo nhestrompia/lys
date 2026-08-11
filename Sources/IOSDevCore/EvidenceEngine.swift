@@ -48,6 +48,15 @@ public actor EvidenceLedger {
     guard item.taskGeneration <= generation else {
       throw RPCError(code: -32020, message: "Evidence generation is in the future")
     }
+    if item.kind == .uiAssertion, item.status == .passed {
+      for index in evidence.indices
+      where evidence[index].taskGeneration == item.taskGeneration
+        && evidence[index].kind == .uiAssertion && evidence[index].status == .failed
+        && evidence[index].criterionID == item.criterionID
+      {
+        evidence[index].acknowledged = true
+      }
+    }
     evidence.append(item)
   }
   public func allEvidence() -> [Evidence] { evidence }
@@ -88,7 +97,7 @@ public actor EvidenceLedger {
       hasRuntimeFailure
       || current.contains {
         relevantKinds.contains($0.kind) && $0.status == .failed
-          && ($0.kind != .runtimeLog || !$0.acknowledged)
+          && !$0.acknowledged
       }
     let hasBlocker = current.contains {
       relevantKinds.contains($0.kind) && $0.status == .blocked

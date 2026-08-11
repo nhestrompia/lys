@@ -44,7 +44,7 @@ public enum AgentRuntimeToolCatalog {
         properties: [:], readOnly: true),
       tool(
         "journey.run",
-        "Start or continue a host-owned app-testing journey. The host reuses the running app when compatible, builds only when policy requires it, executes supplied semantic steps, records the App Graph, and returns current UI elements and evidence. Call first with only goal; then continue with journeyID and deterministic steps.",
+        "Start or continue a recoverable host-owned app-testing journey. Call first with only goal. Then choose exact opaque IDs from currentUI.actions and submit at most one screen-changing interaction per call so the next action catalog is fresh. Never invent labels, roles, selectors, or coordinates. A rejected action refreshes the catalog without ending the journey.",
         properties: [
           "goal": string("Natural-language user outcome to verify"),
           "journeyID": string("ID returned by an earlier journey.run call"),
@@ -53,15 +53,17 @@ public enum AgentRuntimeToolCatalog {
             items: object([
               "id": string("Stable step ID"), "title": string("Short user-visible step title"),
               "criterionID": string("Acceptance criterion ID"),
+              "actionID": string("Exact opaque ID from the latest currentUI.actions array"),
               "selector": object([
-                "identifier": string("Accessibility identifier"),
-                "label": string("Unique accessibility label"),
-                "type": string("Accessibility element type when selecting by label"),
+                "identifier": string("Legacy accessibility identifier fallback"),
+                "label": string("Legacy unique accessibility label fallback"),
+                "type": string("Legacy accessibility role fallback"),
               ]),
-              "action": string("tap, type, clear, or other WDA semantic action"),
+              "action": string("One action listed by the selected actionID"),
               "text": string("Text for a type action"),
-              "assertVisible": boolean("Assert the selector is uniquely visible after the action"),
-            ]))
+              "expectScreenChanged": boolean("Require a different host fingerprint after the action"),
+              "assertVisible": boolean("With no action, assert actionID is visible. Legacy action steps interpret this as expectScreenChanged."),
+            ], required: ["id", "title", "actionID"]))
         ], required: ["goal"], readOnly: false, destructive: false, idempotent: false),
       tool(
         "journey.status", "Read the current testing journey and its step results.",
@@ -72,27 +74,33 @@ public enum AgentRuntimeToolCatalog {
         properties: ["journeyID": string("Journey ID; omit for the active journey")],
         readOnly: false, destructive: false, idempotent: true),
       tool(
-        "ui.snapshot", "Inspect the current app's semantic accessibility hierarchy. Simulator and bundle context are supplied by the host.",
+        "ui.snapshot", "Inspect the current app. Returns host-issued actions before hierarchy details; use their opaque IDs instead of creating selectors.",
+        properties: [:], readOnly: true),
+      tool(
+        "ui.actions", "List every currently host-resolved tap, type, clear, and scroll capability with an opaque screen-bound actionID.",
         properties: [:], readOnly: true),
       tool(
         "ui.find", "Find semantic UI elements in the current app using an accessibility identifier or unique label and type.",
         properties: ["selector": selectorSchema], required: ["selector"], readOnly: true),
       tool(
-        "ui.perform", "Perform one semantic action in the current app. The host records before/after states and makes the action visible in the App panel.",
+        "ui.perform", "Perform one action using an exact actionID from the latest ui.actions response. The ID is bound to the current screen and safely becomes stale after navigation.",
         properties: [
-          "selector": selectorSchema, "action": string("tap, type, clear, or swipe"),
+          "actionID": string("Exact opaque ID returned by ui.actions"),
+          "selector": selectorSchema, "action": string("An action advertised for this actionID"),
           "text": string("Text for type actions"),
-        ], required: ["selector", "action"], readOnly: false, destructive: false),
+        ], required: ["actionID", "action"], readOnly: false, destructive: false),
       tool(
         "ui.wait", "Wait with bounded automatic retry for a semantic UI selector.",
         properties: [
           "selector": selectorSchema, "timeoutSeconds": number("Timeout from 0.2 to 30 seconds"),
         ], required: ["selector"], readOnly: true),
       tool(
-        "ui.assert", "Record deterministic evidence that one semantic UI element is visible.",
+        "ui.assert", "Record deterministic evidence that a current host-issued actionID is visible.",
         properties: [
-          "criterionID": string("Acceptance criterion ID"), "selector": selectorSchema,
-        ], required: ["criterionID", "selector"], readOnly: true),
+          "criterionID": string("Acceptance criterion ID"),
+          "actionID": string("Exact opaque ID returned by ui.actions"),
+          "selector": selectorSchema,
+        ], required: ["criterionID", "actionID"], readOnly: true),
       tool(
         "ui.navigate", "Replay a previously observed deterministic App Graph path to a screen fingerprint.",
         properties: ["screen": string("Destination screen fingerprint")], required: ["screen"],
@@ -113,7 +121,8 @@ public enum AgentRuntimeToolCatalog {
     ]
     switch kind {
     case .runTests:
-      return [common[0], testListTool, testRunTool, common[12], common[13]]
+      return [common[0], testListTool, testRunTool]
+        + common.filter { ["verification.status", "verification.submit"].contains($0.name) }
     case .modifyAndVerify:
       return common + [buildTool, testListTool, testRunTool]
     case .verifyCurrentApp, .inspectCurrentApp, nil:
@@ -174,9 +183,12 @@ public enum AgentRuntimeToolCatalog {
   private static func array(items: JSONValue) -> JSONValue {
     .object(["type": .string("array"), "items": items])
   }
-  private static func object(_ properties: [String: JSONValue]) -> JSONValue {
+  private static func object(
+    _ properties: [String: JSONValue], required: [String] = []
+  ) -> JSONValue {
     .object([
       "type": .string("object"), "properties": .object(properties),
+      "required": .array(required.map(JSONValue.string)),
       "additionalProperties": .bool(false),
     ])
   }

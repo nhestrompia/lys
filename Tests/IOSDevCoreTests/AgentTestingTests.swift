@@ -47,6 +47,20 @@ import Testing
   #expect(JourneySelector(label: "Start Quiz").elementSelector == nil)
 }
 
+@Test func tappedNavigationControlIsNotReassertedAfterItDisappears() {
+  let navigation = JourneyStep(
+    id: "open-quiz", title: "Open Practice Quiz", actionID: "action_start",
+    action: "tap", assertVisible: true)
+  #expect(!navigation.assertsCurrentActionVisibility)
+  #expect(navigation.requiresScreenChange)
+
+  let currentAssertion = JourneyStep(
+    id: "quiz-visible", title: "Quiz is visible", actionID: "action_answer_a",
+    assertVisible: true)
+  #expect(currentAssertion.assertsCurrentActionVisibility)
+  #expect(!currentAssertion.requiresScreenChange)
+}
+
 @Test func goldenQuizTraceUsesOneHostOwnedJourneyWithoutLifecycleThrash() {
   let intent = AgentTaskIntentRouter.classify("Test the quiz and verify its score")
   let trace = [
@@ -57,7 +71,24 @@ import Testing
       "journey.run",
       arguments: .object([
         "goal": .string("Verify quiz scoring"), "journeyID": .string("journey-1"),
-        "steps": .array([]), "complete": .bool(true),
+        "steps": .array([
+          .object([
+            "id": .string("start"), "title": .string("Start quiz"),
+            "actionID": .string("action_start"), "action": .string("tap"),
+            "expectScreenChanged": .bool(true),
+          ])
+        ]),
+      ])),
+    AgentToolTraceEntry(
+      "journey.run",
+      arguments: .object([
+        "goal": .string("Verify quiz scoring"), "journeyID": .string("journey-1"),
+        "steps": .array([
+          .object([
+            "id": .string("answer-visible"), "title": .string("An answer is visible"),
+            "actionID": .string("action_answer_a"), "assertVisible": .bool(true),
+          ])
+        ]), "complete": .bool(true),
       ])),
   ]
   let report = AgentToolTraceValidator.validate(intent: intent, trace: trace)
