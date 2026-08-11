@@ -149,7 +149,7 @@ public struct JourneyStep: Codable, Identifiable, Hashable, Sendable {
   public var id: String
   public var title: String
   public var criterionID: String?
-  /// Opaque, screen-bound ID returned by currentUI.actions. Preferred over model-authored selectors.
+  /// Opaque, screen-bound capability ID returned by the host app description.
   public var actionID: String?
   public var selector: JourneySelector?
   public var action: String?
@@ -353,44 +353,40 @@ public enum AgentToolTraceValidator {
       violations.append("\(entry.name) is outside the host tool policy")
     }
 
-    let journeyIndex = trace.firstIndex { $0.name == "journey.run" }
-    if intent.requiresRunningApp, journeyIndex == nil {
-      violations.append("journey.run was not used")
+    let flowIndex = trace.firstIndex { $0.name == "flow.run" }
+    if intent.requiresRunningApp, flowIndex == nil {
+      violations.append("flow.run was not used")
     }
-    if let firstDirectUI = trace.firstIndex(where: {
-      ["ui.perform", "ui.navigate"].contains($0.name)
-    }) {
-      if journeyIndex.map({ firstDirectUI < $0 }) ?? true {
-        violations.append("UI interaction occurred before the host-owned journey")
+    if let firstStep = trace.firstIndex(where: { $0.name == "flow.step" }) {
+      if flowIndex.map({ firstStep < $0 }) ?? true {
+        violations.append("flow.step occurred before the host-owned flow")
       }
     }
 
-    let submittedCompletion = trace.contains {
-      $0.name == "journey.run" && $0.arguments["complete"]?.boolValue == true
+    let declaredFlow = trace.contains {
+      $0.name == "flow.run" && $0.arguments["blueprintID"]?.stringValue != nil
     }
-    let journeySteps = trace.filter { $0.name == "journey.run" }
-      .flatMap { $0.arguments["steps"]?.arrayValue ?? [] }
-    for step in journeySteps
-    where step["action"]?.stringValue != nil
-      && step["actionID"]?.stringValue == nil
-    {
-      violations.append("a journey action used a model-authored selector instead of actionID")
+    let submittedCompletion = declaredFlow || trace.contains { $0.name == "flow.finish" }
+    let discoverySteps = trace.filter { $0.name == "flow.step" }
+    for entry in discoverySteps where entry.arguments["capabilityID"]?.stringValue == nil {
+      violations.append("a flow step did not use a host-issued capabilityID")
     }
-    if submittedCompletion, intent.requiresRunningApp {
-      if !journeySteps.contains(where: { $0["action"]?.stringValue != nil }) {
-        violations.append("the completed journey did not exercise a host-issued app action")
+    if submittedCompletion, intent.requiresRunningApp, !declaredFlow {
+      if discoverySteps.isEmpty {
+        violations.append("the completed discovered flow did not exercise an app capability")
       }
-      if !journeySteps.contains(where: {
-        $0["assertVisible"]?.boolValue == true || $0["expectScreenChanged"]?.boolValue == true
+      if !discoverySteps.contains(where: {
+        $0.arguments["expectScreenChanged"]?.boolValue == true
       }) {
-        violations.append("the completed journey did not record a deterministic postcondition")
+        violations.append(
+          "the completed discovered flow did not record a deterministic postcondition")
       }
     }
     if requiresCompletion, intent.requiresRunningApp, !submittedCompletion {
-      violations.append("the journey was not completed with host-validated evidence")
+      violations.append("the flow was not completed with host-validated evidence")
     }
     return .init(
-      violations: violations, usedCompositeJourney: journeyIndex != nil,
+      violations: violations, usedCompositeJourney: flowIndex != nil,
       submittedCompletion: submittedCompletion)
   }
 }

@@ -83,35 +83,18 @@ import Testing
   #expect(!step.assertVisible)
 }
 
-@Test func goldenQuizTraceUsesOneHostOwnedJourneyWithoutLifecycleThrash() {
+@Test func goldenDeclaredFlowTraceUsesOneHostOwnedCallWithoutLifecycleThrash() {
   let intent = AgentTaskIntentRouter.classify("Test the quiz and verify its score")
   let trace = [
     AgentToolTraceEntry("workspace.describe"),
+    AgentToolTraceEntry("app.describe"),
+    AgentToolTraceEntry("flow.list"),
     AgentToolTraceEntry(
-      "journey.run", arguments: .object(["goal": .string("Verify quiz scoring")])),
-    AgentToolTraceEntry(
-      "journey.run",
+      "flow.run",
       arguments: .object([
-        "goal": .string("Verify quiz scoring"), "journeyID": .string("journey-1"),
-        "steps": .array([
-          .object([
-            "id": .string("start"), "title": .string("Start quiz"),
-            "actionID": .string("action_start"), "action": .string("tap"),
-            "expectScreenChanged": .bool(true),
-          ])
-        ]),
+        "goal": .string("Verify quiz scoring"), "blueprintID": .string("quiz.complete"),
       ])),
-    AgentToolTraceEntry(
-      "journey.run",
-      arguments: .object([
-        "goal": .string("Verify quiz scoring"), "journeyID": .string("journey-1"),
-        "steps": .array([
-          .object([
-            "id": .string("answer-visible"), "title": .string("An answer is visible"),
-            "actionID": .string("action_answer_a"), "assertVisible": .bool(true),
-          ])
-        ]), "complete": .bool(true),
-      ])),
+    AgentToolTraceEntry("evidence.summary"),
   ]
   let report = AgentToolTraceValidator.validate(intent: intent, trace: trace)
   #expect(report.passed)
@@ -123,12 +106,12 @@ import Testing
   let intent = AgentTaskIntentRouter.classify("Test the quiz")
   let trace = [
     AgentToolTraceEntry("devserver.stop"), AgentToolTraceEntry("build.run"),
-    AgentToolTraceEntry("ui.perform"),
+    AgentToolTraceEntry("flow.step"),
   ]
   let report = AgentToolTraceValidator.validate(intent: intent, trace: trace)
   #expect(!report.passed)
   #expect(report.violations.contains { $0.contains("devserver.stop") })
   #expect(report.violations.contains { $0.contains("build.run") })
-  #expect(report.violations.contains { $0.contains("journey.run") })
+  #expect(report.violations.contains { $0.contains("flow.run") })
   #expect(report.violations.contains { $0.contains("evidence") })
 }

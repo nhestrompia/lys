@@ -64,7 +64,7 @@ private func temporaryRuntimeRoot() throws -> URL {
     authenticated: &authenticated)
   let started = await service.handle(
     .init(
-      id: .int(2), method: "journey.run",
+      id: .int(2), method: "flow.run",
       params: .object(["goal": .string("Validate the quiz scoring contract")])),
     authenticated: &authenticated)
   #expect(started.error == nil)
@@ -72,7 +72,7 @@ private func temporaryRuntimeRoot() throws -> URL {
   let firstID = started.result?["id"]?.stringValue
 
   let cancelled = await service.handle(
-    .init(id: .int(3), method: "journey.cancel"), authenticated: &authenticated)
+    .init(id: .int(3), method: "flow.stop"), authenticated: &authenticated)
   #expect(cancelled.result?["cancelled"] == .bool(true))
   #expect(cancelled.result?["message"]?.stringValue?.contains("preserved") == true)
 
@@ -83,7 +83,7 @@ private func temporaryRuntimeRoot() throws -> URL {
 
   let restarted = await service.handle(
     .init(
-      id: .int(5), method: "journey.run",
+      id: .int(5), method: "flow.run",
       params: .object(["goal": .string("Validate quiz accessibility")])),
     authenticated: &authenticated)
   #expect(restarted.result?["goal"] == .string("Validate quiz accessibility"))
@@ -102,7 +102,7 @@ private func temporaryRuntimeRoot() throws -> URL {
     authenticated: &authenticated)
   _ = await service.handle(
     .init(
-      id: .int(2), method: "journey.run",
+      id: .int(2), method: "flow.run",
       params: .object(["goal": .string("Validate the quiz")])),
     authenticated: &authenticated)
 
@@ -111,7 +111,7 @@ private func temporaryRuntimeRoot() throws -> URL {
   #expect(stopped.result?["stopped"] == .bool(true))
   let rejected = await service.handle(
     .init(
-      id: .int(4), method: "journey.run",
+      id: .int(4), method: "flow.run",
       params: .object(["goal": .string("Keep acting without the user")])),
     authenticated: &authenticated)
   #expect(rejected.error?.code == -32097)
@@ -120,7 +120,7 @@ private func temporaryRuntimeRoot() throws -> URL {
     .init(id: .int(5), method: "session.resume"), authenticated: &authenticated)
   let resumed = await service.handle(
     .init(
-      id: .int(6), method: "journey.run",
+      id: .int(6), method: "flow.run",
       params: .object(["goal": .string("Continue after the user asks")])),
     authenticated: &authenticated)
   #expect(resumed.error == nil)
@@ -138,26 +138,18 @@ private func temporaryRuntimeRoot() throws -> URL {
     authenticated: &authenticated)
   let started = await service.handle(
     .init(
-      id: .int(2), method: "journey.run",
+      id: .int(2), method: "flow.run",
       params: .object(["goal": .string("Verify quiz entry")])),
     authenticated: &authenticated)
   let journeyID = try #require(started.result?["id"]?.stringValue)
 
   let continued = await service.handle(
     .init(
-      id: .int(3), method: "journey.run",
+      id: .int(3), method: "flow.step",
       params: .object([
-        "goal": .string("Verify quiz entry"),
-        "journeyID": .string(journeyID),
-        "steps": .array([
-          .object([
-            "id": .string("open-quiz"),
-            "title": .string("Open quiz"),
-            "actionID": .string("screen-action"),
-            "action": .string("tap"),
-            "expectScreenChanged": .bool(true),
-          ])
-        ]),
+        "flowID": .string(journeyID), "stepID": .string("open-quiz"),
+        "title": .string("Open quiz"), "capabilityID": .string("screen-action"),
+        "action": .string("tap"), "expectScreenChanged": .bool(true),
       ])),
     authenticated: &authenticated)
 

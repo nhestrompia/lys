@@ -26,6 +26,8 @@ public actor RuntimeService {
   private var devServerRecoveryTask: Task<Void, Never>?
   private var lastDevelopmentLaunch: DevelopmentLaunchContext?
   private var sessionConfiguration: RuntimeSessionConfiguration?
+  private var interactionBlueprint: InteractionBlueprint?
+  private var projectConfiguration: IOSDevConfiguration?
   private var sessionStoppedByHost = false
   private var activeJourney: JourneyRecord?
   private var runtimeEvents: [RuntimeEvent] = []
@@ -80,6 +82,14 @@ public actor RuntimeService {
         return resumeSession(request)
       case "session.status":
         return success(request.id, await sessionStatus())
+      case "app.describe": return await describeApp(request)
+      case "flow.list": return listFlows(request)
+      case "flow.run": return await runFlow(request)
+      case "flow.step": return await runFlowStep(request)
+      case "flow.finish": return await finishFlow(request)
+      case "flow.status": return await journeyStatus(request)
+      case "flow.stop": return await cancelJourney(request)
+      case "evidence.summary": return await evidenceSummary(request)
       case "runtime.events":
         return success(request.id, runtimeEventPage(after: request.params?["after"]?.numberValue))
       case "workspace.mutated":
@@ -185,9 +195,6 @@ public actor RuntimeService {
         return success(request.id, try jsonValue(await ledger.allEvidence()))
       case "verification.submit":
         return await submitVerification(request)
-      case "journey.run": return await runJourney(request)
-      case "journey.status": return await journeyStatus(request)
-      case "journey.cancel": return await cancelJourney(request)
       case "ui.snapshot": return await uiSnapshot(request)
       case "ui.actions": return await uiSnapshot(request)
       case "ui.prepare": return await uiPrepare(request)
@@ -209,6 +216,11 @@ public actor RuntimeService {
     do {
       let configuration: RuntimeSessionConfiguration = try decode(params)
       sessionConfiguration = configuration
+      interactionBlueprint = try InteractionBlueprintDiscovery.load(in: workspace)
+      let projectConfigurationURL = workspace.appending(path: ".iosdev/config.json")
+      projectConfiguration =
+        FileManager.default.fileExists(atPath: projectConfigurationURL.path)
+        ? try IOSDevConfiguration.load(from: projectConfigurationURL) : nil
       sessionStoppedByHost = false
       activeJourney = nil
       rejectedActionStates = [:]
@@ -269,6 +281,787 @@ public actor RuntimeService {
         artifactPath: artifactPath))
     nextEventSequence += 1
     if runtimeEvents.count > 1_000 { runtimeEvents.removeFirst(runtimeEvents.count - 1_000) }
+  }
+
+  private func describeApp(_ request: RPCEnvelope) async -> RPCEnvelope {
+    let snapshot = await uiSnapshot(.init(id: request.id, method: "ui.snapshot"))
+    if let error = snapshot.error { return failure(request.id, error.code, error.message) }
+    let elements: [UIElement] =
+      snapshot.result?["elements"].flatMap { try? decode($0) } ?? []
+    let currentRoute = interactionBlueprint.flatMap { blueprintRoute(in: elements, blueprint: $0) }
+    let declaredCapabilities = (interactionBlueprint?.capabilities ?? []).map { capability in
+      JSONValue.object([
+        "id": .string(capability.id),
+        "title": .string(capability.title),
+        "route": capability.route.map(JSONValue.string) ?? .null,
+        "action": .string(capability.action.rawValue),
+        "available": .bool(!blueprintMatches(capability.selector, in: elements).isEmpty),
+        "risk": capability.risk.map { .string($0.rawValue) } ?? .string("reversible"),
+        "parameters": (try? jsonValue(capability.parameters ?? [:])) ?? .object([:]),
+        "source": .string("blueprint"),
+      ])
+    }
+    let observedCapabilities = snapshot.result?["actions"]?.arrayValue ?? []
+    let routes = (interactionBlueprint?.routes ?? []).map { route in
+      JSONValue.object([
+        "id": .string(route.id), "title": .string(route.title),
+        "current": .bool(route.id == currentRoute?.id), "source": .string("blueprint"),
+      ])
+    }
+    return success(
+      request.id,
+      .object([
+        "blueprint": .bool(interactionBlueprint != nil),
+        "currentRoute": currentRoute.map { .string($0.id) } ?? .null,
+        "routes": .array(routes),
+        "capabilities": .array(declaredCapabilities + observedCapabilities),
+        "progress": snapshot.result?["progress"] ?? .null,
+        "stateVersion": snapshot.result?["fingerprint"]?["digest"] ?? .null,
+        "message": .string(
+          interactionBlueprint == nil
+            ? "Observed the current app without a repository blueprint. Use flow.run to start automatic exploration."
+            : "Merged the repository blueprint with current executable controls."),
+      ]))
+  }
+
+  private func listFlows(_ request: RPCEnvelope) -> RPCEnvelope {
+    let flows = (interactionBlueprint?.flows ?? []).map { flow in
+      JSONValue.object([
+        "id": .string(flow.id), "title": .string(flow.title),
+        "description": flow.description.map(JSONValue.string) ?? .null,
+        "context": flow.context.map(JSONValue.string) ?? .null,
+        "parameters": (try? jsonValue(flow.parameters ?? [:])) ?? .object([:]),
+      ])
+    }
+    return success(
+      request.id,
+      .object([
+        "flows": .array(flows), "blueprintAvailable": .bool(interactionBlueprint != nil),
+        "message": .string(
+          flows.isEmpty
+            ? "No declared flows; Operate will discover the requested flow from the live app."
+            : "Found \(flows.count) declared flow(s)."),
+      ]))
+  }
+
+  private func evidenceSummary(_ request: RPCEnvelope) async -> RPCEnvelope {
+    let requirement = VerificationRequirement(
+      codeChanged: sessionConfiguration?.intent.allowsSourceWrites == true,
+      uiChanged: sessionConfiguration?.intent.requiresRunningApp == true,
+      testsChanged: sessionConfiguration?.intent.kind == .runTests,
+      criterionIDs: activeJourney?.steps.filter { $0.status == .passed }
+        .compactMap { $0.step.criterionID } ?? [])
+    let report = await ledger.verify(requirement)
+    let journeyStatus = activeJourney?.status.rawValue ?? "notStarted"
+    return success(
+      request.id,
+      .object([
+        "status": .string(report.status.rawValue),
+        "flowStatus": .string(journeyStatus),
+        "missing": .array(report.missing.map(JSONValue.string)),
+        "evidenceCount": .number(Double(report.currentEvidence.count)),
+        "message": .string(
+          report.status == .verified
+            ? "The host verified the requested flow."
+            : "Host verification still needs: \(report.missing.joined(separator: "; "))."),
+      ]))
+  }
+
+  private func runFlow(_ request: RPCEnvelope) async -> RPCEnvelope {
+    if let blueprintID = request.params?["blueprintID"]?.stringValue {
+      guard let blueprint = interactionBlueprint,
+        let flow = blueprint.flows.first(where: { $0.id == blueprintID })
+      else { return failure(request.id, -32112, "Unknown blueprint flow \(blueprintID)") }
+      let parameters = request.params?["parameters"]?.objectValue ?? [:]
+      return await runBlueprintFlow(
+        request, blueprint: blueprint, flow: flow, parameters: parameters)
+    }
+    return await runJourney(
+      .init(
+        id: request.id, method: "flow.run",
+        params: .object(["goal": request.params?["goal"] ?? .string("Explore and test the app")])))
+  }
+
+  private func runFlowStep(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let flowID = request.params?["flowID"]?.stringValue,
+      let capabilityID = request.params?["capabilityID"]?.stringValue,
+      let action = request.params?["action"]?.stringValue
+    else { return failure(request.id, -32602, "flowID, capabilityID, and action are required") }
+    var step: [String: JSONValue] = [
+      "id": .string(request.params?["stepID"]?.stringValue ?? UUID().uuidString),
+      "title": .string(request.params?["title"]?.stringValue ?? "Exercise app capability"),
+      "actionID": .string(capabilityID), "action": .string(action),
+    ]
+    if let text = request.params?["text"] { step["text"] = text }
+    if let changed = request.params?["expectScreenChanged"] {
+      step["expectScreenChanged"] = changed
+    }
+    return await runJourney(
+      .init(
+        id: request.id, method: "flow.step",
+        params: .object([
+          "goal": .string(activeJourney?.goal ?? "Explore and test the app"),
+          "journeyID": .string(flowID), "steps": .array([.object(step)]),
+        ])))
+  }
+
+  private func finishFlow(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let flowID = request.params?["flowID"]?.stringValue else {
+      return failure(request.id, -32602, "flowID is required")
+    }
+    return await runJourney(
+      .init(
+        id: request.id, method: "flow.finish",
+        params: .object([
+          "goal": .string(activeJourney?.goal ?? "Explore and test the app"),
+          "journeyID": .string(flowID), "complete": .bool(true),
+        ])))
+  }
+
+  private func runBlueprintFlow(
+    _ request: RPCEnvelope, blueprint: InteractionBlueprint, flow: BlueprintFlow,
+    parameters: [String: JSONValue]
+  ) async -> RPCEnvelope {
+    guard var configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    if let expectedBundleID = blueprint.app?.bundleIdentifier,
+      let selectedBundleID = configuration.target?.bundleID,
+      expectedBundleID != selectedBundleID
+    {
+      return failure(
+        request.id, -32124,
+        "Blueprint expects \(expectedBundleID), but the selected app is \(selectedBundleID)")
+    }
+    for (name, parameter) in flow.parameters ?? [:]
+    where parameter.required == true && parameters[name] == nil {
+      return failure(request.id, -32113, "Flow \(flow.id) requires parameter \(name)")
+    }
+    let undeclared = parameters.keys.sorted().filter { flow.parameters?[$0] == nil }
+    if let first = undeclared.first {
+      return failure(request.id, -32113, "Flow \(flow.id) does not declare parameter \(first)")
+    }
+    for (name, value) in parameters {
+      guard let parameter = flow.parameters?[name] else { continue }
+      if parameter.sensitive == true {
+        return failure(
+          request.id, -32114,
+          "Sensitive input \(name) must be a blueprint secret, not an agent-supplied parameter")
+      }
+      if !blueprintParameterValue(value, satisfies: parameter) {
+        return failure(
+          request.id, -32113,
+          "Flow parameter \(name) does not satisfy type \(parameter.type)")
+      }
+    }
+    var journey = JourneyRecord(goal: flow.title)
+    activeJourney = journey
+    emit(.journeyStarted, message: flow.title, journeyID: journey.id)
+    do {
+      let ready = try await ensureJourneyApp(configuration: &configuration, journeyID: journey.id)
+      sessionConfiguration = configuration
+      journey.currentFingerprint = ready.fingerprint
+      journey.status = .running
+      activeJourney = journey
+
+      if let contextID = flow.context,
+        let context = blueprint.contexts?.first(where: { $0.id == contextID })
+      {
+        let current = try await currentBlueprintElements()
+        if !(await blueprintPredicatesPass(
+          context.readyWhen, elements: current, blueprint: blueprint))
+        {
+          for secret in context.requiredSecrets ?? [] {
+            guard blueprintSecret(secret) != nil else {
+              throw RPCError(
+                code: -32114,
+                message:
+                  "Authentication context \(context.id) requires secret \(secret). Add it through Operate's Keychain-backed secret settings."
+              )
+            }
+          }
+          try await executeBlueprintSteps(
+            context.prepare, blueprint: blueprint, parameters: parameters, journey: &journey)
+          let prepared = try await currentBlueprintElements()
+          guard
+            await blueprintPredicatesPass(
+              context.readyWhen, elements: prepared, blueprint: blueprint)
+          else {
+            throw RPCError(
+              code: -32115, message: "Authentication context \(context.id) is not ready")
+          }
+        }
+      }
+
+      if let startRoute = flow.startRoute {
+        let current = try await currentBlueprintElements()
+        guard blueprintRoute(in: current, blueprint: blueprint)?.id == startRoute else {
+          throw RPCError(
+            code: -32116,
+            message:
+              "Flow \(flow.id) expected start route \(startRoute). Add context preparation or navigation steps that reach it."
+          )
+        }
+      }
+
+      try await executeBlueprintSteps(
+        flow.steps, blueprint: blueprint, parameters: parameters, journey: &journey)
+      let finalElements = try await currentBlueprintElements()
+      var criterionIDs: [String] = []
+      for (index, predicate) in flow.acceptance.enumerated() {
+        let criterionID = "\(flow.id).acceptance.\(index + 1)"
+        criterionIDs.append(criterionID)
+        let passed = await blueprintPredicatePasses(
+          predicate, elements: finalElements, blueprint: blueprint)
+        let item = Evidence(
+          kind: .uiAssertion, status: passed ? .passed : .failed,
+          taskGeneration: await ledger.generation, criterionID: criterionID,
+          destinationUDID: configuration.destination?.udid,
+          diagnosticSummary: passed
+            ? "Blueprint acceptance \(index + 1) passed"
+            : "Blueprint acceptance \(index + 1) failed",
+          deterministic: true)
+        try await ledger.record(item)
+        if !passed {
+          throw RPCError(code: -32117, message: item.diagnosticSummary)
+        }
+      }
+      if let udid = configuration.destination?.udid {
+        _ = await captureStableScreenshot(
+          .init(id: nil, method: "screenshot.capture"), udid: udid)
+      }
+      let report = await ledger.verify(
+        .init(
+          codeChanged: configuration.intent.allowsSourceWrites, uiChanged: true,
+          testsChanged: false, criterionIDs: criterionIDs))
+      journey.status = report.status == .verified ? .passed : .failed
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(
+        .journeyFinished,
+        message: journey.status == .passed
+          ? "Blueprint flow verified." : report.missing.joined(separator: "; "),
+        journeyID: journey.id)
+      var result = try jsonValue(journey)
+      if case .object(var object) = result {
+        object["blueprintID"] = .string(flow.id)
+        object["verification"] = try jsonValue(report)
+        object["message"] = .string(
+          journey.status == .passed
+            ? "Blueprint flow \(flow.title) passed." : "Blueprint flow needs attention.")
+        result = .object(object)
+      }
+      return success(request.id, result)
+    } catch let error as RPCError {
+      journey.status = .failed
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(.journeyFinished, message: error.message, journeyID: journey.id)
+      return failure(request.id, error.code, error.message)
+    } catch {
+      journey.status = .failed
+      activeJourney = journey
+      return failure(request.id, -32118, error.localizedDescription)
+    }
+  }
+
+  private func executeBlueprintSteps(
+    _ steps: [BlueprintStep], blueprint: InteractionBlueprint,
+    parameters: [String: JSONValue], journey: inout JourneyRecord
+  ) async throws {
+    for declared in steps {
+      guard !sessionStoppedByHost, !Task.isCancelled else {
+        throw RPCError(code: -32097, message: "The blueprint flow was stopped")
+      }
+      if declared.kind == .repeatUntil {
+        guard let until = declared.until, let nested = declared.steps,
+          let maximum = declared.maximumIterations
+        else { throw RPCError(code: -32111, message: "Invalid repeat step \(declared.id)") }
+        var completed = false
+        for _ in 0..<maximum {
+          let elements = try await currentBlueprintElements()
+          if await blueprintPredicatePasses(until, elements: elements, blueprint: blueprint) {
+            completed = true
+            break
+          }
+          try await executeBlueprintSteps(
+            nested, blueprint: blueprint, parameters: parameters, journey: &journey)
+        }
+        if !completed {
+          let elements = try await currentBlueprintElements()
+          completed = await blueprintPredicatePasses(
+            until, elements: elements, blueprint: blueprint)
+        }
+        let step = JourneyStep(id: declared.id, title: declared.title)
+        journey.steps.append(
+          .init(
+            step: step, status: completed ? .passed : .failed,
+            detail: completed ? "Repeat condition reached." : "Repeat budget exhausted."))
+        activeJourney = journey
+        if !completed {
+          throw RPCError(code: -32119, message: "Repeat step \(declared.id) exhausted its budget")
+        }
+        continue
+      }
+
+      var result: JourneyStepResult
+      switch declared.kind {
+      case .invoke:
+        guard let capabilityID = declared.capability,
+          let capability = blueprint.capabilities?.first(where: { $0.id == capabilityID })
+        else { throw RPCError(code: -32112, message: "Unknown blueprint capability") }
+        result = try await executeBlueprintCapability(
+          declared, capability: capability, blueprint: blueprint, parameters: parameters,
+          journeyID: journey.id)
+      case .assert:
+        guard let predicate = declared.predicate else {
+          throw RPCError(code: -32111, message: "Assertion requires a predicate")
+        }
+        let elements = try await currentBlueprintElements()
+        let passed = await blueprintPredicatePasses(
+          predicate, elements: elements, blueprint: blueprint)
+        let criterionID = "blueprint.\(declared.id)"
+        let item = Evidence(
+          kind: .uiAssertion, status: passed ? .passed : .failed,
+          taskGeneration: await ledger.generation, criterionID: criterionID,
+          destinationUDID: sessionConfiguration?.destination?.udid,
+          diagnosticSummary: passed ? "\(declared.title) passed" : "\(declared.title) failed",
+          deterministic: true)
+        try await ledger.record(item)
+        result = .init(
+          step: .init(id: declared.id, title: declared.title, criterionID: criterionID),
+          status: passed ? .passed : .failed, detail: item.diagnosticSummary,
+          evidenceIDs: [item.id])
+      case .navigate:
+        let elements = try await currentBlueprintElements()
+        let currentRoute = blueprintRoute(in: elements, blueprint: blueprint)?.id
+        let targetRoute = declared.route
+        var reached = currentRoute == targetRoute
+        if !reached, let currentRoute, let targetRoute,
+          let path = blueprintNavigationPath(
+            from: currentRoute, to: targetRoute, blueprint: blueprint)
+        {
+          for (index, capability) in path.enumerated() {
+            let navigationStep = BlueprintStep(
+              id: "\(declared.id).\(index + 1)", title: capability.title, kind: .invoke,
+              capability: capability.id)
+            let navigationResult = try await executeBlueprintCapability(
+              navigationStep, capability: capability, blueprint: blueprint,
+              parameters: parameters, journeyID: journey.id)
+            guard navigationResult.status == .passed else { break }
+          }
+          let navigated = try await currentBlueprintElements()
+          reached = blueprintRoute(in: navigated, blueprint: blueprint)?.id == targetRoute
+        }
+        result = .init(
+          step: .init(id: declared.id, title: declared.title),
+          status: reached ? .passed : .failed,
+          detail: reached
+            ? "Route reached."
+            : "No declared transition path reached route \(targetRoute ?? "unknown").")
+      case .repeatUntil: continue
+      }
+      journey.steps.removeAll { $0.id == result.id }
+      journey.steps.append(result)
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(
+        .journeyStepFinished, message: result.detail, journeyID: journey.id,
+        stepID: declared.id)
+      if result.status == .failed {
+        throw RPCError(code: -32120, message: result.detail)
+      }
+    }
+  }
+
+  private func executeBlueprintCapability(
+    _ declared: BlueprintStep, capability: BlueprintCapability,
+    blueprint: InteractionBlueprint, parameters: [String: JSONValue], journeyID: UUID
+  ) async throws -> JourneyStepResult {
+    if capability.risk == .destructive || capability.risk == .external {
+      throw RPCError(
+        code: -32123,
+        message:
+          "Capability \(capability.id) is \(capability.risk?.rawValue ?? "restricted") and requires explicit user approval in Operate. Agents cannot self-approve it."
+      )
+    }
+    let elements = try await currentBlueprintElements()
+    if let expectedRoute = capability.route,
+      blueprintRoute(in: elements, blueprint: blueprint)?.id != expectedRoute
+    {
+      throw RPCError(
+        code: -32121,
+        message: "Capability \(capability.id) is only valid on route \(expectedRoute)")
+    }
+    let matches = blueprintMatches(capability.selector, in: elements)
+    let selected: UIElement?
+    if let index = capability.selector.index, matches.indices.contains(index) {
+      selected = matches[index]
+    } else {
+      selected = matches.count == 1 ? matches[0] : nil
+    }
+    guard let selected else {
+      throw RPCError(
+        code: -32121,
+        message: matches.isEmpty
+          ? "No current control matches capability \(capability.id)"
+          : "Capability \(capability.id) is ambiguous; add a relational selector or index")
+    }
+    let fingerprint = ScreenFingerprint.make(elements: elements, modal: false, navigationTitle: nil)
+    let actionID = UIActionCatalog.actionID(
+      fingerprint: fingerprint, childPath: selected.childPath)
+    let resolvedArguments = try resolveBlueprintInputs(
+      declared.arguments ?? [:], parameters: parameters)
+    let unknownArguments = resolvedArguments.keys.sorted().filter {
+      capability.parameters?[$0] == nil
+    }
+    if let first = unknownArguments.first {
+      throw RPCError(
+        code: -32113,
+        message: "Capability \(capability.id) does not declare argument \(first)")
+    }
+    for (name, parameter) in capability.parameters ?? [:] {
+      if parameter.required == true, resolvedArguments[name] == nil {
+        throw RPCError(
+          code: -32113, message: "Capability \(capability.id) requires argument \(name)")
+      }
+      guard let value = resolvedArguments[name] else { continue }
+      if !blueprintParameterValue(value, satisfies: parameter) {
+        throw RPCError(
+          code: -32113,
+          message: "Capability argument \(name) does not satisfy type \(parameter.type)")
+      }
+      if parameter.sensitive == true, declared.arguments?[name]?.secret == nil {
+        throw RPCError(
+          code: -32114,
+          message: "Sensitive capability argument \(name) must reference a protected secret")
+      }
+    }
+    let primitive = blueprintPrimitiveAction(capability.action)
+    let performed = await performBlueprintAction(
+      action: primitive, arguments: resolvedArguments, selected: selected, before: elements,
+      context: try await automationContext(.init()))
+    if let error = performed.error { throw error }
+    let passed = performed.result?["actionSucceeded"]?.boolValue == true
+    var detail = performed.result?["message"]?.stringValue ?? declared.title
+    if passed, let expected = declared.expect, !expected.isEmpty {
+      let after: [UIElement]
+      if let value = performed.result?["elements"], let decoded: [UIElement] = try? decode(value) {
+        after = decoded
+      } else {
+        after = try await currentBlueprintElements()
+      }
+      if !(await blueprintPredicatesPass(expected, elements: after, blueprint: blueprint)) {
+        detail = "\(declared.title) ran, but its expected state was not reached."
+        return .init(
+          step: .init(
+            id: declared.id, title: declared.title, actionID: actionID, action: primitive),
+          status: .failed, detail: detail,
+          evidenceIDs: uuidValues(performed.result?["evidenceIDs"]))
+      }
+    }
+    return .init(
+      step: .init(
+        id: declared.id, title: declared.title, actionID: actionID, action: primitive),
+      status: passed ? .passed : .failed, detail: detail,
+      evidenceIDs: uuidValues(performed.result?["evidenceIDs"]))
+  }
+
+  private func performBlueprintAction(
+    action: String, arguments: [String: JSONValue], selected: UIElement,
+    before: [UIElement],
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight)
+  ) async -> RPCEnvelope {
+    do {
+      if action == "type" || action == "clear" {
+        let text = arguments["text"]?.stringValue ?? arguments["value"]?.stringValue
+        if action == "type", text == nil {
+          return failure(nil, -32602, "Blueprint type action requires a text argument")
+        }
+        if let xpath = selected.xpath {
+          try await wda.performXPath(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            xpath: xpath, action: action, text: text, preflight: context.preflight)
+        } else {
+          try await wda.perform(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            identifier: selected.identifier, label: selected.label, type: selected.type,
+            action: action, text: text, preflight: context.preflight)
+        }
+      } else {
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: selected.frame, action: action, arguments: arguments,
+          preflight: context.preflight)
+      }
+
+      let after = try await settledSnapshot(context: context, baseline: before)
+      let beforeFingerprint = ScreenFingerprint.make(
+        elements: before, modal: false, navigationTitle: nil)
+      let afterFingerprint = ScreenFingerprint.make(
+        elements: after, modal: false, navigationTitle: nil)
+      let stateChanged =
+        UIInteractionStateFingerprint.make(elements: before)
+        != UIInteractionStateFingerprint.make(elements: after)
+      let title = selected.label ?? selected.identifier ?? selected.type
+      let diagnostic =
+        stateChanged
+        ? "Blueprint-resolved \(action) on \(title)"
+        : "\(title) accepted \(action), but the app exposed no observable state change"
+      let item = Evidence(
+        kind: .uiAction, status: stateChanged ? .passed : .failed,
+        taskGeneration: await ledger.generation, destinationUDID: context.udid,
+        diagnosticSummary: diagnostic, deterministic: true)
+      try await ledger.record(item)
+      if stateChanged {
+        _ = await appGraph.observe(
+          from: beforeFingerprint, to: afterFingerprint,
+          selector: .hierarchyPath(selected.xpath ?? selected.childPath),
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+      }
+      let actions = currentCapabilities(elements: after, fingerprint: afterFingerprint)
+      await appGraph.observeScreen(afterFingerprint, actions: actions)
+      await persistAppGraph()
+      emit(
+        .uiAction, message: diagnostic, journeyID: activeJourney?.id,
+        destinationUDID: context.udid)
+      return success(
+        nil,
+        .object([
+          "actionSucceeded": .bool(stateChanged), "stateChanged": .bool(stateChanged),
+          "screenChanged": .bool(beforeFingerprint != afterFingerprint),
+          "beforeFingerprint": try jsonValue(beforeFingerprint),
+          "afterFingerprint": try jsonValue(afterFingerprint),
+          "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: after)),
+          "message": .string(diagnostic),
+        ]))
+    } catch let error as RPCError {
+      return failure(nil, error.code, error.message)
+    } catch {
+      return failure(nil, -32077, error.localizedDescription)
+    }
+  }
+
+  private func currentBlueprintElements() async throws -> [UIElement] {
+    let snapshot = await uiSnapshot(.init(id: nil, method: "ui.snapshot"))
+    if let error = snapshot.error { throw error }
+    guard let value = snapshot.result?["elements"] else { return [] }
+    return try decode(value)
+  }
+
+  private func blueprintRoute(
+    in elements: [UIElement], blueprint: InteractionBlueprint
+  ) -> BlueprintRoute? {
+    (blueprint.routes ?? []).first { route in
+      route.match.allSatisfy {
+        blueprintPredicatePassesSynchronously($0, elements: elements, blueprint: blueprint)
+      }
+    }
+  }
+
+  private func blueprintNavigationPath(
+    from source: String, to destination: String, blueprint: InteractionBlueprint
+  ) -> [BlueprintCapability]? {
+    guard source != destination else { return [] }
+    let edges = (blueprint.capabilities ?? []).filter {
+      $0.route != nil && $0.resultsIn != nil
+        && $0.risk != .destructive && $0.risk != .external
+    }
+    var queue: [(route: String, path: [BlueprintCapability])] = [(source, [])]
+    var visited: Set<String> = [source]
+    while !queue.isEmpty {
+      let current = queue.removeFirst()
+      for capability in edges where capability.route == current.route {
+        guard let next = capability.resultsIn, visited.insert(next).inserted else { continue }
+        let path = current.path + [capability]
+        if next == destination { return path }
+        queue.append((next, path))
+      }
+    }
+    return nil
+  }
+
+  private func blueprintPredicatesPass(
+    _ predicates: [BlueprintPredicate], elements: [UIElement], blueprint: InteractionBlueprint
+  ) async -> Bool {
+    for predicate in predicates {
+      if !(await blueprintPredicatePasses(predicate, elements: elements, blueprint: blueprint)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  private func blueprintPredicatePasses(
+    _ predicate: BlueprintPredicate, elements: [UIElement], blueprint: InteractionBlueprint
+  ) async -> Bool {
+    if predicate.kind == .noCrash {
+      let generation = await ledger.generation
+      return !(await ledger.allEvidence()).contains {
+        $0.taskGeneration == generation && $0.kind == .runtimeLog && $0.status == .failed
+          && !$0.acknowledged
+      }
+    }
+    return blueprintPredicatePassesSynchronously(
+      predicate, elements: elements, blueprint: blueprint)
+  }
+
+  private func blueprintPredicatePassesSynchronously(
+    _ predicate: BlueprintPredicate, elements: [UIElement], blueprint: InteractionBlueprint
+  ) -> Bool {
+    switch predicate.kind {
+    case .route:
+      guard let routeID = predicate.route,
+        let route = blueprint.routes?.first(where: { $0.id == routeID })
+      else { return false }
+      return route.match.allSatisfy {
+        blueprintPredicatePassesSynchronously($0, elements: elements, blueprint: blueprint)
+      }
+    case .visible:
+      return predicate.selector.map { !blueprintMatches($0, in: elements).isEmpty } ?? false
+    case .absent:
+      return predicate.selector.map { blueprintMatches($0, in: elements).isEmpty } ?? false
+    case .enabled:
+      return predicate.selector.map { blueprintMatches($0, in: elements).contains { $0.enabled } }
+        ?? false
+    case .selected:
+      return predicate.selector.map { blueprintMatches($0, in: elements).contains { $0.selected } }
+        ?? false
+    case .value:
+      return predicate.selector.map { selector in
+        blueprintMatches(selector, in: elements).contains { $0.value == predicate.equals }
+      } ?? false
+    case .text:
+      guard let selector = predicate.selector, let pattern = predicate.matches,
+        let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+      else { return false }
+      return blueprintMatches(selector, in: elements).contains { element in
+        let text = element.label ?? element.value ?? ""
+        return expression.firstMatch(
+          in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
+      }
+    case .progressComplete:
+      return UIFlowProgressDetector.detect(in: elements)?.isComplete == true
+    case .appIdle:
+      return true  // uiSnapshot is captured only after the host's stability boundary.
+    case .noCrash:
+      return true  // The asynchronous ledger check is performed by blueprintPredicatePasses.
+    }
+  }
+
+  private func blueprintMatches(
+    _ selector: BlueprintSelector, in elements: [UIElement]
+  ) -> [UIElement] {
+    var matches = elements.filter { element in
+      (selector.identifier == nil || element.identifier == selector.identifier)
+        && (selector.role == nil || element.type == selector.role)
+        && (selector.name == nil
+          || element.label == selector.name || element.identifier == selector.name)
+        && (selector.text == nil
+          || element.label == selector.text || element.value == selector.text)
+        && element.visible != false
+    }
+    if let anchor = selector.above {
+      let anchors = blueprintAnchor(anchor, elements: elements)
+      matches = matches.filter { candidate in
+        anchors.contains { candidate.frame.y < $0.frame.y }
+      }
+    }
+    if let anchor = selector.below {
+      let anchors = blueprintAnchor(anchor, elements: elements)
+      matches = matches.filter { candidate in
+        anchors.contains { candidate.frame.y > $0.frame.y }
+      }
+    }
+    if let ancestor = selector.descendantOf {
+      let paths = blueprintAnchor(ancestor, elements: elements).map(\.childPath)
+      matches = matches.filter { candidate in
+        paths.contains { candidate.childPath.hasPrefix($0 + ".") }
+      }
+    }
+    return matches.sorted {
+      if $0.frame.y == $1.frame.y { return $0.frame.x < $1.frame.x }
+      return $0.frame.y < $1.frame.y
+    }
+  }
+
+  private func blueprintAnchor(_ value: String, elements: [UIElement]) -> [UIElement] {
+    elements.filter { $0.identifier == value || $0.label == value || $0.value == value }
+  }
+
+  private func blueprintPrimitiveAction(_ action: BlueprintActionKind) -> String {
+    switch action {
+    case .tap, .toggle, .select, .dismiss, .back: "tap"
+    case .type: "type"
+    case .clear: "clear"
+    case .scrollUp: "scrollUp"
+    case .scrollDown: "scrollDown"
+    case .doubleTap: "doubleTap"
+    case .longPress: "longPress"
+    case .swipe: "swipe"
+    case .drag: "drag"
+    case .setSlider: "setSlider"
+    }
+  }
+
+  private func resolveBlueprintInputs(
+    _ inputs: [String: BlueprintInput], parameters: [String: JSONValue]
+  ) throws -> [String: JSONValue] {
+    var resolved: [String: JSONValue] = [:]
+    for (name, input) in inputs {
+      let sources = [input.literal != nil, input.parameter != nil, input.secret != nil].filter {
+        $0
+      }
+      guard sources.count == 1 else {
+        throw RPCError(
+          code: -32111,
+          message:
+            "Blueprint input \(name) must declare exactly one of literal, parameter, or secret")
+      }
+      if let literal = input.literal { resolved[name] = literal }
+      if let parameter = input.parameter {
+        guard let value = parameters[parameter] else {
+          throw RPCError(code: -32113, message: "Missing flow parameter \(parameter)")
+        }
+        resolved[name] = value
+      }
+      if let secret = input.secret {
+        guard let value = blueprintSecret(secret) else {
+          throw RPCError(code: -32114, message: "Missing protected secret \(secret)")
+        }
+        resolved[name] = .string(value)
+      }
+    }
+    return resolved
+  }
+
+  private func blueprintParameterValue(
+    _ value: JSONValue, satisfies parameter: BlueprintParameter
+  ) -> Bool {
+    switch parameter.type {
+    case "string": return value.stringValue != nil
+    case "number": return value.numberValue != nil
+    case "boolean": return value.boolValue != nil
+    case "enum":
+      guard let value = value.stringValue else { return false }
+      return parameter.values?.contains(value) == true
+    default: return false
+    }
+  }
+
+  private func blueprintSecret(_ name: String) -> String? {
+    if let reference = projectConfiguration?.secrets?.first(where: {
+      $0.environmentKey == name
+    }), let value = BlueprintSecretStore.read(account: reference.keychainAccount) {
+      return value
+    }
+    let key =
+      "OPERATE_SECRET_"
+      + name.uppercased().map { character in
+        character.isLetter || character.isNumber ? character : "_"
+      }
+    return ProcessInfo.processInfo.environment[String(key)]
   }
 
   private func runJourney(_ request: RPCEnvelope) async -> RPCEnvelope {

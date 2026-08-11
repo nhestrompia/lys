@@ -912,7 +912,7 @@ public final class AppModel: ObservableObject {
       : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
     let journeyPolicy =
       intent.requiresRunningApp
-      ? "Call journey.run first with the user's goal and no steps. It attaches to the compatible current app and returns currentUI.actions. Use only exact actionID and advertised action values—never invent an action, label, role, selector, or coordinate. Submit one interaction per journey.run call, read the refreshed actions, and continue the same journeyID. Visibility assertions omit action and set assertVisible=true. If currentUI.progress is present, continue through every item and do not complete until the terminal result removes it or explicitly reports completion. A rejected step is recoverable: read refreshed actions and retry. Call complete=true only after the whole requested flow and current assertions pass. Never start, stop, install, terminate, or rebuild app infrastructure yourself."
+      ? "Call app.describe and flow.list first. If flow.list returns a matching declared flow, call flow.run once with its exact blueprintID and required parameters; the host owns authentication, every interaction, loops, assertions, evidence, and completion. Otherwise call flow.run with the user's goal, then use only exact capability IDs and advertised actions returned by the host through flow.step. Re-read app.describe after state changes, continue all reported progress to a terminal state, and call flow.finish for host validation. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
     return """
       \(prompt)
@@ -2149,7 +2149,7 @@ public final class AppModel: ObservableObject {
     guard activeTaskIntent?.kind == .verifyCurrentApp, !agentStopRequested else { return }
     for attempt in 1...2 {
       guard !agentStopRequested else { return }
-      let value = try? await runtime.request(method: "journey.status")
+      let value = try? await runtime.request(method: "flow.status")
       let journey: JourneyRecord? = value.flatMap { try? decodeRuntimeValue($0) }
       if let journey {
         activeJourney = journey
@@ -2168,7 +2168,7 @@ public final class AppModel: ObservableObject {
           state: .warning))
       status = "Agent continuing incomplete test"
       let continuation = """
-        The host has not accepted completion. Continue the existing app journey now. Read the latest currentUI.actions, use only advertised action IDs and verbs, and recover any failed step with a new stable step ID. An assertion has no action and uses assertVisible=true. If progress such as “1 of 10” is present, exercise every remaining item and reach the terminal result screen. Do not stop at an intermediate screen. Finish with complete=true only after host verification passes.
+        The host has not accepted completion. Read flow.status and app.describe, continue the existing flow using only exact capability IDs and advertised actions, and recover any rejected step from the refreshed app description. If progress such as “1 of 10” is present, exercise every remaining item and reach the terminal result screen. Do not stop at an intermediate screen. Call flow.finish only at the terminal state, then call evidence.summary.
         """
       let result = try await client.request(
         method: "session/prompt",
@@ -2181,7 +2181,7 @@ public final class AppModel: ObservableObject {
           time: Self.now(), title: "Recovery turn finished",
           detail: "Attempt \(attempt) · stop reason: \(reason)", state: .complete))
     }
-    guard let value = try? await runtime.request(method: "journey.status"),
+    guard let value = try? await runtime.request(method: "flow.status"),
       let journey: JourneyRecord = try? decodeRuntimeValue(value)
     else {
       throw RPCError(
@@ -2200,7 +2200,7 @@ public final class AppModel: ObservableObject {
 
   private func createTaskSummary(stopped: Bool = false) async {
     await refreshEvidence()
-    if let value = try? await runtime.request(method: "journey.status"),
+    if let value = try? await runtime.request(method: "flow.status"),
       let journey: JourneyRecord = try? decodeRuntimeValue(value)
     {
       activeJourney = journey
@@ -2794,9 +2794,13 @@ public final class AppModel: ObservableObject {
 
   private static let runtimeToolTitles: [String: String] = [
     "workspace.describe": "Inspecting the task workspace",
-    "journey.run": "Running the app journey",
-    "journey.status": "Checking the app journey",
-    "journey.cancel": "Cancelling the app journey",
+    "app.describe": "Mapping the current app",
+    "flow.list": "Finding declared app flows",
+    "flow.run": "Running the app flow",
+    "flow.step": "Interacting with the app",
+    "flow.finish": "Validating the completed flow",
+    "flow.status": "Checking the app flow",
+    "flow.stop": "Stopping the app flow",
     "build.run": "Building the app",
     "build.cancel": "Stopping the build",
     "test.list": "Finding tests",
@@ -2819,15 +2823,13 @@ public final class AppModel: ObservableObject {
     "ui.navigate": "Navigating the app",
     "screenshot.capture": "Capturing a screenshot",
     "logs.query": "Checking app logs",
-    "verification.status": "Checking verification",
-    "verification.submit": "Submitting verification",
+    "evidence.summary": "Summarizing test evidence",
   ]
 
   private static let routineTestingTools: Set<String> = [
-    "workspace.describe", "journey.run", "journey.status", "journey.cancel", "build.run",
-    "test.list", "test.run", "ui.snapshot", "ui.actions", "ui.find", "ui.perform", "ui.wait",
-    "ui.assert", "ui.navigate",
-    "screenshot.capture", "logs.query", "verification.status", "verification.submit",
+    "workspace.describe", "app.describe", "flow.list", "flow.run", "flow.step", "flow.finish",
+    "flow.status", "flow.stop", "build.run", "test.list", "test.run", "screenshot.capture",
+    "logs.query", "evidence.summary",
   ]
 
   private func startRuntime(workspace: URL) async throws {
@@ -2905,7 +2907,7 @@ public final class AppModel: ObservableObject {
       await refreshEvidence()
     case .journeyStarted, .journeyReady, .journeyStepStarted, .journeyStepFinished,
       .journeyFinished:
-      if let value = try? await runtime.request(method: "journey.status"),
+      if let value = try? await runtime.request(method: "flow.status"),
         let record: JourneyRecord = try? decodeRuntimeValue(value)
       {
         activeJourney = record

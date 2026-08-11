@@ -138,7 +138,7 @@ public actor WDAController {
 
   public func performFrameAction(
     udid: String, runtime: String, bundleID: String, frame: ElementFrame, action: String,
-    preflight: ToolchainPreflight
+    arguments: [String: JSONValue] = [:], preflight: ToolchainPreflight
   ) async throws {
     try await ensureSession(
       udid: udid, runtime: runtime, bundleID: bundleID, preflight: preflight)
@@ -160,9 +160,87 @@ public actor WDAController {
           "toX": centerX, "toY": action == "scrollUp" ? upperY : lowerY,
           "duration": 0.35,
         ])
+    case "doubleTap":
+      for _ in 0..<2 {
+        _ = try await request(
+          method: "POST", path: "/session/\(sessionID)/wda/tap",
+          body: ["x": centerX, "y": centerY])
+        try await Task.sleep(for: .milliseconds(80))
+      }
+    case "longPress":
+      let duration = min(max(arguments["duration"]?.numberValue ?? 0.8, 0.2), 5)
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/wda/dragfromtoforduration",
+        body: [
+          "fromX": centerX, "fromY": centerY, "toX": centerX, "toY": centerY,
+          "duration": duration,
+        ])
+    case "swipe":
+      let direction = arguments["direction"]?.stringValue ?? "up"
+      let points = frameSwipePoints(frame: frame, direction: direction)
+      let duration = boundedDuration(arguments["durationMS"]?.numberValue)
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/wda/dragfromtoforduration",
+        body: [
+          "fromX": points.fromX, "fromY": points.fromY,
+          "toX": points.toX, "toY": points.toY, "duration": duration,
+        ])
+    case "drag":
+      guard let fromX = arguments["fromX"]?.numberValue,
+        let fromY = arguments["fromY"]?.numberValue,
+        let toX = arguments["toX"]?.numberValue,
+        let toY = arguments["toY"]?.numberValue
+      else {
+        throw RPCError(
+          code: -32602, message: "drag requires fromX, fromY, toX, and toY fractions")
+      }
+      let start = point(in: frame, x: fromX, y: fromY)
+      let end = point(in: frame, x: toX, y: toY)
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/wda/dragfromtoforduration",
+        body: [
+          "fromX": start.x, "fromY": start.y, "toX": end.x, "toY": end.y,
+          "duration": boundedDuration(arguments["durationMS"]?.numberValue),
+        ])
+    case "setSlider":
+      guard let value = arguments["value"]?.numberValue else {
+        throw RPCError(code: -32602, message: "setSlider requires a value from 0 through 1")
+      }
+      let target = point(in: frame, x: value, y: 0.5)
+      _ = try await request(
+        method: "POST", path: "/session/\(sessionID)/wda/tap",
+        body: ["x": target.x, "y": target.y])
     default:
       throw RPCError(code: -32602, message: "The resolved frame does not support \(action)")
     }
+  }
+
+  private func point(in frame: ElementFrame, x: Double, y: Double) -> (x: Double, y: Double) {
+    let normalizedX = min(max(x, 0), 1)
+    let normalizedY = min(max(y, 0), 1)
+    return (
+      frame.x + frame.width * normalizedX,
+      frame.y + frame.height * normalizedY
+    )
+  }
+
+  private func boundedDuration(_ milliseconds: Double?) -> Double {
+    min(max(milliseconds ?? 350, 80), 2_000) / 1_000
+  }
+
+  private func frameSwipePoints(
+    frame: ElementFrame, direction: String
+  ) -> (fromX: Double, fromY: Double, toX: Double, toY: Double) {
+    let fractions: (Double, Double, Double, Double)
+    switch direction.lowercased() {
+    case "down": fractions = (0.5, 0.25, 0.5, 0.75)
+    case "left": fractions = (0.75, 0.5, 0.25, 0.5)
+    case "right": fractions = (0.25, 0.5, 0.75, 0.5)
+    default: fractions = (0.5, 0.75, 0.5, 0.25)
+    }
+    let start = point(in: frame, x: fractions.0, y: fractions.1)
+    let end = point(in: frame, x: fractions.2, y: fractions.3)
+    return (start.x, start.y, end.x, end.y)
   }
 
   public func performCoordinateTap(

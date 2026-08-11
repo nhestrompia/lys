@@ -43,84 +43,71 @@ public enum AgentRuntimeToolCatalog {
         "Inspect the host-selected workspace and testing policy. Call this instead of searching for Xcode project metadata.",
         properties: [:], readOnly: true),
       tool(
-        "journey.run",
-        "Start or continue a recoverable host-owned app-testing journey. Call first with only goal. Then choose exact opaque IDs from currentUI.actions and submit at most one screen-changing interaction per call so the next action catalog is fresh. Never invent labels, roles, selectors, or coordinates. A rejected action refreshes the catalog without ending the journey.",
+        "app.describe",
+        "Read the current logical route and executable capabilities. Operate merges an optional repository blueprint with automatically observed accessibility and visual state.",
+        properties: [:], readOnly: true,
+        output: object(
+          [
+            "blueprint": boolean("Whether a repository blueprint was loaded"),
+            "currentRoute": nullableString("Current stable route ID when known"),
+            "routes": array(items: openObject()),
+            "capabilities": array(items: openObject()),
+            "progress": openValue(), "stateVersion": openValue(),
+            "message": string("Short host explanation"),
+          ], required: ["blueprint", "routes", "capabilities", "message"])),
+      tool(
+        "flow.list",
+        "List repository-declared flows. An empty list means Operate will discover the requested flow from the live app without requiring code changes.",
+        properties: [:], readOnly: true,
+        output: object(
+          [
+            "flows": array(items: openObject()),
+            "blueprintAvailable": boolean("Whether a blueprint exists"),
+            "message": string("Short host explanation"),
+          ], required: ["flows", "blueprintAvailable", "message"])),
+      tool(
+        "flow.run",
+        "Run a complete host-owned flow. Pass blueprintID to execute a declared flow including authentication, loops, and acceptance criteria. Without blueprintID, Operate starts zero-integration discovery from the current app.",
         properties: [
-          "goal": string("Natural-language user outcome to verify"),
-          "journeyID": string("ID returned by an earlier journey.run call"),
-          "complete": boolean("Finish the journey after these steps and capture final evidence"),
-          "steps": array(
-            items: object(
-              [
-                "id": string("Stable step ID"), "title": string("Short user-visible step title"),
-                "criterionID": string("Acceptance criterion ID"),
-                "actionID": string("Exact opaque ID from the latest currentUI.actions array"),
-                "selector": object([
-                  "identifier": string("Legacy accessibility identifier fallback"),
-                  "label": string("Legacy unique accessibility label fallback"),
-                  "type": string("Legacy accessibility role fallback"),
-                ]),
-                "action": string(
-                  "One action listed by the selected actionID",
-                  allowed: ["tap", "type", "clear", "scrollUp", "scrollDown"]),
-                "text": string("Text for a type action"),
-                "expectScreenChanged": boolean(
-                  "Require a different host fingerprint after the action"),
-                "assertVisible": boolean(
-                  "With no action, assert actionID is visible. Legacy action steps interpret this as expectScreenChanged."
-                ),
-              ], required: ["id", "title", "actionID"])),
-        ], required: ["goal"], readOnly: false, destructive: false, idempotent: false),
+          "goal": string("Natural-language outcome to test"),
+          "blueprintID": string("Optional exact ID returned by flow.list"),
+          "parameters": openObject(),
+        ], required: ["goal"], readOnly: false, destructive: false, idempotent: false,
+        output: openObject()),
       tool(
-        "journey.status", "Read the current testing journey and its step results.",
-        properties: ["journeyID": string("Journey ID; omit for the active journey")],
-        readOnly: true),
-      tool(
-        "journey.cancel",
-        "Cancel only the active testing journey. This does not stop the app, Simulator, or development server.",
-        properties: ["journeyID": string("Journey ID; omit for the active journey")],
-        readOnly: false, destructive: false, idempotent: true),
-      tool(
-        "ui.snapshot",
-        "Inspect the current app. Returns host-issued actions before hierarchy details; use their opaque IDs instead of creating selectors.",
-        properties: [:], readOnly: true),
-      tool(
-        "ui.actions",
-        "List every currently host-resolved tap, type, clear, and scroll capability with an opaque screen-bound actionID.",
-        properties: [:], readOnly: true),
-      tool(
-        "ui.find",
-        "Find semantic UI elements in the current app using an accessibility identifier or unique label and type.",
-        properties: ["selector": selectorSchema], required: ["selector"], readOnly: true),
-      tool(
-        "ui.perform",
-        "Perform one action using an exact actionID from the latest ui.actions response. The ID is bound to the current screen and safely becomes stale after navigation.",
+        "flow.step",
+        "Continue a zero-integration discovery flow with one exact capability from the latest app state. Declared blueprint flows do not need this tool.",
         properties: [
-          "actionID": string("Exact opaque ID returned by ui.actions"),
-          "selector": selectorSchema,
+          "flowID": string("Active flow ID"),
+          "stepID": string("Stable step name for evidence"),
+          "title": string("Short user-visible action title"),
+          "capabilityID": string("Exact capability ID returned by app.describe or flow.run"),
           "action": string(
-            "An action advertised for this actionID",
+            "Advertised primitive action",
             allowed: ["tap", "type", "clear", "scrollUp", "scrollDown"]),
           "text": string("Text for type actions"),
-        ], required: ["actionID", "action"], readOnly: false, destructive: false),
+          "expectScreenChanged": boolean("Require a logical screen change"),
+        ], required: ["flowID", "capabilityID", "action"], readOnly: false,
+        destructive: false, idempotent: false, output: openObject()),
       tool(
-        "ui.wait", "Wait with bounded automatic retry for a semantic UI selector.",
-        properties: [
-          "selector": selectorSchema, "timeoutSeconds": number("Timeout from 0.2 to 30 seconds"),
-        ], required: ["selector"], readOnly: true),
+        "flow.finish",
+        "Ask the host to validate terminal state, evidence, and acceptance criteria for a zero-integration flow.",
+        properties: ["flowID": string("Active flow ID")], required: ["flowID"],
+        readOnly: false, destructive: false, idempotent: true, output: openObject()),
       tool(
-        "ui.assert",
-        "Record deterministic evidence that a current host-issued actionID is visible.",
-        properties: [
-          "criterionID": string("Acceptance criterion ID"),
-          "actionID": string("Exact opaque ID returned by ui.actions"),
-          "selector": selectorSchema,
-        ], required: ["criterionID", "actionID"], readOnly: true),
+        "flow.status", "Read the active flow and its host-recorded step results.",
+        properties: ["flowID": string("Flow ID; omit for the active flow")], readOnly: true,
+        output: openObject()),
       tool(
-        "ui.navigate",
-        "Replay a previously observed deterministic App Graph path to a screen fingerprint.",
-        properties: ["screen": string("Destination screen fingerprint")], required: ["screen"],
-        readOnly: false, destructive: false),
+        "flow.stop",
+        "Stop only the active flow. The app, Simulator, and development server remain running.",
+        properties: ["flowID": string("Flow ID; omit for the active flow")],
+        readOnly: false, destructive: false, idempotent: true,
+        output: object(
+          [
+            "cancelled": boolean("Whether an active flow was cancelled"),
+            "message": string("Preservation status"),
+          ], required: ["cancelled", "message"])),
       tool(
         "screenshot.capture",
         "Capture stable current Simulator evidence using host-selected context.",
@@ -129,18 +116,21 @@ public enum AgentRuntimeToolCatalog {
         "logs.query", "Query bounded logs for the host-selected app.",
         properties: ["seconds": number("Lookback seconds, from 1 to 3600")], readOnly: true),
       tool(
-        "verification.status",
-        "Read host-validated evidence completeness for the active generation.",
-        properties: [:], readOnly: true),
-      tool(
-        "verification.submit", "Submit current evidence IDs for host validation.",
-        properties: ["evidenceIDs": array(items: string("Evidence UUID"))],
-        required: ["evidenceIDs"], readOnly: true),
+        "evidence.summary",
+        "Return the host-owned final status: what ran, what passed, and what remains missing.",
+        properties: [:], readOnly: true,
+        output: object(
+          [
+            "status": string("Verification status"), "flowStatus": string("Flow status"),
+            "missing": array(items: string("Missing host criterion")),
+            "evidenceCount": number("Fresh evidence item count"),
+            "message": string("Short understandable summary"),
+          ], required: ["status", "flowStatus", "missing", "evidenceCount", "message"])),
     ]
     switch kind {
     case .runTests:
       return [common[0], testListTool, testRunTool]
-        + common.filter { ["verification.status", "verification.submit"].contains($0.name) }
+        + common.filter { $0.name == "evidence.summary" }
     case .modifyAndVerify:
       return common + [buildTool, testListTool, testRunTool]
     case .verifyCurrentApp, .inspectCurrentApp, nil:
@@ -160,18 +150,10 @@ public enum AgentRuntimeToolCatalog {
     properties: ["onlyTesting": array(items: string("Optional test identifier"))],
     readOnly: true)
 
-  private static var selectorSchema: JSONValue {
-    object([
-      "identifier": string("Accessibility identifier"),
-      "label": string("Unique accessibility label"),
-      "type": string("Accessibility element type required with label"),
-    ])
-  }
-
   private static func tool(
     _ name: String, _ description: String, properties: [String: JSONValue],
     required: [String] = [], readOnly: Bool, destructive: Bool = false,
-    idempotent: Bool = false
+    idempotent: Bool = false, output: JSONValue? = nil
   ) -> AgentRuntimeToolDefinition {
     .init(
       name: name, description: description,
@@ -179,9 +161,7 @@ public enum AgentRuntimeToolCatalog {
         "type": .string("object"), "properties": .object(properties),
         "required": .array(required.map(JSONValue.string)), "additionalProperties": .bool(false),
       ]),
-      outputSchema: .object([
-        "type": .string("object"), "additionalProperties": .bool(true),
-      ]),
+      outputSchema: output ?? openObject(),
       annotations: .object([
         "title": .string(name), "readOnlyHint": .bool(readOnly),
         "destructiveHint": .bool(destructive), "idempotentHint": .bool(idempotent),
@@ -214,6 +194,19 @@ public enum AgentRuntimeToolCatalog {
       "additionalProperties": .bool(false),
     ])
   }
+  private static func nullableString(_ description: String) -> JSONValue {
+    .object([
+      "anyOf": .array([
+        .object(["type": .string("string")]),
+        .object(["type": .string("null")]),
+      ]),
+      "description": .string(description),
+    ])
+  }
+  private static func openObject() -> JSONValue {
+    .object(["type": .string("object"), "additionalProperties": .bool(true)])
+  }
+  private static func openValue() -> JSONValue { .object([:]) }
 
   private static func validate(
     _ value: JSONValue, against schema: JSONValue, path: String

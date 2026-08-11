@@ -11,13 +11,13 @@ This repository is an implementation-stage public-alpha foundation, not a finish
 - Detached Git task worktrees, dirty/untracked/approved-dependency overlays, content snapshots, SHA-256 manifests, resumable crash recovery, non-overwriting three-way merge artifacts, selected apply, and discard.
 - Absolute-path process execution with argument arrays, bounded incremental structured output, interrupt/terminate cancellation, and no shell-string interpolation.
 - Versioned JSON-RPC over a mode-0600 Unix-domain socket with per-task authentication.
-- Intent-scoped MCP bridge with strict schemas, structured results, per-task runtime credentials, and dispatch-time rejection of unadvertised lifecycle tools.
+- Intent-scoped MCP bridge with strict input/output schemas, structured results, per-task runtime credentials, and dispatch-time rejection of unadvertised lifecycle or low-level UI tools. Every model receives the same small `app.describe` / `flow.*` contract.
 - Native ACP v1 client with strict version negotiation, real session/prompt lifecycle, coalesced message streaming, human-readable tool progress, workspace-confined filesystem writes, contextual inline permissions, cancellation, and pinned-adapter discovery without reading credentials. Routine Operate-owned app-testing tools are approved once per task; commands and destructive actions still show their exact scope before approval.
 - Xcode/project/simulator/runnable-target discovery, real build/test invocations, bounded log queries, DerivedData/result-bundle paths, and safe `simctl` command construction.
 - Idempotent Simulator boot readiness and settled screenshot capture: launch previews wait for the app, then require two identical consecutive Simulator frames so SpringBoard/app-switch animations are not accepted as evidence.
 - A collapsible in-app terminal records build, Metro, and Expo-preparation commands with their working directories, live/bounded output, completion state, copy, and automatic expansion on failure.
 - Generation-aware evidence ledger, host-issued screen-bound action IDs, screen fingerprints, a capability-bearing observed App Graph, and BFS replay planning. Native controls use accessibility locators; React Native/Expo controls without reliable roles fall back to host-resolved XPath/frame actions without accepting model-authored coordinates.
-- Recoverable host-owned agent testing journeys that reuse a compatible running app, build once only when missing or stale, refresh available actions after every interaction, keep Simulator/Metro alive after a rejected step, publish live progress to Agent and App, and finish only with validated postconditions.
+- Host-owned app flows that reuse a compatible running app, build once only when missing or stale, keep Simulator/Metro alive, publish live progress, and finish only with validated postconditions. Optional `.operate/blueprint.json` contracts add logical routes, route-graph planning, capabilities, auth contexts, bounded loops, parameters, and acceptance criteria; zero-integration discovery remains available for every app.
 - Actor-isolated SQLite metadata store and file-based artifact model.
 - Versioned optional repository configuration, checksum validation, redaction, official ACP Registry agent marks, and deny-by-default compatibility manifests.
 - A promoted WebDriverAgent 16.1.3 gate for Xcode 26.6 build 17F113 and the iOS 26.5 Simulator runtime, exercised on iPhone 17e and iPhone 17 Pro with structured hierarchy, accessibility-ID tap/type, screenshot, stability waits, and loopback-only transport.
@@ -101,6 +101,12 @@ For headless visual QA, render the native workbench at its reference viewport:
 ## Configuration
 
 Repositories may add `.iosdev/config.json`; all fields are optional. Only schema version 1 is accepted. Setup commands are modeled but never enabled implicitly, and secrets are Keychain references rather than values.
+
+Repositories may also add an optional `.operate/blueprint.json` to make critical flows faster and
+fully deterministic across agent models. It requires no Operate SDK or app dependency and can be
+written by developers, generated from code, or authored by a coding agent. See
+[OPERATE_BLUEPRINT.md](OPERATE_BLUEPRINT.md) and the checked-in
+[JSON Schema](Schemas/operate-blueprint.schema.json).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [THREAT_MODEL.md](THREAT_MODEL.md), and [SECURITY.md](SECURITY.md) before extending process, archive, credential, or apply behavior.
 

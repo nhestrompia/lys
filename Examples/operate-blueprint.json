@@ -1,0 +1,165 @@
+{
+  "$schema": "../Schemas/operate-blueprint.schema.json",
+  "schemaVersion": 1,
+  "app": {
+    "bundleIdentifier": "com.example.learning",
+    "displayName": "Learning App"
+  },
+  "routes": [
+    {
+      "id": "auth.login",
+      "title": "Sign in",
+      "match": [{ "kind": "visible", "selector": { "identifier": "auth.email" } }]
+    },
+    {
+      "id": "home",
+      "title": "Home",
+      "match": [{ "kind": "visible", "selector": { "identifier": "practice.quiz" } }]
+    },
+    {
+      "id": "quiz.setup",
+      "title": "Quiz setup",
+      "match": [{ "kind": "visible", "selector": { "identifier": "quiz.start" } }]
+    },
+    {
+      "id": "quiz.question",
+      "title": "Quiz question",
+      "match": [{ "kind": "visible", "selector": { "identifier": "quiz.answer.correct" } }]
+    },
+    {
+      "id": "quiz.results",
+      "title": "Quiz results",
+      "match": [{ "kind": "visible", "selector": { "identifier": "quiz.results" } }]
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "auth.enterEmail",
+      "title": "Enter test email",
+      "route": "auth.login",
+      "action": "type",
+      "selector": { "identifier": "auth.email" },
+      "parameters": { "text": { "type": "string", "required": true, "sensitive": true } },
+      "risk": "reversible"
+    },
+    {
+      "id": "auth.enterPassword",
+      "title": "Enter test password",
+      "route": "auth.login",
+      "action": "type",
+      "selector": { "identifier": "auth.password" },
+      "parameters": { "text": { "type": "string", "required": true, "sensitive": true } },
+      "risk": "reversible"
+    },
+    {
+      "id": "auth.submit",
+      "title": "Sign in",
+      "route": "auth.login",
+      "resultsIn": "home",
+      "action": "tap",
+      "selector": { "identifier": "auth.submit" },
+      "risk": "reversible"
+    },
+    {
+      "id": "home.openQuiz",
+      "title": "Open quiz",
+      "route": "home",
+      "resultsIn": "quiz.setup",
+      "action": "tap",
+      "selector": { "identifier": "practice.quiz" },
+      "risk": "readOnly"
+    },
+    {
+      "id": "quiz.start",
+      "title": "Start quiz",
+      "route": "quiz.setup",
+      "resultsIn": "quiz.question",
+      "action": "tap",
+      "selector": { "identifier": "quiz.start" },
+      "risk": "readOnly"
+    },
+    {
+      "id": "quiz.answerCorrect",
+      "title": "Choose the correct answer",
+      "route": "quiz.question",
+      "action": "tap",
+      "selector": { "identifier": "quiz.answer.correct" },
+      "risk": "readOnly"
+    }
+  ],
+  "contexts": [
+    {
+      "id": "authenticated.testUser",
+      "title": "Authenticated test user",
+      "requiredSecrets": ["test.email", "test.password"],
+      "prepare": [
+        {
+          "id": "auth.email",
+          "title": "Fill email",
+          "kind": "invoke",
+          "capability": "auth.enterEmail",
+          "arguments": { "text": { "secret": "test.email" } }
+        },
+        {
+          "id": "auth.password",
+          "title": "Fill password",
+          "kind": "invoke",
+          "capability": "auth.enterPassword",
+          "arguments": { "text": { "secret": "test.password" } }
+        },
+        {
+          "id": "auth.submit",
+          "title": "Submit sign in",
+          "kind": "invoke",
+          "capability": "auth.submit",
+          "expect": [{ "kind": "route", "route": "home" }]
+        }
+      ],
+      "readyWhen": [{ "kind": "route", "route": "home" }]
+    }
+  ],
+  "flows": [
+    {
+      "id": "quiz.complete",
+      "title": "Complete a quiz",
+      "description": "Signs in if needed, completes every question, and verifies results.",
+      "context": "authenticated.testUser",
+      "startRoute": "home",
+      "steps": [
+        {
+          "id": "quiz.open",
+          "title": "Open quiz setup",
+          "kind": "navigate",
+          "route": "quiz.setup"
+        },
+        {
+          "id": "quiz.start",
+          "title": "Start quiz",
+          "kind": "invoke",
+          "capability": "quiz.start",
+          "expect": [{ "kind": "route", "route": "quiz.question" }]
+        },
+        {
+          "id": "quiz.questions",
+          "title": "Answer every question",
+          "kind": "repeatUntil",
+          "until": { "kind": "route", "route": "quiz.results" },
+          "maximumIterations": 20,
+          "steps": [
+            {
+              "id": "quiz.answer",
+              "title": "Answer current question",
+              "kind": "invoke",
+              "capability": "quiz.answerCorrect"
+            }
+          ]
+        }
+      ],
+      "acceptance": [
+        { "kind": "route", "route": "quiz.results" },
+        { "kind": "visible", "selector": { "identifier": "quiz.score" } },
+        { "kind": "noCrash" }
+      ]
+    }
+  ]
+}

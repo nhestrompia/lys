@@ -29,7 +29,7 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 | Capability | Status | Remaining work |
 | --- | --- | --- |
 | `iosdevd` Unix socket and per-task token | **Implemented** | Mode-0600 socket authentication is end-to-end tested manually. |
-| `iosdev-mcp` typed bridge | **Implemented** | Strict schemas and structured results are injected into authenticated ACP sessions. Tools are host-scoped by intent, and unadvertised lifecycle calls are rejected at dispatch even if an agent invents their names. |
+| `iosdev-mcp` typed bridge | **Implemented** | Strict schemas and structured results are injected into authenticated ACP sessions. Every model receives the same `app.describe` / `flow.*` surface; unadvertised lifecycle, selector, coordinate, and low-level UI calls are rejected at dispatch. |
 | Absolute executable paths and argument arrays | **Implemented** | Command construction includes metacharacter tests. |
 | Structured output streaming/cancellation | **Implemented** | Stdout/stderr stream incrementally as structured events, buffers are bounded and marked when truncated, and cancellation escalates from interrupt to termination after five seconds. |
 | Shared keyed caches | **Partial** | Incremental DerivedData exists per task. Move it to Application Support and key by repository, scheme, Xcode build, and simulator runtime. |
@@ -46,7 +46,7 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 | Simulator lifecycle/configuration | **Partial** | Listing, idempotent boot readiness, shutdown, appearance, install/launch, terminate, reset approval, a continuous in-app framebuffer, and settled evidence screenshots exist. The in-app surface owns display/input and suppresses any Simulator.app window activated by XCTest. Add orientation/status-bar RPC wiring and persisted destination profiles. |
 | Runtime logs | **Partial** | Bounded, process-filtered `simctl log show` queries are persisted as task evidence. Add long-lived supervised streaming and crash classification. |
 | Expo development server | **Implemented** | Run starts/reuses Metro from the selected monorepo package, isolates it from build cancellation, revalidates it after build and launch, and automatically restarts/relaunches after an unexpected exit. A foreign listener is preserved and the task leases ports 8082–8099. |
-| Optional `.iosdev/config.json` | **Partial** | Strict versioned decoding exists. Integrate selection, nonsecret launch values, Keychain references, disabled setup approvals, device profiles, reset policy, and timeout. |
+| Optional `.iosdev/config.json` | **Partial** | Strict versioned decoding exists and blueprint secret IDs resolve through local Keychain account references. Integrate nonsecret launch values, disabled setup approvals, device profiles, reset policy, and timeout. |
 
 ## Automation and verification
 
@@ -55,6 +55,7 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 | WDA compatibility/checksum model | **Implemented** | The exact Xcode 26.6/iOS 26.5/WDA 16.1.3 entry is promoted; all other tuples fail closed. |
 | Hierarchy normalization/action capabilities/fingerprints | **Implemented** | Native controls and accessible React Native, Flutter, and hybrid containers receive host-issued opaque action IDs; decorative nodes and non-causal wrappers do not. Accessibility locators are preferred; exact screen-bound XPath/frame resolution covers duplicate labels. Tap, type, clear, and scroll capabilities, ambiguity checks, and settled post-action state fingerprints are wired. |
 | Observed App Graph and deterministic BFS | **Implemented** | Every observed screen persists its executable action catalog; successful state-changing actions record build-keyed transitions. Semantic taps that produce no observable response receive one physical retry, then are retired for that exact UI state instead of becoming false graph edges. Snapshots persist in SQLite and safe navigation actions replay without model-authored selectors. Add a dedicated graph inspector for stale/confidence state. |
+| Interaction blueprint and flow executor | **Implemented** | Optional schema-validated `.operate/blueprint.json` files declare routes, route transitions, capabilities, parameters, authentication contexts, bounded loops, assertions, and terminal acceptance. Host BFS plans declared routes; tap/type/clear/scroll/double-tap/long-press/swipe/drag/slider actions are resolved against current controls; destructive/external actions fail closed. Opaque canvas-only apps still need accessibility semantics or a future visual adapter. |
 | Evidence generations/completion contract | **Implemented** | Integrate mutations from agent filesystem notifications and configuration changes; validate submitted evidence IDs. |
 
 ## Agent integration
@@ -64,8 +65,8 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 | Native ACP v1 JSON-RPC types/client | **Partial** | Version negotiation, session/prompt, coalesced streamed updates, filesystem requests, contextual inline permission UI, task-scoped choices, safe routine-runtime approvals, cancellation, process-exit handling, and a deterministic fake-agent suite are wired. Add terminal methods, session recovery, and authentication presentation. |
 | Adapter manager | **Partial** | Conventional path/config detection distinguishes ready, CLI-only, config-only, and missing states. Codex ACP 1.1.14 is installed in the managed root. Add signed lock verification, install UI, Node prerequisite reporting, and redacted raw logs. |
 | MCP/context injection | **Implemented** | The bridge receives the task socket/token through child environment and sessions receive the worktree, selected scheme/device, tool inventory, and completion contract. |
-| Host-owned testing lifecycle | **Implemented** | Journeys attach to the current app, continue finite flows using visible progress roles, stop on terminal verification, and reject tab-position or hidden stale text as progress. A scoped Stop Agent control preserves the app/dev server, host warnings remain inline, and deterministic Done / Worked / Lacking summaries close every task. |
-| BYOK/Keychain | **Missing** | Add ACP-advertised auth presentation and Keychain storage/injection without credential-file access. |
+| Host-owned testing lifecycle | **Implemented** | Declared flows run in one host call; zero-integration flows use exact host-issued capabilities. Both attach to the current app, preserve the runtime, enforce finite progress and terminal evidence, support scoped Stop Agent, and close with deterministic Done / Worked / Lacking summaries. |
+| BYOK and flow secrets | **Partial** | Blueprint auth contexts resolve logical secret IDs from local Keychain accounts without exposing values to agents or evidence. Add ACP-advertised BYOK presentation and in-app Keychain write/manage UI. |
 
 ## Release hardening
 
