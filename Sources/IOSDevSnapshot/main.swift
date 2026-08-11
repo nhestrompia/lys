@@ -18,8 +18,6 @@ enum IOSDevSnapshotMain {
     let model = AppModel()
     if arguments.contains("--code") {
       model.showSnapshotPage("code")
-    } else if arguments.contains("--files") {
-      model.showSnapshotPage("files")
     } else if arguments.contains("--changes") {
       model.showSnapshotPage("changes")
     } else if arguments.contains("--deploy") {
@@ -27,8 +25,14 @@ enum IOSDevSnapshotMain {
     } else if arguments.contains("--settings") {
       model.showSnapshotPage("settings")
     }
-    if arguments.contains("--evidence") {
-      model.isEvidenceWorkspaceOpen = true
+    if arguments.contains("--terminal") {
+      model.showSnapshotWorkspaceTab("terminal")
+    } else if arguments.contains("--logs") {
+      model.showSnapshotWorkspaceTab("logs")
+    } else if arguments.contains("--changes-tab") {
+      model.showSnapshotWorkspaceTab("changes")
+    } else if arguments.contains("--evidence") {
+      model.showSnapshotWorkspaceTab("evidence")
     }
     let content = WorkbenchView().environmentObject(model).frame(
       width: size.width, height: size.height

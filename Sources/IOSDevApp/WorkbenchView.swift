@@ -90,8 +90,6 @@ public struct WorkbenchView: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     case .code:
       CodeWorkspace()
-    case .files:
-      FilesWorkspace()
     case .git:
       DeployWorkspace()
     case .changes:
@@ -281,11 +279,11 @@ private struct LysToolbar: View {
           title: model.selectedDestination.map {
             "\($0.name) · \(runtimeName($0.runtime))"
           }
-            ?? "Select Simulator", width: 169)
+            ?? "Select Simulator", width: 232)
       }
       .menuStyle(.borderlessButton)
       .tint(Color(nsColor: .labelColor))
-      .frame(width: 169, height: 40)
+      .frame(width: 232, height: 40)
       .background(Studio.surface)
       .overlay {
         RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -412,85 +410,34 @@ private struct NavigationRail: View {
   @EnvironmentObject var model: AppModel
 
   var body: some View {
-    let primarySections: [PrimarySection] = [.agent, .code, .files, .git]
+    let primarySections: [PrimarySection] = [.agent, .code, .git]
     VStack(alignment: .leading, spacing: 6) {
       ForEach(primarySections) { section in
-        railButton(section, active: selectedProject.isEmpty && model.section == section)
+        railButton(section)
       }
-
-      Spacer().frame(height: 30)
-
-      Text("PROJECT")
-        .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(Studio.tertiary)
-        .padding(.leading, 22)
-        .padding(.bottom, 2)
-      railButton(.agent, title: "Overview", symbol: "rectangle.grid.2x2", active: selectedProject == "Overview")
-      railButton(.changes, title: "Changes", symbol: "arrow.triangle.branch")
-      railButton(.settings, active: model.section == .settings)
 
       Spacer(minLength: 10)
-      HStack(spacing: 16) {
-        Button {
-          model.section = .settings
-        } label: {
-          Text("U")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(Color(red: 0.42, green: 0.23, blue: 0.18))
-            .frame(width: 24, height: 24)
-            .background(Color(red: 0.96, green: 0.88, blue: 0.84))
-            .clipShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help("Open Lys settings")
-        Button {
-          model.section = .settings
-        } label: {
-          Image(systemName: "gearshape")
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(Studio.secondary)
-            .frame(width: 24, height: 24)
-        }
-        .buttonStyle(.plain)
-        .help("Settings")
-      }
-      .padding(.horizontal, 22)
+      railButton(.settings)
     }
     .padding(.top, 26)
     .padding(.bottom, 20)
     .frame(minWidth: 156, maxWidth: 156, maxHeight: .infinity, alignment: .topLeading)
     .background(Studio.surface)
-    .onChange(of: model.section) { _, newValue in
-      if newValue != .agent { selectedProject = "" }
-    }
   }
 
-  @State private var selectedProject = ""
-
-  private func railButton(
-    _ section: PrimarySection, title: String? = nil, symbol: String? = nil, active: Bool? = nil
-  ) -> some View {
-    let isSelected = active ?? (model.section == section)
+  private func railButton(_ section: PrimarySection) -> some View {
+    let isSelected = model.section == section
     return Button {
       model.section = section
-      selectedProject = title ?? ""
     } label: {
       HStack(spacing: 8) {
-        Image(systemName: symbol ?? section.symbol)
+        Image(systemName: section.symbol)
           .symbolVariant(isSelected ? .fill : .none)
           .font(.system(size: 17, weight: .regular))
           .frame(width: 24, height: 30)
-        Text(title ?? section.rawValue)
+        Text(section.rawValue)
           .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
           .fixedSize(horizontal: true, vertical: false)
-        if title == "Changes" && model.changedFileCount > 0 {
-          Text("\(model.changedFileCount)")
-            .font(.system(size: 9, weight: .semibold).monospacedDigit())
-            .foregroundStyle(Studio.secondary)
-            .frame(minWidth: 16, minHeight: 16)
-            .background(Studio.raised)
-            .clipShape(Capsule())
-        }
         Spacer(minLength: 0)
       }
       .foregroundStyle(isSelected ? Studio.accent : Studio.secondary)
@@ -502,7 +449,7 @@ private struct NavigationRail: View {
     }
     .buttonStyle(.plain)
     .padding(.leading, 15)
-    .accessibilityLabel(title ?? section.rawValue)
+    .accessibilityLabel(section.rawValue)
   }
 }
 
@@ -541,26 +488,6 @@ private struct AgentPanel: View {
               .fixedSize(horizontal: false, vertical: true)
             if !model.taskTitle.isEmpty {
               StatusBadge(title: model.status, state: badgeState)
-            }
-          }
-
-          HStack(spacing: 8) {
-            if let option = model.agentModelOption {
-              AgentConfigPicker(
-                option: option, title: "Model", value: model.agentModelLabel, symbol: "cpu")
-                .frame(maxWidth: .infinity)
-            } else {
-              AgentConfigPlaceholder(title: "Model", symbol: "cpu")
-                .frame(maxWidth: .infinity)
-            }
-            if let option = model.agentReasoningOption {
-              AgentConfigPicker(
-                option: option, title: "Reasoning", value: model.agentReasoningLabel,
-                symbol: "slider.horizontal.3")
-                .frame(maxWidth: .infinity)
-            } else {
-              AgentConfigPlaceholder(title: "Reasoning", symbol: "slider.horizontal.3")
-                .frame(maxWidth: .infinity)
             }
           }
 
@@ -660,37 +587,12 @@ private struct AgentPanel: View {
           .foregroundStyle(model.agentComposerBlocker == nil ? Studio.secondary : Studio.warning)
           .lineLimit(2)
 
-        VStack(alignment: .leading, spacing: 7) {
-          HStack {
-            Menu {
-              if model.adapters.allSatisfy({ $0.executable == nil }) {
-                Text("No ACP-ready adapters detected")
-              }
-              ForEach(model.adapters) { adapter in
-                Button(adapter.displayName) { model.selectAgentAdapter(adapter.id) }
-                  .disabled(adapter.executable == nil || model.hasAgentSession)
-              }
-            } label: {
-              Text(agentLabel)
-              .font(.system(size: 11))
-              .foregroundStyle(Studio.secondary)
-            }
-            .menuStyle(.borderlessButton)
-            Spacer()
-            Button {
-              model.section = .settings
-            } label: {
-              Image(systemName: "gearshape").frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Studio.accent)
-          }
+        AgentConfigurationBar()
 
-          Text(model.agentConfigStatusText)
-            .font(.system(size: 9.5))
-            .foregroundStyle(Studio.tertiary)
-            .lineLimit(2)
-        }
+        Text(model.agentConfigStatusText)
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.tertiary)
+          .lineLimit(2)
       }
       .padding(.horizontal, 16)
       .padding(.top, 16)
@@ -737,14 +639,6 @@ private struct AgentPanel: View {
     if model.status.contains("failed") || model.status.contains("blocked") { return .warning }
     if model.isBusy { return .active }
     return .neutral
-  }
-
-  private var agentLabel: String {
-    guard let adapter = model.adapters.first(where: { $0.id == model.selectedAdapterID }) else {
-      return "Choose ACP agent"
-    }
-    return adapter.executable == nil
-      ? "\(adapter.displayName) needs setup" : adapter.displayName
   }
 }
 
@@ -879,77 +773,323 @@ private struct JourneyStepMark: View {
   }
 }
 
-private struct AgentConfigPicker: View {
+private struct AgentConfigurationBar: View {
   @EnvironmentObject var model: AppModel
-  let option: ACPConfigOption
-  let title: String
-  let value: String
-  let symbol: String
 
   var body: some View {
-    Menu {
-      ForEach(option.options) { item in
-        Button {
-          model.setAgentConfigOption(option, value: item)
-        } label: {
-          HStack {
-            Text(item.name)
-            if isCurrent(item) {
-              Spacer()
-              Image(systemName: "checkmark")
-            }
-          }
-        }
-      }
-    } label: {
-      HStack(spacing: 6) {
-        Image(systemName: symbol)
-        Text("\(title): \(value)")
-          .font(.system(size: 10.5, weight: .medium))
-          .lineLimit(1)
-          .truncationMode(.middle)
-        Spacer(minLength: 0)
-        Image(systemName: "chevron.down")
-          .font(.system(size: 8, weight: .semibold))
-      }
-      .foregroundStyle(Studio.secondary)
-      .padding(.horizontal, 8)
-      .frame(height: 38)
-      .background(Studio.raised)
-      .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    HStack(spacing: 0) {
+      AgentModelSelector()
+        .frame(maxWidth: .infinity, alignment: .leading)
+      Divider()
+        .frame(height: 20)
+        .padding(.horizontal, 9)
+      AgentEffortSelector()
+        .fixedSize(horizontal: true, vertical: false)
     }
-    .menuStyle(.borderlessButton)
-    .help(
-      model.canChangeAgentConfigOption(option)
-        ? (option.description ?? "Choose the agent \(title.lowercased())")
-        : model.agentConfigStatusText)
-    .disabled(
-      !model.canChangeAgentConfigOption(option)
-        || (model.hasAgentSession && model.isBusy))
-  }
-
-  private func isCurrent(_ item: ACPConfigOptionValue) -> Bool {
-    option.currentValue?.stringValue == item.value
+    .frame(height: 34)
+    .accessibilityElement(children: .contain)
   }
 }
 
-private struct AgentConfigPlaceholder: View {
-  let title: String
-  let symbol: String
+private struct AgentModelSelector: View {
+  @EnvironmentObject var model: AppModel
+  @State private var isPresented = false
+  @State private var search = ""
+  @State private var browsedAdapterID = ""
 
   var body: some View {
-    HStack(spacing: 6) {
-      Image(systemName: symbol)
-      Text("\(title): Not reported")
-        .font(.system(size: 9.5, weight: .medium))
-        .foregroundStyle(Studio.tertiary)
+    Button {
+      browsedAdapterID = resolvedAdapterID
+      search = ""
+      isPresented = true
+    } label: {
+      HStack(spacing: 7) {
+        AgentMark(id: selectedAdapter?.id ?? "", size: 16)
+          .foregroundStyle(selectedAdapter?.executable == nil ? Studio.tertiary : Color.primary)
+        Text(model.agentModelOption == nil ? "Choose model" : model.agentModelLabel)
+          .font(.system(size: 11.5, weight: .medium))
+          .foregroundStyle(model.agentModelOption == nil ? Studio.secondary : Color.primary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+        Image(systemName: "chevron.down")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+      }
+      .padding(.horizontal, 3)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .frame(height: 32)
+      .contentShape(Rectangle())
     }
-    .foregroundStyle(Studio.secondary)
-    .padding(.horizontal, 8)
-    .frame(height: 38)
-    .background(Studio.raised)
-    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    .help("The selected CLI has not reported a \(title.lowercased()) yet.")
+    .buttonStyle(.plain)
+    .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+      modelBrowser
+    }
+    .help("Choose an available agent and model")
+    .accessibilityLabel("Model: \(model.agentModelLabel)")
+  }
+
+  private var modelBrowser: some View {
+    HStack(spacing: 0) {
+      providerRail
+      Divider().overlay(Studio.separator)
+      VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 9) {
+          Image(systemName: "magnifyingglass")
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Studio.secondary)
+          TextField("Search models…", text: $search)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13))
+            .disabled(browsedAdapter?.executable == nil)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        Divider().overlay(Studio.separator)
+        modelList
+      }
+    }
+    .frame(width: 410, height: 390)
+    .background(Studio.surface)
+    .onAppear {
+      browsedAdapterID = resolvedAdapterID
+    }
+  }
+
+  private var providerRail: some View {
+    VStack(spacing: 7) {
+      ForEach(model.adapters) { adapter in
+        Button {
+          browsedAdapterID = adapter.id
+          search = ""
+          if adapter.executable != nil && adapter.id != model.selectedAdapterID {
+            model.selectAgentAdapter(adapter.id)
+          }
+        } label: {
+          ZStack(alignment: .bottomTrailing) {
+            AgentMark(id: adapter.id, size: 22)
+              .foregroundStyle(providerColor(adapter))
+              .frame(width: 38, height: 38)
+              .background(browsedAdapterID == adapter.id ? Studio.accentSoft : .clear)
+              .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            Circle()
+              .fill(adapter.executable == nil ? Studio.tertiary : Studio.success)
+              .frame(width: 7, height: 7)
+              .overlay(Circle().stroke(Studio.surface, lineWidth: 1.5))
+          }
+        }
+        .buttonStyle(.plain)
+        .disabled(model.hasAgentSession && adapter.id != model.selectedAdapterID)
+        .help(providerHelp(adapter))
+        .accessibilityLabel(providerHelp(adapter))
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 12)
+    .frame(width: 60)
+    .background(Studio.raised.opacity(0.58))
+  }
+
+  @ViewBuilder private var modelList: some View {
+    if let adapter = browsedAdapter {
+      if adapter.executable == nil {
+        modelUnavailable(adapter)
+      } else if filteredModels.isEmpty {
+        VStack(spacing: 8) {
+          Image(systemName: search.isEmpty ? "cpu" : "magnifyingglass")
+            .font(.system(size: 22, weight: .light))
+            .foregroundStyle(Studio.tertiary)
+          Text(search.isEmpty ? "No models reported" : "No matching models")
+            .font(.system(size: 12, weight: .semibold))
+          Text(
+            search.isEmpty
+              ? "\(adapter.displayName) has not exposed a model list yet."
+              : "Try a different model name."
+          )
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if let option = model.agentModelOption {
+        ScrollView {
+          LazyVStack(spacing: 4) {
+            ForEach(filteredModels) { item in
+              modelRow(item, option: option, adapter: adapter)
+            }
+          }
+          .padding(10)
+        }
+        .scrollIndicators(.automatic)
+      }
+    } else {
+      VStack(spacing: 8) {
+        Image(systemName: "sparkles")
+          .font(.system(size: 22, weight: .light))
+          .foregroundStyle(Studio.tertiary)
+        Text("No agents detected")
+          .font(.system(size: 12, weight: .semibold))
+        Text("Install or configure an ACP-compatible agent to choose a model.")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 230)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+  }
+
+  private func modelRow(
+    _ item: ACPConfigOptionValue, option: ACPConfigOption, adapter: DetectedAdapter
+  ) -> some View {
+    let selected = option.currentValue?.stringValue == item.value
+    return Button {
+      model.setAgentConfigOption(option, value: item)
+      isPresented = false
+    } label: {
+      HStack(spacing: 11) {
+        AgentMark(id: adapter.id, size: 17)
+          .foregroundStyle(Studio.secondary)
+          .frame(width: 20)
+        Text(item.name)
+          .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+          .foregroundStyle(Color.primary)
+          .lineLimit(1)
+        Spacer(minLength: 8)
+        if selected {
+          Image(systemName: "checkmark")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Studio.accent)
+        }
+      }
+      .padding(.horizontal, 12)
+      .frame(height: 44)
+      .background(selected ? Studio.accentSoft : .clear)
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .disabled(!model.canChangeAgentConfigOption(option) || (model.hasAgentSession && model.isBusy))
+    .help(item.description ?? "Use \(item.name)")
+  }
+
+  private func modelUnavailable(_ adapter: DetectedAdapter) -> some View {
+    VStack(spacing: 9) {
+      AgentMark(id: adapter.id, size: 25)
+        .foregroundStyle(Studio.tertiary)
+      Text("\(adapter.displayName) unavailable")
+        .font(.system(size: 12.5, weight: .semibold))
+      Text(adapter.limitation ?? "The ACP adapter is not installed or is not available on PATH.")
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 240)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  private var selectedAdapter: DetectedAdapter? {
+    model.adapters.first { $0.id == model.selectedAdapterID }
+  }
+
+  private var browsedAdapter: DetectedAdapter? {
+    model.adapters.first { $0.id == resolvedAdapterID }
+  }
+
+  private var resolvedAdapterID: String {
+    if model.adapters.contains(where: { $0.id == browsedAdapterID }) {
+      return browsedAdapterID
+    }
+    if model.adapters.contains(where: { $0.id == model.selectedAdapterID }) {
+      return model.selectedAdapterID
+    }
+    return model.adapters.first(where: { $0.executable != nil })?.id
+      ?? model.adapters.first?.id ?? ""
+  }
+
+  private var filteredModels: [ACPConfigOptionValue] {
+    guard resolvedAdapterID == model.selectedAdapterID,
+      let values = model.agentModelOption?.options
+    else { return [] }
+    let term = search.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !term.isEmpty else { return values }
+    return values.filter {
+      $0.name.localizedCaseInsensitiveContains(term)
+        || $0.value.localizedCaseInsensitiveContains(term)
+        || ($0.description?.localizedCaseInsensitiveContains(term) ?? false)
+    }
+  }
+
+  private func providerColor(_ adapter: DetectedAdapter) -> Color {
+    if adapter.executable == nil { return Studio.tertiary }
+    return browsedAdapterID == adapter.id ? Studio.accent : Studio.secondary
+  }
+
+  private func providerHelp(_ adapter: DetectedAdapter) -> String {
+    if adapter.executable != nil { return "\(adapter.displayName) — available" }
+    return "\(adapter.displayName) — unavailable. \(adapter.limitation ?? "ACP adapter not installed.")"
+  }
+}
+
+private struct AgentEffortSelector: View {
+  @EnvironmentObject var model: AppModel
+  @State private var isPresented = false
+
+  var body: some View {
+    if let option = model.agentReasoningOption {
+      Button {
+        isPresented.toggle()
+      } label: {
+        HStack(spacing: 7) {
+          Text(model.agentReasoningLabel)
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(Color.primary)
+          Image(systemName: "chevron.down")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(Studio.secondary)
+        }
+        .padding(.horizontal, 3)
+        .frame(height: 32)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+        VStack(spacing: 2) {
+          ForEach(option.options) { item in
+            Button {
+              model.setAgentConfigOption(option, value: item)
+              isPresented = false
+            } label: {
+              HStack(spacing: 12) {
+                Text(item.name)
+                  .font(.system(size: 11.5, weight: .medium))
+                Spacer(minLength: 12)
+                if option.currentValue?.stringValue == item.value {
+                  Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Studio.accent)
+                }
+              }
+              .padding(.horizontal, 10)
+              .frame(width: 164, height: 34)
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+          }
+        }
+        .padding(6)
+        .background(Studio.surface)
+      }
+      .disabled(!model.canChangeAgentConfigOption(option) || (model.hasAgentSession && model.isBusy))
+      .help(option.description ?? "Choose reasoning effort")
+      .accessibilityLabel("Reasoning effort: \(model.agentReasoningLabel)")
+    } else {
+      Text("Effort unavailable")
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(Studio.tertiary)
+        .frame(height: 32)
+        .help("The selected agent has not reported a reasoning effort control.")
+    }
   }
 }
 
@@ -1000,8 +1140,8 @@ private struct AppStage: View {
         650,
         max(360, min(geometry.size.height - (compact ? 180 : 100), widthFittedDeviceHeight)))
       let emptyDeviceHeight = min(
-        680,
-        max(360, min(geometry.size.height * 0.64, widthFittedDeviceHeight)))
+        700,
+        max(420, min(geometry.size.height * 0.80, widthFittedDeviceHeight)))
       let deviceHeight = compact
         ? max(300, geometry.size.height - 180)
         : (emptyState ? emptyDeviceHeight : fittedDeviceHeight)
@@ -2276,18 +2416,20 @@ private struct EvidenceWorkspace: View {
         }
         Spacer(minLength: 12)
         if model.evidenceWorkspaceTab == .terminal {
-          Button("Copy Latest", action: copyLatest)
-            .buttonStyle(.plain)
-            .font(.system(size: 10.5, weight: .medium))
-            .disabled(model.terminalEntries.isEmpty)
-          Button("Clear", action: model.clearTerminal)
-            .buttonStyle(.plain)
-            .font(.system(size: 10.5, weight: .medium))
-            .disabled(model.terminalEntries.isEmpty || model.terminalEntries.contains(where: { $0.state == .running }))
+          HStack(spacing: 16) {
+            Button("Copy Latest", action: copyLatest)
+              .buttonStyle(.plain)
+              .font(.system(size: 10.5, weight: .medium))
+              .disabled(model.terminalEntries.isEmpty)
+            Button("Clear", action: model.clearTerminal)
+              .buttonStyle(.plain)
+              .font(.system(size: 10.5, weight: .medium))
+              .disabled(model.terminalEntries.isEmpty || model.terminalEntries.contains(where: { $0.state == .running }))
+          }
         }
       }
-      .padding(.horizontal, 12)
-      .frame(height: 36)
+      .padding(.horizontal, 16)
+      .frame(height: 40)
       Divider().overlay(Studio.separator)
       tabContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2310,11 +2452,13 @@ private struct EvidenceWorkspace: View {
         TerminalTranscriptView(entries: model.terminalEntries)
       }
     case .logs:
-      ScrollView {
-        LazyVStack(spacing: 0) {
-          if model.timeline.isEmpty {
-            workspaceMessage(symbol: "list.bullet.rectangle", title: "No logs yet", detail: "Run an operation to record a timeline.")
-          } else {
+      if model.timeline.isEmpty {
+        workspaceMessage(
+          symbol: "list.bullet.rectangle", title: "No logs yet",
+          detail: "Run an operation to record a timeline.")
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 0) {
             ForEach(model.timeline.suffix(8)) { item in
               HStack(alignment: .top, spacing: 12) {
                 LogStateMark(state: item.state)
@@ -2345,7 +2489,13 @@ private struct EvidenceWorkspace: View {
     case .evidence:
       evidenceContent
     case .changes:
-      changesContent
+      if model.proposedChanges.isEmpty {
+        workspaceMessage(
+          symbol: "checkmark", title: "No changes",
+          detail: "The isolated task has not produced a change set.")
+      } else {
+        changesContent
+      }
     }
   }
 
@@ -2415,28 +2565,24 @@ private struct EvidenceWorkspace: View {
   private var changesContent: some View {
     ScrollView {
       LazyVStack(spacing: 0) {
-        if model.proposedChanges.isEmpty {
-          workspaceMessage(symbol: "checkmark", title: "No changes", detail: "The isolated task has not produced a change set.")
-        } else {
-          ForEach(model.proposedChanges) { change in
-            HStack(spacing: 14) {
-              Text(change.kind.rawValue.uppercased())
-                .font(.system(size: 9, weight: .bold).monospaced())
-                .foregroundStyle(changeColor(change.kind))
-                .frame(width: 68, alignment: .leading)
-              Text(change.path)
-                .font(.system(size: 10.5).monospaced())
-                .lineLimit(1)
-              Spacer(minLength: 0)
-              if change.binary {
-                Text("Binary")
-                  .font(.system(size: 9.5))
-                  .foregroundStyle(Studio.warning)
-              }
+        ForEach(model.proposedChanges) { change in
+          HStack(spacing: 14) {
+            Text(change.kind.rawValue.uppercased())
+              .font(.system(size: 9, weight: .bold).monospaced())
+              .foregroundStyle(changeColor(change.kind))
+              .frame(width: 68, alignment: .leading)
+            Text(change.path)
+              .font(.system(size: 10.5).monospaced())
+              .lineLimit(1)
+            Spacer(minLength: 0)
+            if change.binary {
+              Text("Binary")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.warning)
             }
-            .padding(.horizontal, 18)
-            .frame(minHeight: 32)
           }
+          .padding(.horizontal, 18)
+          .frame(minHeight: 32)
         }
       }
     }
@@ -2447,19 +2593,23 @@ private struct EvidenceWorkspace: View {
       model.evidenceWorkspaceTab = tab
       if tab == .terminal { model.isTerminalExpanded = true }
     } label: {
-      VStack(spacing: 0) {
-        Text(tab.rawValue)
-          .font(.system(size: 10.5, weight: model.evidenceWorkspaceTab == tab ? .semibold : .medium))
-          .foregroundStyle(model.evidenceWorkspaceTab == tab ? Color.primary : Studio.secondary)
-          .frame(width: tabWidth(tab), height: 35)
+      Text(tab.rawValue)
+        .font(.system(size: 10.5, weight: model.evidenceWorkspaceTab == tab ? .semibold : .medium))
+        .foregroundStyle(model.evidenceWorkspaceTab == tab ? Color.primary : Studio.secondary)
+        .frame(width: tabWidth(tab), height: 40)
+        .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
         Rectangle()
           .fill(model.evidenceWorkspaceTab == tab ? Color.primary : .clear)
-          .frame(width: tab == .evidence ? 85 : 0, height: 1)
-      }
-      .frame(width: tabWidth(tab))
+          .frame(
+            width: model.evidenceWorkspaceTab == tab ? tabWidth(tab) - 18 : 0,
+            height: 2)
+        }
     }
     .buttonStyle(.plain)
+    .contentShape(Rectangle())
     .accessibilityLabel("Show \(tab.rawValue)")
+    .accessibilityValue(model.evidenceWorkspaceTab == tab ? "Selected" : "")
   }
 
   private func tabWidth(_ tab: EvidenceWorkspaceTab) -> CGFloat {
@@ -2587,11 +2737,16 @@ private struct EvidenceToggleButton: View {
       Image(systemName: model.isEvidenceWorkspaceOpen ? "chevron.down" : "chevron.up")
         .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(Studio.secondary)
-        .frame(width: 26, height: 38)
+        .frame(width: 34, height: 34)
+        .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
-    .accessibilityLabel(model.isEvidenceWorkspaceOpen ? "Close Evidence" : "Open Evidence")
-    .help(model.isEvidenceWorkspaceOpen ? "Close Evidence (⌘⇧E)" : "Open Evidence (⌘⇧E)")
+    .keyboardShortcut("e", modifiers: [.command, .shift])
+    .accessibilityLabel(
+      model.isEvidenceWorkspaceOpen ? "Close bottom workspace" : "Open bottom workspace")
+    .help(
+      model.isEvidenceWorkspaceOpen
+        ? "Close bottom workspace (⇧⌘E)" : "Open bottom workspace (⇧⌘E)")
   }
 }
 
@@ -2620,7 +2775,7 @@ private struct TaskActionBar: View {
       .buttonStyle(.plain)
       .disabled(model.activeWorktree == nil)
       Spacer()
-      HStack(spacing: 18) {
+      HStack(spacing: 10) {
         if model.activeWorktree != nil {
           Button("Discard Task", action: model.discardTask)
             .buttonStyle(.bordered)
@@ -2644,22 +2799,23 @@ private struct TaskActionBar: View {
           model.notice = "No unread notifications."
         } label: {
           Image(systemName: "bell")
-            .font(.system(size: 16, weight: .medium))
-            .frame(width: 28, height: 38)
+            .font(.system(size: 14, weight: .medium))
+            .frame(width: 34, height: 34)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(Studio.secondary)
         .help("Notifications")
+        Divider()
+          .frame(height: 18)
+          .overlay(Studio.separator)
+        EvidenceToggleButton()
       }
-      Spacer().frame(width: 24)
+      Spacer().frame(width: 4)
     }
     .padding(.horizontal, 20)
     .frame(maxHeight: .infinity)
     .background(Studio.surface)
-    .overlay(alignment: .topTrailing) {
-      EvidenceToggleButton()
-        .padding(.trailing, 80)
-    }
   }
   private func reviewAction() {
     if model.proposedChanges.isEmpty {
@@ -2752,8 +2908,11 @@ private struct DeployWorkspace: View {
               .frame(maxWidth: .infinity, minHeight: 34)
               .background(listTab == tab ? Studio.surface : .clear)
               .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+              .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
+          .frame(maxWidth: .infinity)
+          .contentShape(Rectangle())
           .accessibilityLabel("Show deploy \(tab.rawValue.lowercased())")
         }
       }
@@ -3149,85 +3308,6 @@ private struct CodeWorkspace: View {
 
   private var lineCount: Int {
     max(1, model.source.split(separator: "\n", omittingEmptySubsequences: false).count)
-  }
-}
-
-private struct FilesWorkspace: View {
-  @EnvironmentObject var model: AppModel
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 16) {
-        WorkspaceHeader(
-          symbol: "folder",
-          title: "Files",
-          detail: model.repository?.path ?? "Open a repository to inspect its structure"
-        )
-        Spacer(minLength: 0)
-        if !model.files.isEmpty {
-          Text("\(model.files.count) top-level items")
-            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-            .foregroundStyle(Studio.secondary)
-        }
-      }
-      .padding(.horizontal, 24)
-      .frame(height: 72)
-      .background(Studio.surface)
-      Divider().overlay(Studio.separator)
-
-      HStack(spacing: 0) {
-        FileBrowser().frame(width: 310)
-        Divider().overlay(Studio.separator)
-        VStack(spacing: 0) {
-          HStack(spacing: 8) {
-            Text("Repository overview")
-              .font(.system(size: 12, weight: .semibold))
-            Spacer()
-            if model.isGitRepository {
-              StatusBadge(title: model.branchName, state: .neutral)
-            }
-          }
-          .padding(.horizontal, 20)
-          .frame(height: 48)
-          .background(Studio.surface)
-          Divider().overlay(Studio.separator)
-          if model.repository == nil {
-            WorkspaceEmpty(
-              symbol: "folder.badge.plus",
-              title: "Open a repository",
-              detail: "Choose a Git repository from the toolbar to begin.",
-              actionTitle: "Open Repository…",
-              action: model.chooseRepository
-            )
-          } else {
-            VStack(alignment: .leading, spacing: 18) {
-              Text("Workspace")
-                .font(.system(size: 12, weight: .semibold))
-              VStack(alignment: .leading, spacing: 7) {
-                Label(model.repository?.lastPathComponent ?? "Repository", systemImage: "shippingbox")
-                  .font(.system(size: 14, weight: .semibold))
-                Text(model.repository?.path ?? "")
-                  .font(.system(size: 10, design: .monospaced))
-                  .foregroundStyle(Studio.secondary)
-                  .textSelection(.enabled)
-              }
-              .padding(16)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .background(Studio.surface)
-              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-              .shadow(color: .black.opacity(0.018), radius: 11, y: 4)
-              Text("Select a file in the browser to open it in Code.")
-                .font(.system(size: 11))
-                .foregroundStyle(Studio.secondary)
-            }
-            .frame(maxWidth: 620, alignment: .leading)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(28)
-          }
-        }
-      }
-    }
-    .background(Studio.backdrop)
   }
 }
 
@@ -3640,6 +3720,7 @@ private struct SettingRow<Accessory: View>: View {
 
 private struct AgentMark: View {
   let id: String
+  var size: CGFloat = 22
   var body: some View {
     if let url = Bundle.module.url(
       forResource: id, withExtension: "svg", subdirectory: "AgentIcons")
@@ -3650,7 +3731,7 @@ private struct AgentMark: View {
         .renderingMode(.template)
         .resizable()
         .scaledToFit()
-        .frame(width: 22, height: 22)
+        .frame(width: size, height: size)
         .accessibilityHidden(true)
     } else {
       Image(systemName: "sparkles").font(.system(size: 17, weight: .regular))

@@ -4,8 +4,7 @@ import SwiftUI
 
 enum PrimarySection: String, CaseIterable, Identifiable {
   case agent = "Develop"
-  case code = "Test"
-  case files = "Validate"
+  case code = "Code"
   case git = "Deploy"
   case changes = "Changes"
   case settings = "Settings"
@@ -14,8 +13,7 @@ enum PrimarySection: String, CaseIterable, Identifiable {
   var symbol: String {
     switch self {
     case .agent: "sparkles"
-    case .code: "arrow.triangle.branch"
-    case .files: "checkmark.shield"
+    case .code: "chevron.left.forwardslash.chevron.right"
     case .git: "paperplane"
     case .changes: "square.and.pencil"
     case .settings: "gearshape"
@@ -1690,11 +1688,20 @@ public final class AppModel: ObservableObject {
   public func showSnapshotPage(_ page: String) {
     switch page {
     case "code": section = .code
-    case "files": section = .files
     case "changes": section = .changes
     case "deploy": section = .git
     case "settings": section = .settings
     default: section = .agent
+    }
+  }
+
+  public func showSnapshotWorkspaceTab(_ tab: String) {
+    isEvidenceWorkspaceOpen = true
+    switch tab {
+    case "terminal": evidenceWorkspaceTab = .terminal
+    case "logs": evidenceWorkspaceTab = .logs
+    case "changes": evidenceWorkspaceTab = .changes
+    default: evidenceWorkspaceTab = .evidence
     }
   }
 

@@ -184,7 +184,7 @@ The application is a desktop-first macOS workbench with a minimum window of 1180
 
 The Agent first viewport uses a fixed 380pt intent panel, a flexible center app stage, and a fixed 420pt verification ledger. The regions sit in a 12pt gap with a 12pt outer inset. The phone preview remains horizontally centered but is top-weighted directly beneath the stage toolbar; intent and proof are adjacent context, not alternate destinations. Inside panels, recurring horizontal insets are 20–22pt, grouped rows are 64–70pt tall, and toolbars are 48–52pt tall.
 
-The rail switches between Agent, Code, Files, Git, and Settings workspaces. Agent is the primary operating surface; Code and Files retain repository context, Git owns review and conflicts, and Settings uses grouped native lists. Fixed side widths yield before the center stage does: do not compress the device preview into a thumbnail or hide verification behind a transient overlay.
+The rail switches between Develop, Code, Deploy, and Settings workspaces. Develop is the primary operating surface; Code retains repository context, Deploy owns TestFlight distribution, and Settings uses grouped native lists. Change review remains available from the persistent decision bar instead of duplicating another rail destination. Fixed side widths yield before the center stage does: do not compress the device preview into a thumbnail or hide verification behind a transient overlay.
 
 **The Center-of-Work Rule.** The running app occupies the horizontal center and starts directly beneath the stage toolbar; agent activity and evidence flank it in the same viewport.
 
