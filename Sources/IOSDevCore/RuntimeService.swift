@@ -13,6 +13,8 @@ public actor RuntimeService {
   private let devServerRunner = ProcessRunner()
   private let ledger = EvidenceLedger()
   private let wda: WDAController
+  private var cachedToolchainPreflight: ToolchainPreflight?
+  private var cachedSimulatorRuntimes: [String: String] = [:]
   private var lastLaunchedBundleID: String?
   private var devServerTask: Task<ProcessOutcome, Error>?
   private var devServerRunID: UUID?
@@ -51,7 +53,7 @@ public actor RuntimeService {
       case "workspace.mutated":
         return success(request.id, .object(["generation": .number(Double(await ledger.mutate()))]))
       case "toolchain.preflight":
-        return success(request.id, try jsonValue(await ToolchainDiscovery.preflight()))
+        return success(request.id, try jsonValue(await resolvedToolchainPreflight()))
       case "project.discover":
         return success(
           request.id,
@@ -61,7 +63,7 @@ public actor RuntimeService {
       case "target.discover":
         return await discoverTargets(request)
       case "simulator.list":
-        let preflight = await ToolchainDiscovery.preflight()
+        let preflight = await resolvedToolchainPreflight()
         guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
           return failure(request.id, -32050, "Full Xcode is unavailable")
         }
@@ -434,7 +436,14 @@ public actor RuntimeService {
     guard let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID else {
       throw RPCError(code: -32602, message: "bundleID is required before the first UI session")
     }
-    let preflight = await ToolchainDiscovery.preflight()
+    let preflight = await resolvedToolchainPreflight()
+    if let runtime = request.params?["runtime"]?.stringValue, !runtime.isEmpty {
+      cachedSimulatorRuntimes[udid] = runtime
+      return (udid, runtime, bundleID, preflight)
+    }
+    if let runtime = cachedSimulatorRuntimes[udid] {
+      return (udid, runtime, bundleID, preflight)
+    }
     guard let simctl = preflight.simctlPath, let developer = preflight.developerDirectory else {
       throw RPCError(code: -32050, message: "Full Xcode is unavailable")
     }
@@ -443,7 +452,15 @@ public actor RuntimeService {
     guard let runtime = destinations.first(where: { $0.udid == udid })?.runtime else {
       throw RPCError(code: -32051, message: "The selected Simulator is unavailable")
     }
+    cachedSimulatorRuntimes[udid] = runtime
     return (udid, runtime, bundleID, preflight)
+  }
+
+  private func resolvedToolchainPreflight() async -> ToolchainPreflight {
+    if let cachedToolchainPreflight { return cachedToolchainPreflight }
+    let preflight = await ToolchainDiscovery.preflight()
+    cachedToolchainPreflight = preflight
+    return preflight
   }
 
   private func selectorIdentifier(_ params: JSONValue?) -> String? {
@@ -486,7 +503,7 @@ public actor RuntimeService {
     guard let container = request.params?["container"]?.stringValue,
       let scheme = request.params?["scheme"]?.stringValue
     else { return failure(request.id, -32602, "container and scheme are required") }
-    let preflight = await ToolchainDiscovery.preflight()
+    let preflight = await resolvedToolchainPreflight()
     guard let path = preflight.xcodebuildPath, let developer = preflight.developerDirectory else {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
@@ -511,7 +528,7 @@ public actor RuntimeService {
     else { return failure(request.id, -32602, "udid and process are required") }
     let requested = Int(request.params?["seconds"]?.numberValue ?? 300)
     let seconds = min(max(requested, 1), 3_600)
-    let preflight = await ToolchainDiscovery.preflight()
+    let preflight = await resolvedToolchainPreflight()
     guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
@@ -609,7 +626,10 @@ public actor RuntimeService {
         "Metro is not reachable on port 8081. Start the selected project's development server and try Run again."
       )
     }
-    let preflight = await ToolchainDiscovery.preflight()
+    let preflight = await resolvedToolchainPreflight()
+    if let runtime = request.params?["runtime"]?.stringValue, !runtime.isEmpty {
+      cachedSimulatorRuntimes[udid] = runtime
+    }
     guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
@@ -1076,7 +1096,7 @@ public actor RuntimeService {
   /// Captures one frame for the live preview. Unlike `screenshot.capture`, this deliberately
   /// creates no evidence and performs no stability wait; verification uses the slower path.
   private func capturePreviewFrame(_ request: RPCEnvelope, udid: String) async -> RPCEnvelope {
-    let preflight = await ToolchainDiscovery.preflight()
+    let preflight = await resolvedToolchainPreflight()
     guard let path = preflight.simctlPath, let developer = preflight.developerDirectory else {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }

@@ -37,6 +37,7 @@ The application never turns those gaps into a “Verified” result.
 - Swift 6.2 or newer for this package checkout
 - Full Xcode selected as `DEVELOPER_DIR`, with its license accepted
 - Installed iOS Simulator runtime
+- AXe 1.8.0 for the continuous in-app Simulator surface (`brew install cameroncooke/axe/axe` for source builds)
 
 The currently promoted semantic-automation tuple is Xcode 26.6 build 17F113, WebDriverAgent 16.1.3 at commit `1449d94fb612a4e92857e7f37092dd1276b483e4`, and iOS 26.5 Simulator. Other tuples fail closed while ordinary build/run/screenshots remain available.
 
@@ -84,7 +85,9 @@ If a checked-in CocoaPods workspace is missing `Pods/Manifest.lock`, its target 
 
 The terminal bar above the review controls can be expanded at any time or toggled with **Command-J**. Failed commands expand it automatically. Its native TextKit transcript supports vertical and horizontal scrolling, plain-text selection/copy, Select All, Find, and stable selection while new output arrives, preserving the command, working directory, and raw output needed to diagnose a build or Metro problem.
 
-Use **Live Simulator** for Apple's native real-time interaction surface. The in-app device is an interactive remote preview: WebDriverAgent is prewarmed after launch, clicks and vertical/horizontal drags are delivered remotely, rapid gestures are delivered in order, and one lightweight frame is fetched only after the gesture queue drains. Manual preview gestures are exploratory and are excluded from verification evidence; use **Capture Screenshot** when a stable verification artifact is required—the captured image is shown immediately and added to the evidence ledger. The footer reports remote interaction readiness and observed gesture-to-frame latency.
+Run now starts a continuous in-app CoreSimulator framebuffer rather than using screenshots as a display loop. AXe/FBSimulatorControl supplies raw BGRA frames directly from the selected device at 30 fps; one AppKit layer presents them without invalidating the SwiftUI workbench. A persistent HID broker delivers taps in roughly 11–14 ms locally, and drag/trackpad events are coalesced so old pointer positions can never build up behind the current gesture. **Open Simulator** remains available as an optional adjacent Apple window, but it is no longer the default manual surface.
+
+Stable screenshots are deliberately separate: **Capture Screenshot** records a `simctl` artifact in the evidence ledger, while WebDriverAgent continues to provide structured hierarchy, deterministic selectors, assertions, and agent actions. Those WDA actions appear immediately in the same continuous in-app stream, so the user can watch an agent test the app without treating manual gestures as verification evidence. The footer reports live frame rate; if the pinned helper is unavailable, the last screenshot and WDA interaction path remain as an explicit degraded fallback.
 
 The Agent composer remains writable so a request can be drafted at any time. Its prerequisite message explains what is still needed before sending: an open Git repository and an ACP-ready agent selected in Settings. Terminal-launched development builds promote themselves to a regular macOS application so the composer can become the key text input and Operate appears in the Dock.
 

@@ -149,7 +149,7 @@ enum PreviewInteractionState: Equatable {
     case .unavailable: "Interaction unavailable"
     case .warming: "Connecting interaction…"
     case .ready: "Interactive"
-    case .sending: "Sending tap…"
+    case .sending: "Updating preview…"
     }
   }
 }
@@ -229,6 +229,7 @@ public final class AppModel: ObservableObject {
   @Published var adapters: [DetectedAdapter] = []
   @Published var selectedAdapterID = ""
   @Published var agentConfigOptions: [ACPConfigOption] = []
+  @Published private(set) var localAgentConfigOptions: [ACPConfigOption] = []
   @Published var wdaStatus = WDAStatus(
     availability: .unsupported, title: "Checking semantic UI automation",
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
@@ -236,8 +237,10 @@ public final class AppModel: ObservableObject {
   @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
+  @Published var openLiveSimulatorOnRun = false
   @Published var terminalEntries: [TerminalEntry] = []
   @Published public var isTerminalExpanded = false
+  let simulatorLiveSession = SimulatorLiveSession()
 
   var selectedDestination: Destination? {
     destinations.first { $0.udid == selectedDestinationID }
@@ -283,33 +286,63 @@ public final class AppModel: ObservableObject {
     return nil
   }
   var hasAgentSession: Bool { activeACPSessionID != nil }
+  var displayedAgentConfigOptions: [ACPConfigOption] {
+    agentConfigOptions.isEmpty ? localAgentConfigOptions : agentConfigOptions
+  }
+  var agentConfigCanChange: Bool {
+    if hasAgentSession {
+      return reportedAgentModelOption != nil || reportedAgentReasoningOption != nil
+    }
+    return localAgentConfigOptions.contains {
+      (isModelOption($0) || isReasoningOption($0)) && !$0.options.isEmpty
+    }
+  }
+  var agentConfigStatusText: String {
+    if !hasAgentSession && !pendingAgentConfigValues.isEmpty {
+      return "Will apply when the agent session connects"
+    }
+    if agentConfigCanChange {
+      return hasAgentSession ? "CLI session controls" : "Local CLI setting · choose before connecting"
+    }
+    if hasAgentSession {
+      return localAgentConfigOptions.isEmpty
+        ? "This CLI did not report model or reasoning controls."
+        : "Session controls unavailable · showing the local CLI setting"
+    }
+    return localAgentConfigOptions.isEmpty
+      ? "Connect the agent to load model and reasoning controls"
+      : "Local CLI setting · connect to change"
+  }
   var canSendAgentPrompt: Bool {
     !taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && agentComposerBlocker == nil && !isBusy
   }
   var agentModelOption: ACPConfigOption? {
-    agentConfigOptions.first { option in
-      option.category?.lowercased() == "model"
-        || option.id.localizedCaseInsensitiveContains("model")
-        || option.name.localizedCaseInsensitiveContains("model")
-    }
+    reportedAgentModelOption ?? localAgentConfigOptions.first(where: isModelOption)
   }
   var agentReasoningOption: ACPConfigOption? {
-    agentConfigOptions.first { option in
-      let category = option.category?.lowercased() ?? ""
-      let id = option.id.lowercased()
-      let name = option.name.lowercased()
-      return category == "thought_level"
-        || id.contains("reason") || id.contains("effort") || id.contains("thinking")
-        || id.contains("thought") || name.contains("reason") || name.contains("effort")
-        || name.contains("thinking") || name.contains("thought")
-    }
+    reportedAgentReasoningOption ?? localAgentConfigOptions.first(where: isReasoningOption)
   }
   var agentModelLabel: String {
     agentConfigValueLabel(for: agentModelOption) ?? "Model not reported"
   }
   var agentReasoningLabel: String {
     agentConfigValueLabel(for: agentReasoningOption) ?? "Reasoning not reported"
+  }
+
+  func canChangeAgentConfigOption(_ option: ACPConfigOption) -> Bool {
+    guard !option.options.isEmpty else { return false }
+    if hasAgentSession {
+      return agentConfigOptions.contains(where: { $0.id == option.id })
+    }
+    return localAgentConfigOptions.contains(where: { $0.id == option.id })
+  }
+
+  private var reportedAgentModelOption: ACPConfigOption? {
+    agentConfigOptions.first(where: isModelOption)
+  }
+  private var reportedAgentReasoningOption: ACPConfigOption? {
+    agentConfigOptions.first(where: isReasoningOption)
   }
 
   private var baseline: BaselineManifest?
@@ -344,9 +377,11 @@ public final class AppModel: ObservableObject {
   private var agentMessageFlushTask: Task<Void, Never>?
   private var agentToolContexts: [String: AgentToolContext] = [:]
   private var agentToolTimelineIDs: [String: UUID] = [:]
+  private var pendingAgentConfigValues: [String: String] = [:]
   private var pendingPreviewInteractions: [PreviewInteractionRequest] = []
   private var previewTapWorker: Task<Void, Never>?
   private var previewWarmupTask: Task<Void, Never>?
+  private var previewSettleTask: Task<Void, Never>?
   private var previewFeedbackTask: Task<Void, Never>?
   private var previewSessionID = UUID()
   private var terminalOutputBuffers: [UUID: String] = [:]
@@ -364,6 +399,8 @@ public final class AppModel: ObservableObject {
     wdaRoot = root.appending(path: "WebDriverAgent", directoryHint: .isDirectory)
     adapters = AdapterManager.detect(managedRoot: adapterRoot)
     selectedAdapterID = adapters.first(where: { $0.executable != nil })?.id ?? ""
+    localAgentConfigOptions = Self.readLocalAgentConfigOptions(
+      for: adapters.first(where: { $0.id == selectedAdapterID }))
     Task {
       await refreshToolchain()
       await refreshRecovery()
@@ -583,6 +620,23 @@ public final class AppModel: ObservableObject {
     if !adapters.contains(where: { $0.id == selectedAdapterID && $0.executable != nil }) {
       selectedAdapterID = adapters.first(where: { $0.executable != nil })?.id ?? ""
     }
+    agentConfigOptions = []
+    pendingAgentConfigValues = [:]
+    localAgentConfigOptions = Self.readLocalAgentConfigOptions(
+      for: adapters.first(where: { $0.id == selectedAdapterID }))
+  }
+
+  func selectAgentAdapter(_ id: String) {
+    guard adapters.contains(where: { $0.id == id && $0.executable != nil }) else { return }
+    guard selectedAdapterID != id else { return }
+    activeACPClient?.cancel()
+    activeACPClient = nil
+    activeACPSessionID = nil
+    agentConfigOptions = []
+    pendingAgentConfigValues = [:]
+    selectedAdapterID = id
+    localAgentConfigOptions = Self.readLocalAgentConfigOptions(
+      for: adapters.first(where: { $0.id == id }))
   }
 
   func setupWebDriverAgent() {
@@ -764,7 +818,16 @@ public final class AppModel: ObservableObject {
 
   func setAgentConfigOption(_ option: ACPConfigOption, value: ACPConfigOptionValue) {
     guard let client = activeACPClient, let sessionID = activeACPSessionID else {
-      notice = "Model and reasoning controls become available after the agent session connects."
+      guard let key = agentConfigKey(for: option) else {
+        notice = "Connect the agent session before changing this setting."
+        return
+      }
+      pendingAgentConfigValues[key] = value.value
+      if let index = localAgentConfigOptions.firstIndex(where: { $0.id == option.id }) {
+        var updated = localAgentConfigOptions
+        updated[index].currentValue = .string(value.value)
+        localAgentConfigOptions = updated
+      }
       return
     }
     Task {
@@ -776,7 +839,8 @@ public final class AppModel: ObservableObject {
             "configId": .string(option.id),
             "value": .string(value.value),
           ]))
-        updateAgentConfigOptions(result.result?["configOptions"])
+        updateAgentConfigOptions(
+          result.result?["configOptions"] ?? result.result?["config_options"])
       } catch {
         notice = "Could not update \(option.name.lowercased()): \(error.localizedDescription)"
       }
@@ -885,17 +949,19 @@ public final class AppModel: ObservableObject {
           params: .object([
             "udid": .string(destination.udid), "appPath": .string(productPath.path),
             "bundleID": .string(target.bundleID),
+            "runtime": .string(destination.runtime),
             "startDevServer": .bool(false),
             "useDevServer": .bool(isExpoRepository && startDevServerOnRun),
           ]))
         guard refreshed["launched"]?.boolValue == true else {
           throw RPCError(code: -32053, message: "The refreshed app did not launch")
         }
+        warmPreviewInteraction(destination: destination, target: target)
+        beginLiveSimulatorSession(destination: destination)
         status = "Waiting for app to settle"
         await captureScreenshot(settleDelayMS: isExpoRepository ? 2_500 : 900)
         await refreshEvidence()
         status = "Running"
-        warmPreviewInteraction(destination: destination, target: target)
         timeline.append(
           .init(
             time: Self.now(), title: "Application refreshed",
@@ -1046,6 +1112,8 @@ public final class AppModel: ObservableObject {
       guard !Task.isCancelled, previewTapFeedback?.id == feedback.id else { return }
       previewTapFeedback = nil
     }
+    previewSettleTask?.cancel()
+    previewSettleTask = nil
     pendingPreviewInteractions.append(
       .tap(PreviewTapRequest(x: x, y: y, sessionID: previewSessionID)))
     previewInteractionState = .sending
@@ -1071,6 +1139,8 @@ public final class AppModel: ObservableObject {
       return
     }
     guard !isBusy else { return }
+    previewSettleTask?.cancel()
+    previewSettleTask = nil
     pendingPreviewInteractions.append(
       .swipe(
         PreviewSwipeRequest(
@@ -1097,35 +1167,49 @@ public final class AppModel: ObservableObject {
         let started = DispatchTime.now().uptimeNanoseconds
         let action: String
         let coordinate: JSONValue
+        let previewCaptureLeadMS: Int
         switch request {
         case .tap(let tap):
           action = "tap"
+          previewCaptureLeadMS = 180
           coordinate = .object([
             "x": .number(tap.x), "y": .number(tap.y),
           ])
         case .swipe(let swipe):
           action = "swipe"
+          previewCaptureLeadMS = 320
           coordinate = .object([
             "startX": .number(swipe.startX), "startY": .number(swipe.startY),
             "endX": .number(swipe.endX), "endY": .number(swipe.endY),
             "durationMS": .number(350),
           ])
         }
-        _ = try await runtime.request(
+        async let performed: JSONValue = runtime.request(
           method: "ui.perform",
           params: .object([
             "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
+            "runtime": .string(destination.runtime),
             "selector": .object(["coordinate": coordinate]),
             "action": .string(action),
           ]))
 
+        // Begin the cheap frame capture near the end of XCTest's gesture instead of waiting for
+        // its HTTP acknowledgement. This overlaps independent Simulator work and removes another
+        // frame of perceived latency. The settle refresh below corrects any mid-animation frame.
+        try? await Task.sleep(for: .milliseconds(previewCaptureLeadMS))
+        guard pendingPreviewInteractions.isEmpty else {
+          _ = try await performed
+          continue
+        }
+        async let capturedFrame: JSONValue = runtime.request(
+          method: "preview.capture",
+          params: .object(["udid": .string(destination.udid)]))
+        _ = try await performed
+
         // Rapid gestures are delivered without waiting for an intermediate screenshot. Once the
         // queue drains, one cheap frame replaces the preview without running verification.
         guard pendingPreviewInteractions.isEmpty else { continue }
-        try? await Task.sleep(for: .milliseconds(80))
-        let frame = try await runtime.request(
-          method: "preview.capture",
-          params: .object(["udid": .string(destination.udid)]))
+        let frame = try await capturedFrame
         guard request.sessionID == previewSessionID,
           selectedDestinationID == destination.udid,
           selectedTarget?.bundleID == target.bundleID,
@@ -1134,6 +1218,8 @@ public final class AppModel: ObservableObject {
         setCurrentScreenshot(URL(fileURLWithPath: path))
         previewLatencyMS = Int(
           (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+        schedulePreviewSettleFrame(
+          sessionID: request.sessionID, destination: destination, target: target)
       }
       if selectedDestinationID == destination.udid, selectedTarget?.bundleID == target.bundleID {
         previewInteractionState = .ready
@@ -1155,6 +1241,32 @@ public final class AppModel: ObservableObject {
     }
   }
 
+  /// Publishes one post-animation frame without delaying the immediate response to the gesture.
+  /// A new gesture cancels this refresh, so rapid use never builds a screenshot backlog.
+  private func schedulePreviewSettleFrame(
+    sessionID: UUID, destination: Destination, target: AppTarget
+  ) {
+    previewSettleTask?.cancel()
+    previewSettleTask = Task {
+      try? await Task.sleep(for: .milliseconds(140))
+      guard !Task.isCancelled, sessionID == previewSessionID,
+        selectedDestinationID == destination.udid,
+        selectedTarget?.bundleID == target.bundleID,
+        pendingPreviewInteractions.isEmpty,
+        previewTapWorker == nil
+      else { return }
+      guard
+        let frame = try? await runtime.request(
+          method: "preview.capture",
+          params: .object(["udid": .string(destination.udid)])),
+        !Task.isCancelled, sessionID == previewSessionID,
+        let path = frame["path"]?.stringValue
+      else { return }
+      setCurrentScreenshot(URL(fileURLWithPath: path))
+      previewSettleTask = nil
+    }
+  }
+
   private func warmPreviewInteraction(destination: Destination, target: AppTarget) {
     guard wdaStatus.availability == .ready else {
       previewInteractionState = .unavailable
@@ -1170,6 +1282,7 @@ public final class AppModel: ObservableObject {
           method: "ui.prepare",
           params: .object([
             "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
+            "runtime": .string(destination.runtime),
           ]))
         guard !Task.isCancelled, sessionID == previewSessionID,
           selectedDestinationID == destination.udid,
@@ -1183,12 +1296,58 @@ public final class AppModel: ObservableObject {
     }
   }
 
+  private func beginLiveSimulatorSession(destination: Destination) {
+    let sessionID = previewSessionID
+    launchSimulatorApplicationInBackground(destination: destination)
+    Task {
+      do {
+        try await ensureRuntime()
+        let frame = try await runtime.request(
+          method: "preview.capture",
+          params: .object(["udid": .string(destination.udid)]))
+        guard sessionID == previewSessionID,
+          selectedDestinationID == destination.udid,
+          let path = frame["path"]?.stringValue,
+          let image = NSImage(contentsOfFile: path),
+          let representation = image.representations.max(by: {
+            ($0.pixelsWide * $0.pixelsHigh) < ($1.pixelsWide * $1.pixelsHigh)
+          }),
+          representation.pixelsWide > 0, representation.pixelsHigh > 0
+        else { return }
+        setCurrentScreenshot(URL(fileURLWithPath: path))
+        simulatorLiveSession.start(
+          udid: destination.udid, nativePixelWidth: representation.pixelsWide,
+          nativePixelHeight: representation.pixelsHigh,
+          developerDirectory: developerDirectory)
+      } catch {
+        // Evidence screenshots remain available if the optional continuous stream cannot start.
+      }
+    }
+  }
+
+  private func launchSimulatorApplicationInBackground(destination: Destination) {
+    guard
+      NSRunningApplication.runningApplications(
+        withBundleIdentifier: "com.apple.iphonesimulator"
+      ).isEmpty,
+      let app = NSWorkspace.shared.urlForApplication(
+        withBundleIdentifier: "com.apple.iphonesimulator")
+    else { return }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = false
+    configuration.arguments = ["-CurrentDeviceUDID", destination.udid]
+    NSWorkspace.shared.openApplication(at: app, configuration: configuration)
+  }
+
   private func resetPreviewInteraction() {
+    simulatorLiveSession.stop()
     previewTapWorker?.cancel()
     previewWarmupTask?.cancel()
+    previewSettleTask?.cancel()
     previewFeedbackTask?.cancel()
     previewTapWorker = nil
     previewWarmupTask = nil
+    previewSettleTask = nil
     previewFeedbackTask = nil
     pendingPreviewInteractions = []
     previewTapFeedback = nil
@@ -1356,7 +1515,12 @@ public final class AppModel: ObservableObject {
       notice = "Simulator.app is unavailable. Select a full Xcode installation first."
       return
     }
-    NSWorkspace.shared.openApplication(at: app, configuration: .init()) { _, error in
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    if let destination = selectedDestination {
+      configuration.arguments = ["-CurrentDeviceUDID", destination.udid]
+    }
+    NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
       if let error { Task { @MainActor in self.notice = error.localizedDescription } }
     }
   }
@@ -1689,8 +1853,10 @@ public final class AppModel: ObservableObject {
     guard let sessionID = session.result?["sessionId"]?.stringValue else {
       throw RPCError(code: -32092, message: "The ACP agent did not return a session ID")
     }
-    updateAgentConfigOptions(session.result?["configOptions"])
+    updateAgentConfigOptions(
+      session.result?["configOptions"] ?? session.result?["config_options"])
     activeACPSessionID = sessionID
+    await applyPendingAgentConfigOptions(client: client, sessionID: sessionID)
     status = "Agent working"
     timeline.append(
       .init(
@@ -1742,7 +1908,7 @@ public final class AppModel: ObservableObject {
       finishAgentMessage()
       consumeAgentPlan(update)
     case "config_option_update":
-      updateAgentConfigOptions(update["configOptions"])
+      updateAgentConfigOptions(update["configOptions"] ?? update["config_options"])
     default: break
     }
   }
@@ -2047,19 +2213,75 @@ public final class AppModel: ObservableObject {
     agentToolContexts = [:]
     agentToolTimelineIDs = [:]
     agentConfigOptions = []
+    pendingAgentConfigValues = [:]
+    localAgentConfigOptions = Self.readLocalAgentConfigOptions(
+      for: adapters.first(where: { $0.id == selectedAdapterID }))
     persistentPermissionChoices = [:]
     pendingPermissionFingerprint = nil
     didRecordRoutineTestingPermission = false
   }
 
   private func updateAgentConfigOptions(_ value: JSONValue?) {
-    guard let values = value?.arrayValue else {
+    let values = value?.arrayValue
+      ?? value?["configOptions"]?.arrayValue
+      ?? value?["config_options"]?.arrayValue
+    guard let values else {
       agentConfigOptions = []
       return
     }
     agentConfigOptions = values.compactMap { value in
       guard let data = try? JSONEncoder().encode(value) else { return nil }
       return try? JSONDecoder().decode(ACPConfigOption.self, from: data)
+    }
+  }
+
+  private func isModelOption(_ option: ACPConfigOption) -> Bool {
+    option.category?.lowercased() == "model"
+      || option.id.localizedCaseInsensitiveContains("model")
+      || option.name.localizedCaseInsensitiveContains("model")
+  }
+
+  private func isReasoningOption(_ option: ACPConfigOption) -> Bool {
+    let category = option.category?.lowercased() ?? ""
+    let id = option.id.lowercased()
+    let name = option.name.lowercased()
+    return category == "thought_level"
+      || id.contains("reason") || id.contains("effort") || id.contains("thinking")
+      || id.contains("thought") || name.contains("reason") || name.contains("effort")
+      || name.contains("thinking") || name.contains("thought")
+  }
+
+  private func agentConfigKey(for option: ACPConfigOption) -> String? {
+    if isModelOption(option) { return "model" }
+    if isReasoningOption(option) { return "reasoning" }
+    return nil
+  }
+
+  private func applyPendingAgentConfigOptions(client: ACPClient, sessionID: String) async {
+    guard !pendingAgentConfigValues.isEmpty else { return }
+    let pending = pendingAgentConfigValues
+    pendingAgentConfigValues = [:]
+    for (key, value) in pending {
+      let option: ACPConfigOption?
+      switch key {
+      case "model": option = reportedAgentModelOption
+      case "reasoning": option = reportedAgentReasoningOption
+      default: option = nil
+      }
+      guard let option, option.options.contains(where: { $0.value == value }) else { continue }
+      do {
+        let result = try await client.request(
+          method: "session/set_config_option",
+          params: .object([
+            "sessionId": .string(sessionID),
+            "configId": .string(option.id),
+            "value": .string(value),
+          ]))
+        updateAgentConfigOptions(
+          result.result?["configOptions"] ?? result.result?["config_options"])
+      } catch {
+        notice = "Could not apply the saved \(key) setting: \(error.localizedDescription)"
+      }
     }
   }
 
@@ -2280,6 +2502,7 @@ public final class AppModel: ObservableObject {
         params: .object([
           "udid": .string(destination.udid), "appPath": .string(productPath.path),
           "bundleID": .string(target.bundleID),
+          "runtime": .string(destination.runtime),
           "startDevServer": .bool(false),
           "useDevServer": .bool(isExpoRepository && startDevServerOnRun),
         ]))
@@ -2291,6 +2514,9 @@ public final class AppModel: ObservableObject {
         .init(
           time: Self.now(), title: "Application launched",
           detail: "\(target.bundleID) on \(destination.name)", state: .complete))
+      if openLiveSimulatorOnRun { openSimulator() }
+      warmPreviewInteraction(destination: destination, target: target)
+      beginLiveSimulatorSession(destination: destination)
       status = "Waiting for app to settle"
       await captureScreenshot(settleDelayMS: isExpoRepository ? 2_500 : 900)
       let shouldVerifyMetro = isExpoRepository && startDevServerOnRun
@@ -2309,16 +2535,18 @@ public final class AppModel: ObservableObject {
           method: "app.install_launch",
           params: .object([
             "udid": .string(destination.udid), "appPath": .string(productPath.path),
-            "bundleID": .string(target.bundleID), "startDevServer": .bool(false),
+            "bundleID": .string(target.bundleID),
+            "runtime": .string(destination.runtime), "startDevServer": .bool(false),
             "useDevServer": .bool(true),
           ]))
         guard retry["launched"]?.boolValue == true else {
           throw RPCError(code: -32053, message: "The app did not relaunch after Metro restarted")
         }
+        warmPreviewInteraction(destination: destination, target: target)
+        beginLiveSimulatorSession(destination: destination)
         await captureScreenshot(settleDelayMS: 1_500)
       }
       await refreshEvidence()
-      warmPreviewInteraction(destination: destination, target: target)
     } catch {
       status = "Launch failed"
       notice = error.localizedDescription
@@ -2799,6 +3027,7 @@ public final class AppModel: ObservableObject {
     }
     await captureScreenshot(settleDelayMS: 1_500)
     warmPreviewInteraction(destination: destination, target: target)
+    beginLiveSimulatorSession(destination: destination)
   }
 
   private func stopOwnedMetro() async {
@@ -2907,6 +3136,185 @@ public final class AppModel: ObservableObject {
     let image = NSImage(contentsOf: url)
     image?.cacheMode = .always
     currentScreenshotImage = image
+  }
+
+  private static func readLocalAgentConfigOptions(for adapter: DetectedAdapter?)
+    -> [ACPConfigOption]
+  {
+    guard let adapter,
+      let lockEntry = AdapterManager.pinned.first(where: { $0.id == adapter.id })
+    else { return [] }
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    var files: [URL] = []
+    let knownNames = [
+      "config.toml", "settings.json", "config.json", "opencode.json", "preferences.json",
+      "models_cache.json",
+    ]
+    for path in lockEntry.configurationPaths {
+      let root = home.appending(path: path)
+      var isDirectory: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else {
+        continue
+      }
+      if isDirectory.boolValue {
+        files.append(contentsOf: knownNames.map { root.appending(path: $0) })
+      } else {
+        files.append(root)
+      }
+    }
+    files = files.filter { FileManager.default.isReadableFile(atPath: $0.path) }
+
+    var model: String?
+    var reasoning: String?
+    for file in files where file.lastPathComponent != "models_cache.json" {
+      let values = localConfigValues(at: file)
+      model = model ?? values.model
+      reasoning = reasoning ?? values.reasoning
+    }
+
+    let modelValues: [ACPConfigOptionValue]
+    let reasoningValues: [ACPConfigOptionValue]
+    if adapter.id == "codex" {
+      let cache = home.appending(path: ".codex/models_cache.json")
+      modelValues = codexModelValues(at: cache, selected: model)
+      reasoningValues = codexReasoningValues(at: cache, selectedModel: model)
+    } else {
+      modelValues = model.map { [.init(value: $0, name: $0)] } ?? []
+      reasoningValues = reasoning.map { [.init(value: $0, name: $0)] } ?? []
+    }
+
+    var options: [ACPConfigOption] = []
+    if let model {
+      options.append(
+        .init(
+          id: "local-model", name: "Model", category: "model",
+          currentValue: .string(model), options: modelValues.isEmpty
+            ? [.init(value: model, name: model)] : modelValues))
+    }
+    if let reasoning {
+      options.append(
+        .init(
+          id: "local-reasoning", name: "Reasoning effort", category: "thought_level",
+          currentValue: .string(reasoning), options: reasoningValues.isEmpty
+            ? [.init(value: reasoning, name: reasoning.capitalized)] : reasoningValues))
+    }
+    return options
+  }
+
+  private static func localConfigValues(at url: URL) -> (model: String?, reasoning: String?) {
+    guard let data = try? Data(contentsOf: url), data.count <= 4_000_000 else {
+      return (nil, nil)
+    }
+    if url.pathExtension.lowercased() == "toml" {
+      return tomlConfigValues(String(decoding: data, as: UTF8.self))
+    }
+    guard let object = try? JSONSerialization.jsonObject(with: data) else { return (nil, nil) }
+    var model: String?
+    var reasoning: String?
+    collectConfigValues(from: object, model: &model, reasoning: &reasoning)
+    return (model, reasoning)
+  }
+
+  private static func tomlConfigValues(_ text: String) -> (model: String?, reasoning: String?) {
+    let modelKeys = ["model", "model_id", "model_name", "default_model", "selected_model"]
+    let reasoningKeys = [
+      "model_reasoning_effort", "reasoning_effort", "reasoning", "thinking_level",
+      "thought_level",
+    ]
+    var model: String?
+    var reasoning: String?
+    for rawLine in text.split(whereSeparator: \.isNewline) {
+      let line = rawLine.split(separator: "#", maxSplits: 1).first.map(String.init) ?? ""
+      let parts = line.split(separator: "=", maxSplits: 1).map {
+        $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      }
+      guard parts.count == 2 else { continue }
+      let key = parts[0].replacingOccurrences(of: "-", with: "_")
+      var value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+      if value.hasPrefix("\"") && value.hasSuffix("\"") {
+        value.removeFirst()
+        value.removeLast()
+      } else if value.hasPrefix("'") && value.hasSuffix("'") {
+        value.removeFirst()
+        value.removeLast()
+      }
+      guard !value.isEmpty else { continue }
+      if model == nil && modelKeys.contains(key) { model = value }
+      if reasoning == nil && reasoningKeys.contains(key) { reasoning = value }
+    }
+    return (model, reasoning)
+  }
+
+  private static func collectConfigValues(
+    from value: Any, model: inout String?, reasoning: inout String?
+  ) {
+    guard model == nil || reasoning == nil else { return }
+    if let object = value as? [String: Any] {
+      for (key, child) in object {
+        let normalized = key.lowercased().replacingOccurrences(of: "-", with: "_")
+        if model == nil && ["model", "model_id", "model_name", "default_model"].contains(normalized),
+          let string = child as? String, !string.isEmpty
+        {
+          model = string
+        }
+        if reasoning == nil
+          && [
+            "model_reasoning_effort", "reasoning_effort", "reasoning", "thinking_level",
+            "thought_level",
+          ].contains(normalized),
+          let string = child as? String, !string.isEmpty
+        {
+          reasoning = string
+        }
+        collectConfigValues(from: child, model: &model, reasoning: &reasoning)
+      }
+    } else if let array = value as? [Any] {
+      for child in array {
+        collectConfigValues(from: child, model: &model, reasoning: &reasoning)
+      }
+    }
+  }
+
+  private static func codexModelValues(at url: URL, selected: String?)
+    -> [ACPConfigOptionValue]
+  {
+    guard let data = try? Data(contentsOf: url), data.count <= 20_000_000,
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let models = root["models"] as? [[String: Any]]
+    else { return selected.map { [.init(value: $0, name: $0)] } ?? [] }
+
+    var values: [ACPConfigOptionValue] = []
+    for model in models {
+      guard let slug = model["slug"] as? String, !slug.isEmpty else { continue }
+      let name = (model["display_name"] as? String).flatMap {
+        $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+      } ?? slug
+      values.append(
+        .init(value: slug, name: name, description: model["description"] as? String))
+    }
+    let unique = Dictionary(values.map { ($0.value, $0) }, uniquingKeysWith: { first, _ in first })
+      .values
+    return unique.sorted {
+      if $0.value == selected { return true }
+      if $1.value == selected { return false }
+      return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    }.prefix(24).map { $0 }
+  }
+
+  private static func codexReasoningValues(at url: URL, selectedModel: String?)
+    -> [ACPConfigOptionValue]
+  {
+    guard let data = try? Data(contentsOf: url), data.count <= 20_000_000,
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let models = root["models"] as? [[String: Any]]
+    else { return [] }
+    let model = models.first(where: { $0["slug"] as? String == selectedModel }) ?? models.first
+    guard let levels = model?["supported_reasoning_levels"] as? [[String: Any]] else { return [] }
+    return levels.compactMap { level in
+      guard let effort = level["effort"] as? String, !effort.isEmpty else { return nil }
+      return .init(
+        value: effort, name: effort.capitalized, description: level["description"] as? String)
+    }
   }
 
   private static func displayArgument(_ value: String) -> String {

@@ -1,6 +1,6 @@
 # Public Alpha Implementation Status
 
-Updated 2026-08-10. Status meanings: **Implemented** is exercised locally; **Partial** has production code but lacks part of the contract; **Gated** is deliberately unavailable until its compatibility/security prerequisite passes; **Deferred** belongs to the PRD's later scope.
+Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Partial** has production code but lacks part of the contract; **Gated** is deliberately unavailable until its compatibility/security prerequisite passes; **Deferred** belongs to the PRD's later scope.
 
 ## Feasibility gates
 
@@ -18,7 +18,7 @@ Updated 2026-08-10. Status meanings: **Implemented** is exercised locally; **Par
 | Four-area shell and native editor | **Implemented** | The supplied Operate reference now drives a light native rail, Agent/App/Verify workspace, Code/Files/Git/Settings views, fixed review bar, and collapsible failure-aware terminal transcript. |
 | Repository/project/scheme/simulator toolbar | **Implemented** | Repository, workspace/project, scheme, destination, Xcode selection, build, run, stop, and Simulator activation are connected to live discovery. Persist the selections across launches. |
 | Durable task timeline | **Partial** | ACP message chunks are coalesced into readable turns, tool calls update in place with human labels, structured plans replace host placeholders, and permission decisions remain visible in context. Persist the timeline across launches. |
-| App screenshot/hierarchy/actions | **Partial** | Stable evidence screenshots, cached preview rendering, prewarmed WDA sessions, ordered low-latency coordinate taps, a useful-vs-raw hierarchy inspector, and deterministic identifier or unique-label actions/assertions work for the promoted tuple. Add richer tree relationships and action configuration. |
+| In-app Simulator, screenshot, hierarchy, actions | **Partial** | The in-app device is a continuous 30 fps raw CoreSimulator BGRA stream with a single-layer AppKit renderer. Direct broker taps measured 11–14 ms locally; drag and scroll input drops obsolete intermediate positions. Stable `simctl` screenshots remain evidence, and WDA remains the semantic agent/verification layer whose actions are visible in the stream. Pin and manage the optional AXe helper under Application Support before release; add richer tree relationships and action configuration. |
 | Verify by acceptance criterion | **Partial** | Generation-aware evidence contract exists. Add persisted criterion grouping and manifest submission validation in the UI. |
 | SQLite metadata and artifact files | **Partial** | Actor-isolated schema/store is tested. Connect repositories, tasks, events, App Graph, and evidence to application/runtime lifecycle. |
 | Diagnostics export | **Partial** | Secret/path redaction is tested. Add explicit export packaging, artifact selection, size bounds, and user preview. |
@@ -43,7 +43,7 @@ Updated 2026-08-10. Status meanings: **Implemented** is exercised locally; **Par
 | Scheme/project listing | **Implemented** | Connect the result to application pickers and persistence. |
 | Build-settings runnable app discovery | **Implemented** | `-showBuildSettings -json` is normalized into runnable `AppTarget` records from wrapper, bundle, build-dir, and product settings. |
 | Build and result bundle | **Partial** | Real build RPC, explicit destination/DerivedData/result bundle, raw log, evidence, and pre-build CocoaPods installation checks exist. Missing locked Pods require explicit install approval; lockfile drift requires a second approval. Add streamed diagnostic parsing and `xcresulttool` issue/test extraction. |
-| Simulator lifecycle/configuration | **Partial** | Listing, idempotent boot readiness, shutdown, appearance, install/launch, terminate, reset approval, settled two-frame screenshot capture, and adjacent Simulator activation exist. Add orientation/status-bar RPC wiring and persisted destination profiles. |
+| Simulator lifecycle/configuration | **Partial** | Listing, idempotent boot readiness, shutdown, appearance, install/launch, terminate, reset approval, a continuous in-app framebuffer, settled evidence screenshots, and optional adjacent Simulator activation exist. Add orientation/status-bar RPC wiring and persisted destination profiles. |
 | Runtime logs | **Partial** | Bounded, process-filtered `simctl log show` queries are persisted as task evidence. Add long-lived supervised streaming and crash classification. |
 | Expo development server | **Implemented** | Run starts/reuses Metro from the selected monorepo package, isolates it from build cancellation, revalidates it after build and launch, and automatically restarts/relaunches after an unexpected exit. Live forced-exit recovery passed locally. Foreign port ownership and dead launch endpoints fail explicitly. |
 | Optional `.iosdev/config.json` | **Partial** | Strict versioned decoding exists. Integrate selection, nonsecret launch values, Keychain references, disabled setup approvals, device profiles, reset policy, and timeout. |
@@ -75,7 +75,7 @@ Updated 2026-08-10. Status meanings: **Implemented** is exercised locally; **Par
 | CI fixtures/nightly Xcode matrix | **Missing** | Add GitHub Actions fake-process tests and self-hosted exact-Xcode nightly fixtures. |
 | Developer ID DMG/notarization | **Gated** | Requires release identity, entitlements, packaging pipeline, and notarization credentials. |
 | Sparkle EdDSA updates | **Gated** | Add pinned Sparkle dependency and signed appcast only with release keys and verified artifacts. |
-| Performance/reliability budgets | **Partial** | Binary size is below budget. Preview interaction no longer blocks on evidence stabilization, WDA window geometry is cached, screenshot images are decoded once per frame, and terminal streaming is coalesced to avoid whole-workbench invalidation per output chunk. Add automated cold-launch, idle memory/CPU, warm semantic action, and crash-recovery measurements. |
+| Performance/reliability budgets | **Partial** | Binary size is below budget. The live in-app surface sustains 30 fps locally, bypasses screenshot polling, updates one CALayer, and uses 11–14 ms direct HID transactions. Pointer/scroll coalescing prevents input backlogs; terminal streaming is also coalesced. Add automated cold-launch, idle memory/CPU, semantic-action, and crash-recovery measurements. |
 
 ## Explicitly deferred
 

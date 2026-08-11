@@ -94,6 +94,32 @@ public struct ACPConfigOptionValue: Codable, Equatable, Identifiable, Sendable {
     self.name = name
     self.description = description
   }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    if let value = try container.decodeIfPresent(String.self, forKey: .value) {
+      self.value = value
+    } else {
+      self.value = try container.decode(String.self, forKey: .id)
+    }
+    if let name = try container.decodeIfPresent(String.self, forKey: .name) {
+      self.name = name
+    } else {
+      self.name = try container.decodeIfPresent(String.self, forKey: .label) ?? self.value
+    }
+    description = try container.decodeIfPresent(String.self, forKey: .description)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(value, forKey: .value)
+    try container.encode(name, forKey: .name)
+    try container.encodeIfPresent(description, forKey: .description)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case value, id, name, label, description
+  }
 }
 
 public struct ACPConfigOption: Codable, Equatable, Identifiable, Sendable {
@@ -121,13 +147,37 @@ public struct ACPConfigOption: Codable, Equatable, Identifiable, Sendable {
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    id = try container.decode(String.self, forKey: .id)
+    if let value = try container.decodeIfPresent(String.self, forKey: .id) {
+      id = value
+    } else {
+      id = try container.decode(String.self, forKey: .configID)
+    }
     name = try container.decode(String.self, forKey: .name)
     description = try container.decodeIfPresent(String.self, forKey: .description)
     category = try container.decodeIfPresent(String.self, forKey: .category)
     type = try container.decodeIfPresent(String.self, forKey: .type) ?? "select"
     currentValue = try container.decodeIfPresent(JSONValue.self, forKey: .currentValue)
-    options = try container.decodeIfPresent([ACPConfigOptionValue].self, forKey: .options) ?? []
+      ?? container.decodeIfPresent(JSONValue.self, forKey: .current_value)
+    options = try container.decodeIfPresent([ACPConfigOptionValue].self, forKey: .options)
+      ?? container.decodeIfPresent([ACPConfigOptionValue].self, forKey: .values)
+      ?? container.decodeIfPresent([ACPConfigOptionValue].self, forKey: .config_options)
+      ?? []
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(id, forKey: .id)
+    try container.encode(name, forKey: .name)
+    try container.encodeIfPresent(description, forKey: .description)
+    try container.encodeIfPresent(category, forKey: .category)
+    try container.encode(type, forKey: .type)
+    try container.encodeIfPresent(currentValue, forKey: .currentValue)
+    try container.encode(options, forKey: .options)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, configID = "config_id", name, description, category, type
+    case currentValue, current_value, options, values, config_options
   }
 }
 

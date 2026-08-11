@@ -113,24 +113,8 @@ public actor WDAController {
     let point = WDANormalizedPoint(x: normalizedX, y: normalizedY).scaled(
       width: windowSize.width, height: windowSize.height)
     _ = try await request(
-      method: "POST", path: "/session/\(sessionID)/actions",
-      body: [
-        "actions": [
-          [
-            "type": "pointer", "id": "operate-preview-finger",
-            "parameters": ["pointerType": "touch"],
-            "actions": [
-              [
-                "type": "pointerMove", "duration": 0, "origin": "viewport", "x": point.x,
-                "y": point.y,
-              ],
-              ["type": "pointerDown", "button": 0],
-              ["type": "pause", "duration": 60],
-              ["type": "pointerUp", "button": 0],
-            ],
-          ]
-        ]
-      ])
+      method: "POST", path: "/session/\(sessionID)/wda/tap",
+      body: ["x": point.x, "y": point.y])
   }
 
   public func performCoordinateSwipe(
@@ -146,28 +130,13 @@ public actor WDAController {
       width: windowSize.width, height: windowSize.height)
     let end = WDANormalizedPoint(x: endX, y: endY).scaled(
       width: windowSize.width, height: windowSize.height)
-    let duration = max(80, min(durationMS, 2_000))
+    let duration = Double(max(80, min(durationMS, 2_000))) / 1_000
     _ = try await request(
-      method: "POST", path: "/session/\(sessionID)/actions",
+      method: "POST", path: "/session/\(sessionID)/wda/dragfromtoforduration",
       body: [
-        "actions": [
-          [
-            "type": "pointer", "id": "operate-preview-finger",
-            "parameters": ["pointerType": "touch"],
-            "actions": [
-              [
-                "type": "pointerMove", "duration": 0, "origin": "viewport",
-                "x": start.x, "y": start.y,
-              ],
-              ["type": "pointerDown", "button": 0],
-              [
-                "type": "pointerMove", "duration": duration, "origin": "viewport",
-                "x": end.x, "y": end.y,
-              ],
-              ["type": "pointerUp", "button": 0],
-            ],
-          ]
-        ]
+        "fromX": start.x, "fromY": start.y,
+        "toX": end.x, "toY": end.y,
+        "duration": duration,
       ])
   }
 

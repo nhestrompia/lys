@@ -200,13 +200,13 @@ private struct OperateToolbar: View {
       } label: {
         ToolbarControl(
           symbol: "shippingbox", title: model.repository?.lastPathComponent ?? "Open Project",
-          chevron: true, width: 152)
+          width: 152)
       }
       .menuStyle(.borderlessButton)
       .tint(Color(nsColor: .labelColor))
 
       ToolbarControl(
-        symbol: "arrow.triangle.branch", title: model.branchName, chevron: false, width: 118)
+        symbol: "arrow.triangle.branch", title: model.branchName, width: 118)
 
       Menu {
         if !model.destinations.isEmpty {
@@ -227,7 +227,7 @@ private struct OperateToolbar: View {
         ToolbarControl(
           symbol: "iphone",
           title: model.selectedDestination.map { "\($0.name) · \(runtimeName($0.runtime))" }
-            ?? "Select Simulator", chevron: true, width: 250)
+            ?? "Select Simulator", width: 250)
       }
       .menuStyle(.borderlessButton)
       .tint(Color(nsColor: .labelColor))
@@ -241,7 +241,7 @@ private struct OperateToolbar: View {
           ToolbarControl(
             symbol: "square.stack.3d.up",
             title: model.selectedScheme.isEmpty ? "Scheme" : model.selectedScheme,
-            chevron: true, width: 142)
+            width: 142)
         }
         .menuStyle(.borderlessButton)
         .tint(Color(nsColor: .labelColor))
@@ -279,7 +279,7 @@ private struct OperateToolbar: View {
           Divider()
           Button("Open Simulator", action: model.openSimulator)
         } label: {
-          Image(systemName: "chevron.down")
+          Image(systemName: "ellipsis")
             .font(.system(size: 10, weight: .semibold))
             .frame(width: 42, height: 36)
             .foregroundStyle(.white)
@@ -306,18 +306,12 @@ private struct OperateToolbar: View {
 private struct ToolbarControl: View {
   let symbol: String
   let title: String
-  let chevron: Bool
   let width: CGFloat
 
   var body: some View {
     HStack(spacing: 8) {
       Image(systemName: symbol).font(.system(size: 13, weight: .medium))
       Text(title).lineLimit(1)
-      if chevron {
-        Spacer(minLength: 4)
-        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-          .foregroundStyle(Studio.secondary)
-      }
     }
     .font(.system(size: 12, weight: .medium))
     .padding(.horizontal, 12)
@@ -491,14 +485,11 @@ private struct AgentPanel: View {
                 Text("No ACP-ready adapters detected")
               }
               ForEach(model.adapters) { adapter in
-                Button(adapter.displayName) { model.selectedAdapterID = adapter.id }
+                Button(adapter.displayName) { model.selectAgentAdapter(adapter.id) }
                   .disabled(adapter.executable == nil || model.hasAgentSession)
               }
             } label: {
-              HStack(spacing: 5) {
-                Text(agentLabel)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-              }
+              Text(agentLabel)
               .font(.system(size: 11))
               .foregroundStyle(Studio.secondary)
             }
@@ -513,26 +504,27 @@ private struct AgentPanel: View {
             .foregroundStyle(Studio.accent)
           }
 
-          if model.agentModelOption != nil || model.agentReasoningOption != nil {
-            HStack(spacing: 6) {
-              if let option = model.agentModelOption {
-                AgentConfigPicker(
-                  option: option, title: "Model", value: model.agentModelLabel,
-                  symbol: "cpu")
-              }
-              if let option = model.agentReasoningOption {
-                AgentConfigPicker(
-                  option: option, title: "Reasoning", value: model.agentReasoningLabel,
-                  symbol: "brain.head.profile")
-              }
-              Spacer(minLength: 0)
+          HStack(spacing: 6) {
+            if let option = model.agentModelOption {
+              AgentConfigPicker(
+                option: option, title: "Model", value: model.agentModelLabel,
+                symbol: "cpu")
+            } else {
+              AgentConfigPlaceholder(title: "Model", symbol: "cpu")
             }
-          } else if model.hasAgentSession {
-            Text("This CLI did not report model or reasoning controls.")
-              .font(.system(size: 9.5))
-              .foregroundStyle(Studio.tertiary)
-              .lineLimit(1)
+            if let option = model.agentReasoningOption {
+              AgentConfigPicker(
+                option: option, title: "Reasoning", value: model.agentReasoningLabel,
+                symbol: "brain.head.profile")
+            } else {
+              AgentConfigPlaceholder(title: "Reasoning", symbol: "brain.head.profile")
+            }
+            Spacer(minLength: 0)
           }
+          Text(model.agentConfigStatusText)
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.tertiary)
+            .lineLimit(2)
         }
       }
       .padding(16)
@@ -594,14 +586,13 @@ private struct AgentConfigPicker: View {
         }
       }
     } label: {
-      HStack(spacing: 5) {
+      HStack(spacing: 6) {
         Image(systemName: symbol)
-        Text(value)
+        Text("\(title): \(value)")
+          .font(.system(size: 9.5, weight: .medium))
           .lineLimit(1)
-        Image(systemName: "chevron.down")
-          .font(.system(size: 7, weight: .semibold))
+          .truncationMode(.middle)
       }
-      .font(.system(size: 9.5, weight: .medium))
       .foregroundStyle(Studio.secondary)
       .padding(.horizontal, 8)
       .frame(height: 26)
@@ -609,12 +600,37 @@ private struct AgentConfigPicker: View {
       .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
     .menuStyle(.borderlessButton)
-    .help(option.description ?? "Choose the agent \(title.lowercased())")
-    .disabled(option.options.isEmpty || !model.hasAgentSession || model.isBusy)
+    .help(
+      model.canChangeAgentConfigOption(option)
+        ? (option.description ?? "Choose the agent \(title.lowercased())")
+        : model.agentConfigStatusText)
+    .disabled(
+      !model.canChangeAgentConfigOption(option)
+        || (model.hasAgentSession && model.isBusy))
   }
 
   private func isCurrent(_ item: ACPConfigOptionValue) -> Bool {
     option.currentValue?.stringValue == item.value
+  }
+}
+
+private struct AgentConfigPlaceholder: View {
+  let title: String
+  let symbol: String
+
+  var body: some View {
+    HStack(spacing: 6) {
+      Image(systemName: symbol)
+      Text("\(title): Not reported")
+        .font(.system(size: 9.5, weight: .medium))
+        .foregroundStyle(Studio.tertiary)
+    }
+    .foregroundStyle(Studio.secondary)
+    .padding(.horizontal, 8)
+    .frame(height: 26)
+    .background(Studio.raised)
+    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    .help("The selected CLI has not reported a \(title.lowercased()) yet.")
   }
 }
 
@@ -664,10 +680,7 @@ private struct AppStage: View {
               Button(scheme) { model.selectScheme(scheme) }
             }
           } label: {
-            HStack(spacing: 5) {
-              Text(model.selectedScheme.isEmpty ? "App" : model.selectedScheme)
-              Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-            }
+            Text(model.selectedScheme.isEmpty ? "App" : model.selectedScheme)
             .font(.system(size: 12, weight: .semibold))
           }
           .menuStyle(.borderlessButton)
@@ -695,12 +708,13 @@ private struct AppStage: View {
           }
           Spacer()
           Button(action: model.openSimulator) {
-            Label("Live Simulator", systemImage: "arrow.up.right.square")
+            Label("Open Simulator", systemImage: "arrow.up.right.square")
               .font(.system(size: 11, weight: .medium))
           }
-          .buttonStyle(.plain)
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
           .disabled(model.preflight?.isFullXcode != true)
-          .help("Open Apple's Simulator for native real-time interaction")
+          .help("Open Apple's separate Simulator window")
           Button(action: model.refreshApp) {
             Label("Refresh", systemImage: "arrow.clockwise")
               .font(.system(size: 11, weight: .medium))
@@ -712,6 +726,7 @@ private struct AppStage: View {
           Menu {
             Button("Refresh App", systemImage: "arrow.clockwise", action: model.refreshApp)
               .disabled(model.selectedTarget == nil || model.isBusy)
+            Toggle("Open Apple Simulator after Run", isOn: $model.openLiveSimulatorOnRun)
             Button(
               "Capture Screenshot", systemImage: "camera", action: model.captureCurrentScreenshot
             )
@@ -813,27 +828,9 @@ private struct AppStage: View {
   }
 
   private var previewInteractionStatus: some View {
-    HStack(spacing: 6) {
-      if model.previewInteractionState == .warming || model.previewInteractionState == .sending {
-        ProgressView().controlSize(.mini)
-      } else {
-        Circle()
-          .fill(
-            model.previewInteractionState == .ready ? Studio.success : Studio.secondary.opacity(0.6)
-          )
-          .frame(width: 7, height: 7)
-      }
-      Text(model.previewInteractionState.label)
-        .font(.system(size: 10.5, weight: .medium))
-        .foregroundStyle(Studio.secondary)
-      if let latency = model.previewLatencyMS {
-        Text("\(latency) ms")
-          .font(.system(size: 9.5).monospacedDigit())
-          .foregroundStyle(Studio.tertiary)
-      }
-    }
-    .fixedSize()
-    .help("Preview taps are remote. Use Live Simulator for native real-time interaction.")
+    SimulatorInteractionStatus(
+      session: model.simulatorLiveSession, fallbackState: model.previewInteractionState,
+      fallbackLatencyMS: model.previewLatencyMS)
   }
 
   private func adjustZoom(by amount: CGFloat) {
@@ -851,6 +848,45 @@ private struct AppStage: View {
     }
     .buttonStyle(.plain)
     .disabled(model.selectedDestination == nil)
+  }
+}
+
+private struct SimulatorInteractionStatus: View {
+  @ObservedObject var session: SimulatorLiveSession
+  let fallbackState: PreviewInteractionState
+  let fallbackLatencyMS: Int?
+
+  var body: some View {
+    HStack(spacing: 6) {
+      if session.phase == .connecting
+        || (!session.isStreaming
+          && (fallbackState == .warming || fallbackState == .sending))
+      {
+        ProgressView().controlSize(.mini)
+      } else {
+        Circle()
+          .fill(session.isStreaming ? Studio.success : fallbackColor)
+          .frame(width: 7, height: 7)
+      }
+      Text(session.phase == .idle ? fallbackState.label : session.phase.label)
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(Studio.secondary)
+      if session.isStreaming {
+        Text("\(session.measuredFPS) fps")
+          .font(.system(size: 9.5).monospacedDigit())
+          .foregroundStyle(Studio.tertiary)
+      } else if let fallbackLatencyMS {
+        Text("\(fallbackLatencyMS) ms")
+          .font(.system(size: 9.5).monospacedDigit())
+          .foregroundStyle(Studio.tertiary)
+      }
+    }
+    .fixedSize()
+    .help("Continuous CoreSimulator framebuffer with direct HID input")
+  }
+
+  private var fallbackColor: Color {
+    fallbackState == .ready ? Studio.success : Studio.secondary.opacity(0.6)
   }
 }
 
@@ -906,6 +942,10 @@ private struct DevicePreview: View {
                 })
           }
           .help(previewInteractionHelp)
+          SimulatorLiveSurface(session: model.simulatorLiveSession)
+            .help(
+              "Live CoreSimulator display. Click, drag, scroll, and type directly in the app."
+            )
           if let tap = model.previewTapFeedback {
             GeometryReader { screen in
               ZStack {
@@ -919,20 +959,6 @@ private struct DevicePreview: View {
               .position(
                 x: CGFloat(tap.x) * screen.size.width,
                 y: CGFloat(tap.y) * screen.size.height)
-            }
-            .allowsHitTesting(false)
-          }
-          if !model.isSemanticAutomationReady {
-            VStack {
-              Spacer()
-              Label("Click to enable interaction", systemImage: "hand.tap")
-                .font(.system(size: max(8, 10 * scale), weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10 * scale)
-                .padding(.vertical, 7 * scale)
-                .background(Color.black.opacity(0.72))
-                .clipShape(Capsule())
-                .padding(.bottom, 14 * scale)
             }
             .allowsHitTesting(false)
           }
@@ -997,9 +1023,7 @@ private struct DevicePreview: View {
   }
 
   private var previewInteractionHelp: String {
-    model.isSemanticAutomationReady
-      ? "Click to tap or drag to scroll the remote preview. Use Live Simulator for native real-time interaction. Manual gestures do not count as verification evidence."
-      : "Click to set up WebDriverAgent interaction."
+    "Interact with the continuously streamed Simulator display. Manual gestures stay separate from deterministic agent verification evidence."
   }
 
   private var deviceMessage: String {
@@ -1240,6 +1264,10 @@ private struct CapturedScreenshotView: View {
         .background(Studio.raised)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
       }
+      ArtifactActionBar(
+        paths: model.currentScreenshot.map { [$0.path] } ?? [],
+        previewImage: model.currentScreenshotImage,
+        compact: true)
     }
     .padding(16)
     .frame(width: 312)
@@ -1249,6 +1277,7 @@ private struct CapturedScreenshotView: View {
 
 private struct VerificationPanel: View {
   @EnvironmentObject var model: AppModel
+  @State private var selectedEvidence: Evidence?
 
   var body: some View {
     VStack(spacing: 12) {
@@ -1288,7 +1317,7 @@ private struct VerificationPanel: View {
         HStack {
           VStack(alignment: .leading, spacing: 2) {
             Text("Evidence").font(.system(size: 12, weight: .semibold))
-            Text("Machine-recorded proof · manual preview actions are excluded")
+            Text("Machine-recorded proof · manual preview actions are excluded · click to inspect")
               .font(.system(size: 9.5))
               .foregroundStyle(Studio.secondary)
               .lineLimit(1)
@@ -1316,7 +1345,7 @@ private struct VerificationPanel: View {
           ScrollView {
             LazyVStack(spacing: 0) {
               ForEach(Array(model.verificationEvidence.reversed())) { evidence in
-                EvidenceRow(evidence: evidence)
+                EvidenceRow(evidence: evidence) { selectedEvidence = evidence }
                 if evidence.id != model.verificationEvidence.first?.id {
                   Divider().overlay(Studio.separator)
                 }
@@ -1330,6 +1359,9 @@ private struct VerificationPanel: View {
       .background(Studio.surface)
       .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
       .shadow(color: .black.opacity(0.04), radius: 14, y: 6)
+      .popover(item: $selectedEvidence, arrowEdge: .trailing) { evidence in
+        EvidenceArtifactInspector(evidence: evidence)
+      }
     }
   }
 
@@ -1488,23 +1520,42 @@ private struct VerificationGlyph: View {
 
 private struct EvidenceRow: View {
   let evidence: Evidence
+  let onOpen: () -> Void
+
   var body: some View {
-    HStack(spacing: 12) {
-      ZStack {
-        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Studio.raised)
-          .frame(width: 48, height: 42)
-        Image(systemName: symbol).font(.system(size: 17, weight: .regular))
+    Button(action: onOpen) {
+      HStack(spacing: 12) {
+        ZStack {
+          RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Studio.raised)
+            .frame(width: 48, height: 42)
+          Image(systemName: symbol).font(.system(size: 17, weight: .regular))
+        }
+        VStack(alignment: .leading, spacing: 4) {
+          Text(title).font(.system(size: 12, weight: .semibold))
+          Text(detail)
+            .font(.system(size: 10).monospacedDigit()).foregroundStyle(Studio.secondary)
+            .lineLimit(1)
+        }
+        Spacer(minLength: 6)
+        VerificationGlyph(status: status, size: 18)
+        Image(systemName: "chevron.right")
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundStyle(Studio.tertiary)
       }
-      VStack(alignment: .leading, spacing: 4) {
-        Text(title).font(.system(size: 12, weight: .semibold))
-        Text(evidence.createdAt.formatted(date: .omitted, time: .shortened))
-          .font(.system(size: 10).monospacedDigit()).foregroundStyle(Studio.secondary)
-      }
-      Spacer()
-      VerificationGlyph(status: status, size: 18)
+      .padding(.horizontal, 18)
+      .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
     }
-    .padding(.horizontal, 18)
-    .frame(minHeight: 68)
+    .buttonStyle(.plain)
+    .contentShape(Rectangle())
+    .help("Open \(title.lowercased()) artifacts")
+    .accessibilityLabel("Open \(title.lowercased()) artifacts")
+  }
+
+  private var detail: String {
+    let timestamp = evidence.createdAt.formatted(date: .omitted, time: .shortened)
+    let count = evidence.artifactPaths.count
+    if count == 0 { return "\(timestamp) · details" }
+    return "\(timestamp) · \(count) \(count == 1 ? "file" : "files") · inspect"
   }
   private var title: String {
     switch evidence.kind {
@@ -1536,6 +1587,232 @@ private struct EvidenceRow: View {
     case .blocked: .blocked
     case .informational: .waiting
     }
+  }
+}
+
+private struct EvidenceArtifactInspector: View {
+  let evidence: Evidence
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .top, spacing: 10) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(title)
+            .font(.system(size: 14, weight: .semibold))
+          Text("Generation \(evidence.taskGeneration) · \(statusLabel)")
+            .font(.system(size: 10).monospacedDigit())
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer(minLength: 8)
+        Image(systemName: symbol)
+          .foregroundStyle(Studio.accent)
+      }
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 12) {
+          if let previewImage {
+            Image(nsImage: previewImage)
+              .resizable()
+              .scaledToFit()
+              .frame(maxWidth: .infinity, maxHeight: 300)
+              .background(Studio.raised)
+              .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          }
+
+          if evidence.artifactPaths.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+              Label("No file attached", systemImage: "doc.questionmark")
+                .font(.system(size: 11, weight: .semibold))
+              Text("This record contains diagnostics only.")
+                .font(.system(size: 10))
+                .foregroundStyle(Studio.secondary)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Studio.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+          } else {
+            VStack(alignment: .leading, spacing: 7) {
+              Text("Attached files")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Studio.secondary)
+              ForEach(evidence.artifactPaths, id: \.self) { path in
+                VStack(alignment: .leading, spacing: 2) {
+                  Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+                  Text(path)
+                    .font(.system(size: 9).monospaced())
+                    .foregroundStyle(Studio.tertiary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                }
+              }
+            }
+          }
+
+          if !evidence.diagnosticSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+              Text("Record detail")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Studio.secondary)
+              Text(evidence.diagnosticSummary)
+                .font(.system(size: 10))
+                .foregroundStyle(Studio.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+          }
+        }
+      }
+      .frame(minHeight: 80, maxHeight: 420)
+
+      ArtifactActionBar(paths: evidence.artifactPaths, previewImage: previewImage)
+    }
+    .padding(16)
+    .frame(width: 360)
+    .background(Studio.surface)
+  }
+
+  private var previewImage: NSImage? {
+    evidence.artifactPaths.compactMap { path -> NSImage? in
+      let url = URL(fileURLWithPath: path)
+      guard ["png", "jpg", "jpeg", "tif", "tiff"].contains(url.pathExtension.lowercased()) else {
+        return nil
+      }
+      return NSImage(contentsOf: url)
+    }.first
+  }
+
+  private var title: String {
+    switch evidence.kind {
+    case .build: "Build log"
+    case .test: "Test result"
+    case .launch: "Launch record"
+    case .uiAction: "UI action"
+    case .uiAssertion: "UI assertion"
+    case .screenshot: "Screenshot"
+    case .runtimeLog: "App log"
+    case .diff: "Change set"
+    }
+  }
+
+  private var symbol: String {
+    switch evidence.kind {
+    case .build: "terminal"
+    case .test: "checklist"
+    case .launch: "play.rectangle"
+    case .uiAction, .uiAssertion: "viewfinder"
+    case .screenshot: "iphone"
+    case .runtimeLog: "list.bullet.rectangle"
+    case .diff: "doc.text.magnifyingglass"
+    }
+  }
+
+  private var statusLabel: String {
+    switch evidence.status {
+    case .passed: "passed"
+    case .failed: "failed"
+    case .blocked: "blocked"
+    case .informational: "informational"
+    }
+  }
+}
+
+private struct ArtifactActionBar: View {
+  let paths: [String]
+  let previewImage: NSImage?
+  var compact = false
+  @State private var feedback: String?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 6) {
+        if previewImage != nil {
+          actionButton("Copy Image", symbol: "doc.on.clipboard", enabled: true) {
+            copyImage()
+          }
+        }
+        actionButton("Copy Path", symbol: "link", enabled: !paths.isEmpty) {
+          copyPaths()
+        }
+        actionButton("Reveal", symbol: "folder", enabled: hasExistingArtifact) {
+          revealArtifacts()
+        }
+        if !compact {
+          actionButton("Open", symbol: "arrow.up.right.square", enabled: hasExistingArtifact) {
+            openArtifact()
+          }
+        }
+      }
+      if let feedback {
+        Text(feedback)
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+      }
+    }
+  }
+
+  private var artifactURLs: [URL] { paths.map { URL(fileURLWithPath: $0) } }
+  private var existingArtifactURLs: [URL] {
+    artifactURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+  }
+  private var hasExistingArtifact: Bool { !existingArtifactURLs.isEmpty }
+
+  private func actionButton(
+    _ title: String, symbol: String, enabled: Bool, action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      Label(title, systemImage: symbol)
+        .font(.system(size: compact ? 9.5 : 10))
+    }
+    .buttonStyle(.bordered)
+    .controlSize(.small)
+    .disabled(!enabled)
+  }
+
+  private func copyImage() {
+    guard let previewImage, let tiff = previewImage.tiffRepresentation else {
+      feedback = "Image is not available"
+      return
+    }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setData(tiff, forType: .tiff)
+    if let representation = NSBitmapImageRep(data: tiff),
+      let png = representation.representation(using: .png, properties: [:])
+    {
+      NSPasteboard.general.setData(png, forType: NSPasteboard.PasteboardType("public.png"))
+    }
+    feedback = "Image copied"
+  }
+
+  private func copyPaths() {
+    guard !paths.isEmpty else {
+      feedback = "No artifact path available"
+      return
+    }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+    feedback = paths.count == 1 ? "Path copied" : "Paths copied"
+  }
+
+  private func revealArtifacts() {
+    guard !existingArtifactURLs.isEmpty else {
+      feedback = "The artifact is no longer on disk"
+      return
+    }
+    NSWorkspace.shared.activateFileViewerSelecting(existingArtifactURLs)
+    feedback = "Revealed in Finder"
+  }
+
+  private func openArtifact() {
+    guard let url = existingArtifactURLs.first else {
+      feedback = "The artifact is no longer on disk"
+      return
+    }
+    NSWorkspace.shared.open(url)
+    feedback = "Opened \(url.lastPathComponent)"
   }
 }
 
@@ -1847,6 +2124,19 @@ private struct SettingsWorkspace: View {
           }
         }
         SettingsGroup(title: "Compatibility gates") {
+          SettingRow(
+            symbol: SimulatorLiveSession.helperAvailable ? "iphone.gen3.radiowaves.left.and.right" : "video.slash",
+            title: SimulatorLiveSession.helperAvailable
+              ? "In-app Simulator ready" : "In-app Simulator setup required",
+            detail: SimulatorLiveSession.helperAvailable
+              ? "Continuous CoreSimulator framebuffer and low-latency HID input are available. Screenshots remain separate evidence artifacts."
+              : "Install the pinned AXe helper to enable the continuous in-app framebuffer and direct touch input."
+          ) {
+            Text(SimulatorLiveSession.helperAvailable ? "Ready" : "Setup required")
+              .font(.system(size: 11, weight: .medium))
+              .foregroundStyle(
+                SimulatorLiveSession.helperAvailable ? Studio.success : Studio.warning)
+          }
           SettingRow(
             symbol: wdaSymbol, title: model.wdaStatus.title, detail: model.wdaStatus.detail
           ) {
