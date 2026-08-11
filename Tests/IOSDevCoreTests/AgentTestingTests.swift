@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import IOSDevCore
@@ -59,6 +60,27 @@ import Testing
     assertVisible: true)
   #expect(currentAssertion.assertsCurrentActionVisibility)
   #expect(!currentAssertion.requiresScreenChange)
+}
+
+@Test func sparseAgentJourneyStepDoesNotRequireLegacyAssertionFlag() throws {
+  let payload = JSONValue.array([
+    .object([
+      "id": .string("start"),
+      "title": .string("Start quiz"),
+      "actionID": .string("action_start"),
+      "action": .string("tap"),
+      "expectScreenChanged": .bool(true),
+    ])
+  ])
+  let data = try JSONEncoder().encode(payload)
+  let steps = try JSONDecoder().decode([JourneyStep].self, from: data)
+
+  let step = try #require(steps.first)
+  #expect(step.id == "start")
+  #expect(step.actionID == "action_start")
+  #expect(step.action == "tap")
+  #expect(step.expectScreenChanged == true)
+  #expect(!step.assertVisible)
 }
 
 @Test func goldenQuizTraceUsesOneHostOwnedJourneyWithoutLifecycleThrash() {

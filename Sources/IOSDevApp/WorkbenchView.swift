@@ -276,8 +276,6 @@ private struct OperateToolbar: View {
             Divider()
             Toggle("Start Expo development server", isOn: $model.startDevServerOnRun)
           }
-          Divider()
-          Button("Open Simulator", action: model.openSimulator)
         } label: {
           Image(systemName: "ellipsis")
             .font(.system(size: 10, weight: .semibold))
@@ -378,8 +376,26 @@ private struct AgentPanel: View {
               .foregroundStyle(Studio.secondary)
               .fixedSize(horizontal: false, vertical: true)
             if !model.taskTitle.isEmpty {
-              StatusBadge(title: model.status, state: badgeState)
+              HStack(spacing: 8) {
+                StatusBadge(title: model.status, state: badgeState)
+                Spacer()
+                if model.canStopAgent {
+                  Button(action: model.stopAgent) {
+                    Label("Stop agent", systemImage: "stop.fill")
+                      .font(.system(size: 10.5, weight: .semibold))
+                  }
+                  .buttonStyle(.bordered)
+                  .controlSize(.small)
+                  .tint(Studio.warning)
+                  .help("Stop the agent while preserving the running app and development server")
+                  .accessibilityLabel("Stop agent")
+                }
+              }
             }
+          }
+
+          if let summary = model.taskSummary {
+            TaskSummaryCard(summary: summary)
           }
 
           if model.needsExpoPreparation {
@@ -494,8 +510,8 @@ private struct AgentPanel: View {
               }
             } label: {
               Text(agentLabel)
-              .font(.system(size: 11))
-              .foregroundStyle(Studio.secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(Studio.secondary)
             }
             .menuStyle(.borderlessButton)
             Spacer()
@@ -570,6 +586,42 @@ private struct AgentPanel: View {
   }
 }
 
+private struct TaskSummaryCard: View {
+  let summary: TaskCompletionSummary
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 9) {
+      HStack(spacing: 7) {
+        Image(systemName: summary.passed ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+          .foregroundStyle(summary.passed ? Studio.success : Studio.warning)
+        Text(summary.title).font(.system(size: 12, weight: .semibold))
+      }
+      summaryRow("Done", summary.done)
+      summaryRow("Worked", summary.worked)
+      summaryRow("Lacking", summary.lacking)
+    }
+    .padding(12)
+    .background((summary.passed ? Studio.success : Studio.warning).opacity(0.09))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(
+      "\(summary.title). Done: \(summary.done) Worked: \(summary.worked) Lacking: \(summary.lacking)"
+    )
+  }
+
+  private func summaryRow(_ label: String, _ value: String) -> some View {
+    HStack(alignment: .top, spacing: 8) {
+      Text(label)
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(Studio.secondary)
+        .frame(width: 48, alignment: .leading)
+      Text(value)
+        .font(.system(size: 10.5))
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+}
+
 private struct JourneyProgressSection: View {
   let journey: JourneyRecord
 
@@ -641,7 +693,9 @@ private struct JourneyProgressSection: View {
   }
   private var progressLabel: String {
     if hasRecoverableStep { return "Retry ready" }
-    if journey.steps.isEmpty { return journey.status.rawValue.replacingOccurrences(of: "CurrentApp", with: "") }
+    if journey.steps.isEmpty {
+      return journey.status.rawValue.replacingOccurrences(of: "CurrentApp", with: "")
+    }
     return "\(completedCount)/\(journey.steps.count) · \(journey.status.rawValue)"
   }
   private var hasRecoverableStep: Bool {
@@ -718,7 +772,8 @@ private struct AgentConfigPicker: View {
     .help(
       model.canChangeAgentConfigOption(option)
         ? (option.description ?? "Choose the agent \(title.lowercased())")
-        : model.agentConfigStatusText)
+        : model.agentConfigStatusText
+    )
     .disabled(
       !model.canChangeAgentConfigOption(option)
         || (model.hasAgentSession && model.isBusy))
@@ -796,7 +851,7 @@ private struct AppStage: View {
             }
           } label: {
             Text(model.selectedScheme.isEmpty ? "App" : model.selectedScheme)
-            .font(.system(size: 12, weight: .semibold))
+              .font(.system(size: 12, weight: .semibold))
           }
           .menuStyle(.borderlessButton)
           if model.designPreview {
@@ -823,24 +878,27 @@ private struct AppStage: View {
           }
           if let journey = model.activeJourney {
             let completed = journey.steps.filter { $0.status == .passed }.count
-            let retryReady = journey.status == .ready
+            let retryReady =
+              journey.status == .ready
               && journey.steps.contains { $0.status == .failed }
             Label {
               Text(
                 retryReady
                   ? "Agent retry ready"
                   : (journey.steps.isEmpty
-                  ? "Agent testing"
-                  : "Agent testing \(completed)/\(journey.steps.count)")
+                    ? "Agent testing"
+                    : "Agent testing \(completed)/\(journey.steps.count)")
               )
             } icon: {
               Image(
-                systemName: retryReady ? "arrow.clockwise.circle.fill"
+                systemName: retryReady
+                  ? "arrow.clockwise.circle.fill"
                   : (journey.status == .passed ? "checkmark.circle.fill" : "scope"))
             }
             .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(
-              retryReady || journey.status == .failed ? Studio.warning : Studio.accent)
+              retryReady || journey.status == .failed ? Studio.warning : Studio.accent
+            )
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Studio.accentSoft)
@@ -848,14 +906,6 @@ private struct AppStage: View {
             .help(journey.goal)
           }
           Spacer()
-          Button(action: model.openSimulator) {
-            Label("Open Simulator", systemImage: "arrow.up.right.square")
-              .font(.system(size: 11, weight: .medium))
-          }
-          .buttonStyle(.borderedProminent)
-          .controlSize(.small)
-          .disabled(model.preflight?.isFullXcode != true)
-          .help("Open Apple's separate Simulator window")
           Button(action: model.refreshApp) {
             Label("Refresh", systemImage: "arrow.clockwise")
               .font(.system(size: 11, weight: .medium))
@@ -867,7 +917,6 @@ private struct AppStage: View {
           Menu {
             Button("Refresh App", systemImage: "arrow.clockwise", action: model.refreshApp)
               .disabled(model.selectedTarget == nil || model.isBusy)
-            Toggle("Open Apple Simulator after Run", isOn: $model.openLiveSimulatorOnRun)
             Button(
               "Capture Screenshot", systemImage: "camera", action: model.captureCurrentScreenshot
             )
@@ -883,7 +932,7 @@ private struct AppStage: View {
 
         HStack(spacing: 0) {
           ScrollView([.horizontal, .vertical]) {
-            DevicePreview(height: fittedDeviceHeight * previewZoom)
+            EmbeddedSimulatorSurface(height: fittedDeviceHeight * previewZoom)
               .padding(.horizontal, 22)
               .padding(.vertical, 14)
               .frame(
@@ -892,7 +941,8 @@ private struct AppStage: View {
           }
           .frame(
             minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
-            maxHeight: .infinity)
+            maxHeight: .infinity
+          )
           .scrollIndicators(.automatic)
           .background(Studio.backdrop)
           .clipped()
@@ -955,7 +1005,7 @@ private struct AppStage: View {
           .contentShape(Rectangle())
       }
       .menuStyle(.borderlessButton)
-      .accessibilityLabel("App preview zoom")
+      .accessibilityLabel("Embedded Simulator zoom")
       Button {
         adjustZoom(by: 0.1)
       } label: {
@@ -1006,10 +1056,10 @@ private struct SimulatorInteractionStatus: View {
         ProgressView().controlSize(.mini)
       } else {
         Circle()
-          .fill(session.isStreaming ? Studio.success : fallbackColor)
+          .fill(interactionColor)
           .frame(width: 7, height: 7)
       }
-      Text(session.phase == .idle ? fallbackState.label : session.phase.label)
+      Text(interactionLabel)
         .font(.system(size: 10.5, weight: .medium))
         .foregroundStyle(Studio.secondary)
       if session.isStreaming {
@@ -1023,7 +1073,24 @@ private struct SimulatorInteractionStatus: View {
       }
     }
     .fixedSize()
-    .help("Continuous CoreSimulator framebuffer with direct HID input")
+    .help(interactionHelp)
+  }
+
+  private var interactionLabel: String {
+    if session.isStreaming { return session.inputPhase.label }
+    return session.phase == .idle ? fallbackState.label : session.phase.label
+  }
+
+  private var interactionHelp: String {
+    session.inputPhase.detail
+      ?? "Continuous CoreSimulator framebuffer with direct HID input"
+  }
+
+  private var interactionColor: Color {
+    if session.isStreaming {
+      return session.inputPhase == .ready ? Studio.success : Studio.warning
+    }
+    return fallbackColor
   }
 
   private var fallbackColor: Color {
@@ -1031,7 +1098,7 @@ private struct SimulatorInteractionStatus: View {
   }
 }
 
-private struct DevicePreview: View {
+private struct EmbeddedSimulatorSurface: View {
   @EnvironmentObject var model: AppModel
   let height: CGFloat
 
@@ -1069,7 +1136,8 @@ private struct DevicePreview: View {
                   model.tapPreview(
                     normalizedX: value.location.x / screen.size.width,
                     normalizedY: value.location.y / screen.size.height)
-                })
+                }
+              )
               .highPriorityGesture(
                 DragGesture(minimumDistance: 14).onEnded { value in
                   guard screen.size.width > 0, screen.size.height > 0 else { return }
@@ -1083,10 +1151,20 @@ private struct DevicePreview: View {
                 })
           }
           .help(previewInteractionHelp)
-          SimulatorLiveSurface(session: model.simulatorLiveSession)
-            .help(
-              "Live CoreSimulator display. Click, drag, scroll, and type directly in the app."
-            )
+          SimulatorLiveSurface(
+            session: model.simulatorLiveSession,
+            onTap: { point in
+              model.tapPreview(normalizedX: Double(point.x), normalizedY: Double(point.y))
+            },
+            onSwipe: { start, end in
+              model.swipePreview(
+                startX: Double(start.x), startY: Double(start.y),
+                endX: Double(end.x), endY: Double(end.y))
+            }
+          )
+          .help(
+            "Live CoreSimulator display. Click, drag, scroll, and type directly in the app."
+          )
           if let tap = model.previewTapFeedback {
             GeometryReader { screen in
               ZStack {
@@ -1137,7 +1215,9 @@ private struct DevicePreview: View {
     .frame(width: width, height: height)
     .accessibilityElement(children: .combine)
     .accessibilityLabel(
-      model.currentScreenshot == nil ? "No app screenshot" : "Latest app screenshot")
+      model.currentScreenshot == nil
+        ? "Embedded Simulator unavailable"
+        : "Embedded Simulator displaying the current app")
   }
 
   private func deviceOperation(title: String, detail: String) -> some View {
@@ -1458,14 +1538,19 @@ private struct VerificationPanel: View {
         HStack {
           VStack(alignment: .leading, spacing: 2) {
             Text("Evidence").font(.system(size: 12, weight: .semibold))
-            Text("Machine-recorded proof · manual preview actions are excluded · click to inspect")
-              .font(.system(size: 9.5))
-              .foregroundStyle(Studio.secondary)
-              .lineLimit(1)
+            Text(
+              "Machine-recorded proof · manual Simulator actions are excluded · click to inspect"
+            )
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.secondary)
+            .lineLimit(1)
           }
           Spacer()
-          Text(model.verificationEvidence.isEmpty ? "No proof" : "\(model.verificationEvidence.count) artifacts")
-            .font(.system(size: 11)).foregroundStyle(Studio.accent)
+          Text(
+            model.verificationEvidence.isEmpty
+              ? "No proof" : "\(model.verificationEvidence.count) artifacts"
+          )
+          .font(.system(size: 11)).foregroundStyle(Studio.accent)
         }
         .padding(.horizontal, 20)
         .frame(height: 58)
@@ -1475,11 +1560,11 @@ private struct VerificationPanel: View {
             Image(systemName: "checklist.unchecked").font(.system(size: 24, weight: .light))
               .foregroundStyle(Studio.tertiary)
             Text(
-              "Manual preview actions are exploratory, not verification proof. Capture a stable screenshot or run an assertion."
+              "Manual Simulator actions are exploratory, not verification proof. Capture a stable screenshot or run an assertion."
             )
-              .font(.system(size: 11)).foregroundStyle(Studio.secondary)
-              .multilineTextAlignment(.center)
-              .frame(maxWidth: 280)
+            .font(.system(size: 11)).foregroundStyle(Studio.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 280)
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -2266,7 +2351,8 @@ private struct SettingsWorkspace: View {
         }
         SettingsGroup(title: "Compatibility gates") {
           SettingRow(
-            symbol: SimulatorLiveSession.helperAvailable ? "iphone.gen3.radiowaves.left.and.right" : "video.slash",
+            symbol: SimulatorLiveSession.helperAvailable
+              ? "iphone.gen3.radiowaves.left.and.right" : "video.slash",
             title: SimulatorLiveSession.helperAvailable
               ? "In-app Simulator ready" : "In-app Simulator setup required",
             detail: SimulatorLiveSession.helperAvailable
@@ -2605,9 +2691,9 @@ private struct AgentPermissionCard: View {
           .lineLimit(3)
           .padding(9)
           .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.black.opacity(0.055))
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .accessibilityLabel("Command to approve")
+          .background(Color.black.opacity(0.055))
+          .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+          .accessibilityLabel("Command to approve")
       }
 
       if let scopeDetail = permission.scopeDetail, !scopeDetail.isEmpty {

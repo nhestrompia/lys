@@ -18,6 +18,8 @@ enum IOSDevSnapshotMain {
     let model = AppModel()
     if arguments.contains("--settings") {
       model.loadSettingsPreview()
+    } else if arguments.contains("--summary") {
+      model.loadTaskSummaryPreview()
     } else if arguments.contains("--journey-recovery") {
       model.loadJourneyRecoveryPreview()
     } else if arguments.contains("--permission") {

@@ -89,3 +89,79 @@ private func temporaryRuntimeRoot() throws -> URL {
   #expect(restarted.result?["goal"] == .string("Validate quiz accessibility"))
   #expect(restarted.result?["id"]?.stringValue != firstID)
 }
+
+@Test func hostStopBlocksAgentActionsUntilTheUserResumes() async throws {
+  let root = try temporaryRuntimeRoot()
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Run the unit test suite"), container: nil,
+    scheme: "Quiz", destination: nil, target: nil, startDevelopmentServer: false)
+  _ = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+  _ = await service.handle(
+    .init(
+      id: .int(2), method: "journey.run",
+      params: .object(["goal": .string("Validate the quiz")])),
+    authenticated: &authenticated)
+
+  let stopped = await service.handle(
+    .init(id: .int(3), method: "session.stop"), authenticated: &authenticated)
+  #expect(stopped.result?["stopped"] == .bool(true))
+  let rejected = await service.handle(
+    .init(
+      id: .int(4), method: "journey.run",
+      params: .object(["goal": .string("Keep acting without the user")])),
+    authenticated: &authenticated)
+  #expect(rejected.error?.code == -32097)
+
+  _ = await service.handle(
+    .init(id: .int(5), method: "session.resume"), authenticated: &authenticated)
+  let resumed = await service.handle(
+    .init(
+      id: .int(6), method: "journey.run",
+      params: .object(["goal": .string("Continue after the user asks")])),
+    authenticated: &authenticated)
+  #expect(resumed.error == nil)
+}
+
+@Test func runtimeAcceptsSparseAgentJourneyStepsWithoutDecoderFailure() async throws {
+  let root = try temporaryRuntimeRoot()
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Run the unit test suite"), container: nil,
+    scheme: "Quiz", destination: nil, target: nil, startDevelopmentServer: false)
+  _ = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+  let started = await service.handle(
+    .init(
+      id: .int(2), method: "journey.run",
+      params: .object(["goal": .string("Verify quiz entry")])),
+    authenticated: &authenticated)
+  let journeyID = try #require(started.result?["id"]?.stringValue)
+
+  let continued = await service.handle(
+    .init(
+      id: .int(3), method: "journey.run",
+      params: .object([
+        "goal": .string("Verify quiz entry"),
+        "journeyID": .string(journeyID),
+        "steps": .array([
+          .object([
+            "id": .string("open-quiz"),
+            "title": .string("Open quiz"),
+            "actionID": .string("screen-action"),
+            "action": .string("tap"),
+            "expectScreenChanged": .bool(true),
+          ])
+        ]),
+      ])),
+    authenticated: &authenticated)
+
+  #expect(continued.error == nil)
+  #expect(continued.result?["recoverable"] == .bool(true))
+  #expect(continued.result?["steps"]?.arrayValue?.first?["step"]?["assertVisible"] == .bool(false))
+}

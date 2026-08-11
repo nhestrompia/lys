@@ -23,6 +23,27 @@ enum SimulatorLivePhase: Equatable {
   }
 }
 
+enum SimulatorInputPhase: Equatable {
+  case idle
+  case connecting
+  case ready
+  case fallback(String)
+
+  var label: String {
+    switch self {
+    case .idle: "Input idle"
+    case .connecting: "Connecting touch…"
+    case .ready: "Live"
+    case .fallback: "Live · semantic input"
+    }
+  }
+
+  var detail: String? {
+    if case .fallback(let detail) = self { return detail }
+    return nil
+  }
+}
+
 private struct SimulatorFrameGeometry: Sendable {
   let width: Int
   let height: Int
@@ -42,6 +63,7 @@ private final class SimulatorFrame: @unchecked Sendable {
 /// does not re-render 30 times per second.
 final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
   @Published private(set) var phase: SimulatorLivePhase = .idle
+  @Published private(set) var inputPhase: SimulatorInputPhase = .idle
   @Published private(set) var measuredFPS = 0
 
   private let frameQueue = DispatchQueue(
@@ -58,6 +80,7 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
   private let hid = SimulatorHIDBrokerClient()
 
   var isStreaming: Bool { phase == .streaming }
+  var isInputReady: Bool { inputPhase == .ready }
   static var helperAvailable: Bool { axeExecutable() != nil }
 
   @MainActor
@@ -99,6 +122,7 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
     frameWindowStarted = DispatchTime.now().uptimeNanoseconds
     renderer?.updateFrameSize(geometry.size)
     publish(.connecting)
+    publishInput(.connecting)
 
     let output = Pipe()
     let errors = Pipe()
@@ -134,7 +158,15 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
       streamProcess = process
       streamOutput = output
       streamErrors = errors
-      hid.prepare(udid: udid, axe: axe, developerDirectory: developerDirectory)
+      hid.prepare(udid: udid, axe: axe, developerDirectory: developerDirectory) {
+        [weak self] failure in
+        guard self?.streamID == identifier else { return }
+        if let failure {
+          self?.publishInput(.fallback(failure))
+        } else {
+          self?.publishInput(.ready)
+        }
+      }
     } catch {
       publish(.failed(error.localizedDescription))
     }
@@ -153,10 +185,15 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
     frameQueue.async { [weak self] in self?.buffer.removeAll(keepingCapacity: false) }
     measuredFPS = 0
     phase = .idle
+    inputPhase = .idle
   }
 
   func touchDown(at normalizedPoint: CGPoint) {
     hid.send(kind: .down, at: normalizedPoint)
+  }
+
+  func tap(at normalizedPoint: CGPoint) {
+    hid.sendTap(at: normalizedPoint)
   }
 
   func touchMoved(to normalizedPoint: CGPoint) {
@@ -235,6 +272,14 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
     }
   }
 
+  private func publishInput(_ newPhase: SimulatorInputPhase) {
+    if Thread.isMainThread {
+      inputPhase = newPhase
+    } else {
+      DispatchQueue.main.async { [weak self] in self?.inputPhase = newPhase }
+    }
+  }
+
   private static func axeExecutable() -> URL? {
     let home = FileManager.default.homeDirectoryForCurrentUser
     let candidates = [
@@ -248,10 +293,11 @@ final class SimulatorLiveSession: ObservableObject, @unchecked Sendable {
 
 struct SimulatorLiveSurface: NSViewRepresentable {
   @ObservedObject var session: SimulatorLiveSession
+  let onTap: (CGPoint) -> Void
+  let onSwipe: (CGPoint, CGPoint) -> Void
 
   func makeNSView(context: Context) -> SimulatorLiveNSView {
-    let view = SimulatorLiveNSView(session: session)
-    view.isHidden = !(session.phase == .connecting || session.isStreaming)
+    let view = SimulatorLiveNSView(session: session, onTap: onTap, onSwipe: onSwipe)
     session.attach(view)
     return view
   }
@@ -262,7 +308,8 @@ struct SimulatorLiveSurface: NSViewRepresentable {
       view.session = session
       session.attach(view)
     }
-    view.isHidden = !(session.phase == .connecting || session.isStreaming)
+    view.onTap = onTap
+    view.onSwipe = onSwipe
   }
 
   static func dismantleNSView(_ view: SimulatorLiveNSView, coordinator: Void) {
@@ -272,11 +319,24 @@ struct SimulatorLiveSurface: NSViewRepresentable {
 
 final class SimulatorLiveNSView: NSView {
   weak var session: SimulatorLiveSession?
+  var onTap: (CGPoint) -> Void
+  var onSwipe: (CGPoint, CGPoint) -> Void
   private let displayLayer = CALayer()
   private var frameSize = CGSize(width: 402, height: 874)
+  private var pointerStart: CGPoint?
+  private var directTouchActive = false
+  private var directDragStarted = false
+  private var fallbackScrollDelta = CGSize.zero
+  private var lastFallbackScrollAt: TimeInterval = 0
 
-  init(session: SimulatorLiveSession) {
+  init(
+    session: SimulatorLiveSession,
+    onTap: @escaping (CGPoint) -> Void,
+    onSwipe: @escaping (CGPoint, CGPoint) -> Void
+  ) {
     self.session = session
+    self.onTap = onTap
+    self.onSwipe = onSwipe
     super.init(frame: .zero)
     wantsLayer = true
     layer?.backgroundColor = NSColor.clear.cgColor
@@ -312,21 +372,57 @@ final class SimulatorLiveNSView: NSView {
   override func mouseDown(with event: NSEvent) {
     window?.makeFirstResponder(self)
     guard let point = normalizedPoint(for: event) else { return }
-    session?.touchDown(at: point)
+    pointerStart = point
+    directTouchActive = session?.isInputReady == true
+    directDragStarted = false
   }
 
   override func mouseDragged(with event: NSEvent) {
-    guard let point = normalizedPoint(for: event) else { return }
+    guard directTouchActive else { return }
+    guard let point = normalizedPoint(for: event), let start = pointerStart else { return }
+    if !directDragStarted {
+      let distance = abs(point.x - start.x) + abs(point.y - start.y)
+      guard distance >= 0.015 else { return }
+      directDragStarted = true
+      session?.touchDown(at: start)
+    }
     session?.touchMoved(to: point)
   }
 
   override func mouseUp(with event: NSEvent) {
-    guard let point = normalizedPoint(for: event) else { return }
-    session?.touchUp(at: point)
+    defer {
+      pointerStart = nil
+      directTouchActive = false
+      directDragStarted = false
+    }
+    guard let point = normalizedPoint(for: event), let start = pointerStart else { return }
+    if directTouchActive {
+      if directDragStarted {
+        session?.touchUp(at: point)
+      } else {
+        // A click is one broker transaction. Splitting down/up over independent sockets could
+        // leave CoreSimulator with no coherent tap even though both writes succeeded.
+        session?.tap(at: point)
+      }
+      return
+    }
+    let distance = abs(point.x - start.x) + abs(point.y - start.y)
+    if distance < 0.025 {
+      onTap(point)
+    } else {
+      onSwipe(start, point)
+    }
   }
 
   override func scrollWheel(with event: NSEvent) {
-    session?.scroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+    if session?.isInputReady == true {
+      session?.scroll(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+      return
+    }
+    fallbackScrollDelta.width += event.scrollingDeltaX
+    fallbackScrollDelta.height += event.scrollingDeltaY
+    let phasesEnded = event.phase.contains(.ended) || event.momentumPhase.contains(.ended)
+    dispatchFallbackScrollIfNeeded(force: phasesEnded)
   }
 
   override func keyDown(with event: NSEvent) { session?.sendKeyboardEvent(event) }
@@ -338,6 +434,23 @@ final class SimulatorLiveNSView: NSView {
     return CGPoint(
       x: min(max((point.x - content.minX) / content.width, 0), 1),
       y: min(max(1 - ((point.y - content.minY) / content.height), 0), 1))
+  }
+
+  private func dispatchFallbackScrollIfNeeded(force: Bool) {
+    let delta = fallbackScrollDelta
+    let magnitude = max(abs(delta.width), abs(delta.height))
+    let now = ProcessInfo.processInfo.systemUptime
+    guard magnitude >= 14, force || now - lastFallbackScrollAt >= 0.22 else { return }
+    fallbackScrollDelta = .zero
+    lastFallbackScrollAt = now
+    let vertical = abs(delta.height) >= abs(delta.width)
+    let selectedDelta = vertical ? delta.height : delta.width
+    let amount = min(max(selectedDelta / 240, -0.36), 0.36)
+    let start = CGPoint(x: 0.5, y: 0.5)
+    let end = CGPoint(
+      x: vertical ? 0.5 : min(max(0.5 - amount, 0.12), 0.88),
+      y: vertical ? min(max(0.5 - amount, 0.12), 0.88) : 0.5)
+    onSwipe(start, end)
   }
 
   private func aspectFitRect(contentSize: CGSize, in bounds: CGRect) -> CGRect {
@@ -380,21 +493,25 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
   private var movePumpRunning = false
   private var pendingScroll = CGSize.zero
   private var scrollPumpRunning = false
+  private var failureHandler: (@Sendable (String?) -> Void)?
 
-  func prepare(udid: String, axe: URL, developerDirectory: URL?) {
+  func prepare(
+    udid: String, axe: URL, developerDirectory: URL?,
+    completion: @escaping @Sendable (String?) -> Void
+  ) {
     queue.async { [weak self] in
       guard let self else { return }
+      self.failureHandler = completion
       self.udid = udid
       self.endpoint = Self.endpoint(udid: udid, developerDirectory: developerDirectory)
-      guard let endpoint = self.endpoint else { return }
-      if let descriptor = try? Self.connect(path: endpoint) {
-        defer { Darwin.close(descriptor) }
-        if let handshakeData = try? self.readLine(descriptor),
-          let handshake = try? JSONDecoder().decode(
-            SimulatorHIDHandshake.self, from: handshakeData), handshake.ready
-        {
-          return
-        }
+      guard let endpoint = self.endpoint else {
+        completion(
+          "Direct touch could not resolve the selected Xcode runtime; using semantic input.")
+        return
+      }
+      if (try? self.verifyReady(path: endpoint, retry: false)) == true {
+        completion(nil)
+        return
       }
       let process = Process()
       process.executableURL = axe
@@ -407,8 +524,17 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
           developerDirectory.map { ["DEVELOPER_DIR": $0.path] } ?? [:]
         ) { _, selected in selected }
       ) { _, selected in selected }
-      try? process.run()
-      self.brokerProcess = process
+      do {
+        try process.run()
+        self.brokerProcess = process
+        guard try self.verifyReady(path: endpoint, retry: true) else {
+          throw CocoaError(.coderReadCorrupt)
+        }
+        completion(nil)
+      } catch {
+        completion(
+          "Direct touch did not start: \(error.localizedDescription). Using semantic input.")
+      }
     }
   }
 
@@ -420,9 +546,27 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
     queue.async { [weak self] in
       guard let self else { return }
       let point = self.devicePoint(normalizedPoint)
-      try? self.send([
-        .init(kind: kind, x: point.x, y: point.y, duration: nil)
-      ])
+      do {
+        try self.send([.init(kind: kind, x: point.x, y: point.y, duration: nil)])
+      } catch {
+        self.reportFailure(error)
+      }
+    }
+  }
+
+  func sendTap(at normalizedPoint: CGPoint) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      let point = self.devicePoint(normalizedPoint)
+      do {
+        try self.send([
+          .init(kind: .down, x: point.x, y: point.y, duration: nil),
+          .init(kind: .delay, x: nil, y: nil, duration: 0.04),
+          .init(kind: .up, x: point.x, y: point.y, duration: nil),
+        ])
+      } catch {
+        self.reportFailure(error)
+      }
     }
   }
 
@@ -460,7 +604,12 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
       pendingMove = nil
       pendingLock.unlock()
       let device = devicePoint(point)
-      try? send([.init(kind: .down, x: device.x, y: device.y, duration: nil)])
+      do {
+        try send([.init(kind: .down, x: device.x, y: device.y, duration: nil)])
+      } catch {
+        reportFailure(error)
+        return
+      }
     }
   }
 
@@ -498,7 +647,12 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
             duration: nil))
       }
       primitives.append(.init(kind: .up, x: endPoint.x, y: endPoint.y, duration: nil))
-      try? send(primitives)
+      do {
+        try send(primitives)
+      } catch {
+        reportFailure(error)
+        return
+      }
     }
   }
 
@@ -509,6 +663,7 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
       self.brokerProcess = nil
       self.udid = nil
       self.endpoint = nil
+      self.failureHandler = nil
       self.pendingLock.lock()
       self.pendingMove = nil
       self.pendingScroll = .zero
@@ -524,12 +679,14 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
   }
 
   private func send(_ primitives: [SimulatorHIDPrimitive]) throws {
-    guard let endpoint else { return }
+    guard let endpoint else { throw CocoaError(.fileNoSuchFile) }
     let descriptor = try connectWithRetry(path: endpoint)
     defer { Darwin.close(descriptor) }
+    try Self.configureSocketTimeouts(descriptor, readMilliseconds: 2_000, writeMilliseconds: 2_000)
     let handshake = try JSONDecoder().decode(
       SimulatorHIDHandshake.self, from: readLine(descriptor))
     guard handshake.ready else { throw CocoaError(.coderReadCorrupt) }
+    try Self.configureReceiveTimeout(descriptor, milliseconds: 30_000)
     var payload = try JSONEncoder().encode(SimulatorHIDRequest(primitives: primitives))
     payload.append(0x0A)
     try writeAll(payload, descriptor: descriptor)
@@ -538,6 +695,20 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
     if let error = response.error {
       throw NSError(domain: "SimulatorHID", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
     }
+  }
+
+  private func verifyReady(path: String, retry: Bool) throws -> Bool {
+    let descriptor = try (retry ? connectWithRetry(path: path) : Self.connect(path: path))
+    defer { Darwin.close(descriptor) }
+    try Self.configureReceiveTimeout(descriptor, milliseconds: 2_000)
+    let handshake = try JSONDecoder().decode(
+      SimulatorHIDHandshake.self, from: readLine(descriptor))
+    return handshake.ready
+  }
+
+  private func reportFailure(_ error: Error) {
+    failureHandler?(
+      "Direct touch disconnected: \(error.localizedDescription). Using semantic input.")
   }
 
   private func connectWithRetry(path: String) throws -> Int32 {
@@ -597,6 +768,33 @@ private final class SimulatorHIDBrokerClient: @unchecked Sendable {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
     }
     return descriptor
+  }
+
+  private static func configureSocketTimeouts(
+    _ descriptor: Int32, readMilliseconds: Int, writeMilliseconds: Int
+  ) throws {
+    try configureReceiveTimeout(descriptor, milliseconds: readMilliseconds)
+    var writeTimeout = socketTimeout(milliseconds: writeMilliseconds)
+    guard
+      setsockopt(
+        descriptor, SOL_SOCKET, SO_SNDTIMEO, &writeTimeout,
+        socklen_t(MemoryLayout<timeval>.size)) == 0
+    else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+  }
+
+  private static func configureReceiveTimeout(_ descriptor: Int32, milliseconds: Int) throws {
+    var readTimeout = socketTimeout(milliseconds: milliseconds)
+    guard
+      setsockopt(
+        descriptor, SOL_SOCKET, SO_RCVTIMEO, &readTimeout,
+        socklen_t(MemoryLayout<timeval>.size)) == 0
+    else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+  }
+
+  private static func socketTimeout(milliseconds: Int) -> timeval {
+    timeval(
+      tv_sec: milliseconds / 1_000,
+      tv_usec: Int32((milliseconds % 1_000) * 1_000))
   }
 
   private static func endpoint(udid: String, developerDirectory: URL?) -> String? {

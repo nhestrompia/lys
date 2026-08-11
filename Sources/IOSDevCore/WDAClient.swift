@@ -203,7 +203,9 @@ public actor WDAController {
       ])
   }
 
-  private func resolveWindowSize(for sessionID: String) async throws -> (width: Double, height: Double) {
+  private func resolveWindowSize(for sessionID: String) async throws -> (
+    width: Double, height: Double
+  ) {
     if let cachedWindowSize { return cachedWindowSize }
     let response = try await request(path: "/session/\(sessionID)/window/rect")
     guard let value = response["value"] as? [String: Any],
@@ -331,7 +333,7 @@ public actor WDAController {
   }
 }
 
-private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
+final class WDAHierarchyParser: NSObject, XMLParserDelegate {
   private var elements: [UIElement] = []
   private var indices: [Int] = []
   private var childCounts: [Int] = [0]
@@ -366,6 +368,7 @@ private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
     typeCounts.append([:])
     let visible = attributes["visible"] != "false"
     let enabled = attributes["enabled"] != "false"
+    let accessible = attributes["accessible"] == "true"
     let actions: [String]
     if type.contains("TextField") || type.contains("SearchField")
       || type.contains("SecureTextField") || type.contains("TextView")
@@ -382,19 +385,31 @@ private final class WDAHierarchyParser: NSObject, XMLParserDelegate {
     } else {
       actions = []
     }
+    let actionable: Bool
+    if let reportedHittable = attributes["hittable"] {
+      actionable = reportedHittable == "true"
+    } else {
+      // WDA omits `hittable` from page source by default because it is expensive. Native control
+      // roles remain executable; non-native framework nodes must opt in through accessibility.
+      actionable = !actions.isEmpty || accessible
+    }
     elements.append(
       UIElement(
         type: type.replacingOccurrences(of: "XCUIElementType", with: ""),
         identifier: nonempty(attributes["name"]), label: nonempty(attributes["label"]),
         value: nonempty(attributes["value"]), enabled: enabled,
-        selected: attributes["selected"] == "true", hittable: visible && enabled,
+        selected: attributes["selected"] == "true",
+        focused: attributes["focused"].map { $0 == "true" },
+        visible: visible,
+        hittable: visible && enabled && actionable,
         frame: .init(
           x: Double(attributes["x"] ?? "") ?? 0, y: Double(attributes["y"] ?? "") ?? 0,
           width: Double(attributes["width"] ?? "") ?? 0,
           height: Double(attributes["height"] ?? "") ?? 0),
         childPath: indices.map(String.init).joined(separator: "."),
         xpath: "/" + typePath.joined(separator: "/"),
-        owningApplication: owningApplication, availableActions: actions))
+        owningApplication: owningApplication, availableActions: actions,
+        accessible: accessible))
   }
 
   func parser(

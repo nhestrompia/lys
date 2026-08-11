@@ -77,4 +77,16 @@ import Testing
           ])
         ]),
       ]))?.contains("coordinate") == true)
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: journey,
+      arguments: .object([
+        "goal": .string("Test quiz"),
+        "steps": .array([
+          .object([
+            "id": .string("visible"), "title": .string("Quiz is visible"),
+            "actionID": .string("action_quiz"), "action": .string("assert"),
+          ])
+        ]),
+      ]))?.contains("must be one of") == true)
 }

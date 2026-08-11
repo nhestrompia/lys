@@ -26,11 +26,15 @@ public actor RuntimeService {
   private var devServerRecoveryTask: Task<Void, Never>?
   private var lastDevelopmentLaunch: DevelopmentLaunchContext?
   private var sessionConfiguration: RuntimeSessionConfiguration?
+  private var sessionStoppedByHost = false
   private var activeJourney: JourneyRecord?
   private var runtimeEvents: [RuntimeEvent] = []
   private var nextEventSequence = 1
   private var lastBuiltGeneration: Int?
   private var developmentServerPort = 8081
+  /// Actions that reached WDA but produced no observable app reaction, keyed to the exact
+  /// interaction-state digest so a later focus/value/layout change makes them eligible again.
+  private var rejectedActionStates: [String: String] = [:]
 
   public init(workspace: URL, token: String, stateRoot: URL? = nil) {
     self.workspace = workspace.standardizedFileURL
@@ -70,6 +74,10 @@ public actor RuntimeService {
           ]))
       case "session.configure":
         return await configureSession(request)
+      case "session.stop":
+        return stopSession(request)
+      case "session.resume":
+        return resumeSession(request)
       case "session.status":
         return success(request.id, await sessionStatus())
       case "runtime.events":
@@ -147,8 +155,9 @@ public actor RuntimeService {
           make: { AppleCommandBuilder.resetAppData(simctl: $0, udid: udid, bundleID: bundleID) },
           evidenceKind: .runtimeLog)
       case "screenshot.capture":
-        guard let udid = request.params?["udid"]?.stringValue
-          ?? sessionConfiguration?.destination?.udid
+        guard
+          let udid = request.params?["udid"]?.stringValue
+            ?? sessionConfiguration?.destination?.udid
         else {
           return failure(request.id, -32602, "udid is required")
         }
@@ -200,6 +209,9 @@ public actor RuntimeService {
     do {
       let configuration: RuntimeSessionConfiguration = try decode(params)
       sessionConfiguration = configuration
+      sessionStoppedByHost = false
+      activeJourney = nil
+      rejectedActionStates = [:]
       if let destination = configuration.destination {
         cachedSimulatorRuntimes[destination.udid] = destination.runtime
       }
@@ -227,11 +239,13 @@ public actor RuntimeService {
   private func sessionStatus() async -> JSONValue {
     .object([
       "configured": .bool(sessionConfiguration != nil),
+      "stoppedByHost": .bool(sessionStoppedByHost),
       "configuration": sessionConfiguration.flatMap { try? jsonValue($0) } ?? .null,
       "target": sessionConfiguration?.target.flatMap { try? jsonValue($0) } ?? .null,
       "journey": activeJourney.flatMap { try? jsonValue($0) } ?? .null,
       "developmentServerPort": .number(Double(developmentServerPort)),
-      "message": .string(activeJourney.map { "Journey \($0.status.rawValue)." } ?? "Session ready."),
+      "message": .string(
+        activeJourney.map { "Journey \($0.status.rawValue)." } ?? "Session ready."),
     ])
   }
 
@@ -258,11 +272,17 @@ public actor RuntimeService {
   }
 
   private func runJourney(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard !sessionStoppedByHost else {
+      return failure(
+        request.id, -32097,
+        "The host stopped this agent turn. Wait for a new user request before testing again.")
+    }
     guard var configuration = sessionConfiguration else {
       return failure(request.id, -32083, "The host has not configured this testing session")
     }
-    let goal = request.params?["goal"]?.stringValue?.trimmingCharacters(
-      in: .whitespacesAndNewlines) ?? ""
+    let goal =
+      request.params?["goal"]?.stringValue?.trimmingCharacters(
+        in: .whitespacesAndNewlines) ?? ""
     guard !goal.isEmpty else { return failure(request.id, -32602, "goal is required") }
     let requestedID = request.params?["journeyID"]?.stringValue.flatMap(UUID.init(uuidString:))
     if let requestedID, activeJourney?.id != requestedID {
@@ -330,7 +350,31 @@ public actor RuntimeService {
         }
       }
 
-      if request.params?["complete"]?.boolValue == true, !needsRecovery {
+      let snapshot =
+        configuration.intent.requiresRunningApp
+        ? await uiSnapshot(.init(id: nil, method: "ui.snapshot")) : nil
+      let progress: UIFlowProgress? = snapshot?.result?["progress"].flatMap { value in
+        guard value != .null else { return nil }
+        return try? decode(value)
+      }
+      var completionBlocked = false
+      if request.params?["complete"]?.boolValue == true, !needsRecovery,
+        let progress, !progress.isComplete
+      {
+        completionBlocked = true
+        needsRecovery = true
+        journey.status = .ready
+        journey.updatedAt = Date()
+        activeJourney = journey
+        let remaining =
+          progress.remaining > 0
+          ? "Exercise the remaining \(progress.remaining) item(s), then reach the terminal result."
+          : "Finish the current item and reach the terminal result."
+        emit(
+          .warning,
+          message: "Completion blocked at \(progress.sourceText). \(remaining)",
+          journeyID: journey.id)
+      } else if request.params?["complete"]?.boolValue == true, !needsRecovery {
         if configuration.intent.requiresRunningApp, let udid = configuration.destination?.udid {
           _ = await captureStableScreenshot(
             .init(id: nil, method: "screenshot.capture", params: .object(["udid": .string(udid)])),
@@ -347,21 +391,23 @@ public actor RuntimeService {
         activeJourney = journey
         emit(
           .journeyFinished,
-          message: journey.status == .passed ? "Journey verified." : report.missing.joined(separator: "; "),
+          message: journey.status == .passed
+            ? "Journey verified." : report.missing.joined(separator: "; "),
           journeyID: journey.id)
       }
 
-      let snapshot = configuration.intent.requiresRunningApp
-        ? await uiSnapshot(.init(id: nil, method: "ui.snapshot")) : nil
       var result = (try? jsonValue(journey)) ?? .object([:])
       if case .object(var object) = result {
         object["recoverable"] = .bool(needsRecovery)
+        object["completionBlocked"] = .bool(completionBlocked)
         object["message"] = .string(
-          needsRecovery
-            ? "The attempted step was not valid on the current screen. Choose an exact actionID from currentUI.actions and retry in this journey."
-            : (journey.status == .ready
-              ? "App attached. Choose exact actionID values from currentUI.actions; submit one screen-changing interaction at a time."
-              : "Journey \(journey.status.rawValue)."))
+          completionBlocked && progress != nil
+            ? "The app still reports \(progress!.sourceText). Continue the same journey through its terminal result before completing."
+            : needsRecovery
+              ? "The attempted step was not valid on the current screen. Choose an exact actionID from currentUI.actions and retry in this journey."
+              : (journey.status == .ready
+                ? "App attached. Choose exact actionID values from currentUI.actions; submit one screen-changing interaction at a time."
+                : "Journey \(journey.status.rawValue)."))
         if let currentUI = snapshot?.result { object["currentUI"] = currentUI }
         result = .object(object)
       }
@@ -411,6 +457,33 @@ public actor RuntimeService {
       ]))
   }
 
+  private func stopSession(_ request: RPCEnvelope) -> RPCEnvelope {
+    sessionStoppedByHost = true
+    if var journey = activeJourney {
+      journey.status = .cancelled
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(
+        .journeyFinished,
+        message: "Agent stopped by the host; the app and development server remain available.",
+        journeyID: journey.id)
+    }
+    return success(
+      request.id,
+      .object([
+        "stopped": .bool(true),
+        "message": .string("Agent stopped; the running app was preserved."),
+      ]))
+  }
+
+  private func resumeSession(_ request: RPCEnvelope) -> RPCEnvelope {
+    if sessionStoppedByHost {
+      sessionStoppedByHost = false
+      activeJourney = nil
+    }
+    return success(request.id, .object(["resumed": .bool(true)]))
+  }
+
   private func ensureJourneyApp(
     configuration: inout RuntimeSessionConfiguration, journeyID: UUID
   ) async throws -> (elements: [UIElement], fingerprint: ScreenFingerprint) {
@@ -425,9 +498,10 @@ public actor RuntimeService {
     if let error = booted.error { throw error }
 
     let generation = await ledger.generation
-    let targetPathExists = configuration.target?.productPath.map {
-      FileManager.default.fileExists(atPath: $0.path)
-    } ?? false
+    let targetPathExists =
+      configuration.target?.productPath.map {
+        FileManager.default.fileExists(atPath: $0.path)
+      } ?? false
     let mutationNeedsBuild =
       configuration.intent.allowsSourceWrites && lastBuiltGeneration != generation
     let missingTargetNeedsBuild = configuration.target == nil || !targetPathExists
@@ -457,9 +531,12 @@ public actor RuntimeService {
 
     if shouldBuild {
       guard configuration.intent.buildPolicy != .never else {
-        throw RPCError(code: -32052, message: "No compatible built app is available for this session")
+        throw RPCError(
+          code: -32052, message: "No compatible built app is available for this session")
       }
-      emit(.buildStarted, message: "Building because no compatible current app is available.", journeyID: journeyID)
+      emit(
+        .buildStarted, message: "Building because no compatible current app is available.",
+        journeyID: journeyID)
       let built = await build(.init(id: nil, method: "build.run"))
       if let error = built.error { throw error }
       guard built.result?["succeeded"]?.boolValue == true else {
@@ -471,7 +548,9 @@ public actor RuntimeService {
         configuration.target = target
       }
       lastBuiltGeneration = generation
-      emit(.buildFinished, message: "Build completed once for generation \(generation).", journeyID: journeyID)
+      emit(
+        .buildFinished, message: "Build completed once for generation \(generation).",
+        journeyID: journeyID)
     }
 
     if configuration.target == nil {
@@ -527,7 +606,34 @@ public actor RuntimeService {
     }
     let selectorValue = step.selector.flatMap { try? jsonValue($0) }
     var screenChanged = false
-    if let action = step.action {
+    let requestedAction = step.action?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let actionAlias = requestedAction?.lowercased().replacingOccurrences(of: "_", with: "")
+    let impliedVisibilityAssertion = ["assert", "assertvisible", "visible", "verify", "check"]
+      .contains(actionAlias ?? "")
+    let effectiveAction: String?
+    switch actionAlias {
+    case "tap": effectiveAction = "tap"
+    case "type": effectiveAction = "type"
+    case "clear": effectiveAction = "clear"
+    case "scrollup": effectiveAction = "scrollUp"
+    case "scrolldown": effectiveAction = "scrollDown"
+    case "click", "press", "select", "activate": effectiveAction = "tap"
+    case "input", "enter",
+      "fill" where step.text != nil:
+      effectiveAction = "type"
+    case _ where impliedVisibilityAssertion: effectiveAction = nil
+    default: effectiveAction = requestedAction
+    }
+    if let effectiveAction,
+      !["tap", "type", "clear", "scrollUp", "scrollDown"].contains(effectiveAction)
+    {
+      return .init(
+        step: step, status: .failed,
+        detail:
+          "Unsupported journey action “\(effectiveAction)”. Use the exact action advertised by currentUI.actions; visibility checks omit action and set assertVisible=true."
+      )
+    }
+    if let action = effectiveAction {
       var params: [String: JSONValue] = ["action": .string(action)]
       if let actionID = step.actionID { params["actionID"] = .string(actionID) }
       if let selectorValue { params["selector"] = selectorValue }
@@ -540,7 +646,15 @@ public actor RuntimeService {
           detail: "\(error.message) The host refreshed currentUI.actions for recovery.")
       }
       evidenceIDs += uuidValues(performed.result?["evidenceIDs"])
-      screenChanged = performed.result?["screenChanged"]?.boolValue
+      if performed.result?["actionSucceeded"]?.boolValue == false {
+        return .init(
+          step: step, status: .failed,
+          detail: performed.result?["message"]?.stringValue
+            ?? "The control accepted input but produced no observable app response. The host removed it from currentUI.actions.",
+          evidenceIDs: evidenceIDs)
+      }
+      screenChanged =
+        performed.result?["screenChanged"]?.boolValue
         ?? (performed.result?["beforeFingerprint"] != performed.result?["afterFingerprint"])
     }
 
@@ -553,15 +667,17 @@ public actor RuntimeService {
             "selector": expectedValue,
             "criterionID": .string(step.criterionID ?? journeyID.uuidString),
           ])))
-      if let error = asserted.error { return .init(
-        step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs) }
+      if let error = asserted.error {
+        return .init(
+          step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
+      }
       evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
       if asserted.result?["passed"]?.boolValue != true {
         return .init(
           step: step, status: .failed, detail: "The expected post-action element is not visible.",
           evidenceIDs: evidenceIDs)
       }
-    } else if step.assertsCurrentActionVisibility {
+    } else if step.assertsCurrentActionVisibility || impliedVisibilityAssertion {
       var assertion: [String: JSONValue] = [
         "criterionID": .string(step.criterionID ?? journeyID.uuidString)
       ]
@@ -569,8 +685,10 @@ public actor RuntimeService {
       if let selectorValue { assertion["selector"] = selectorValue }
       let asserted = await uiAssert(
         .init(id: nil, method: "ui.assert", params: .object(assertion)))
-      if let error = asserted.error { return .init(
-        step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs) }
+      if let error = asserted.error {
+        return .init(
+          step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
+      }
       evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
       if asserted.result?["passed"]?.boolValue != true {
         return .init(
@@ -601,7 +719,8 @@ public actor RuntimeService {
     }
     return .init(
       step: step, status: .passed,
-      detail: screenChanged ? "\(step.title) completed; the screen changed." : "\(step.title) completed.",
+      detail: screenChanged
+        ? "\(step.title) completed; the screen changed." : "\(step.title) completed.",
       evidenceIDs: evidenceIDs)
   }
 
@@ -612,6 +731,43 @@ public actor RuntimeService {
   private func decodeOptionalArray<T: Decodable>(_ value: JSONValue?) throws -> [T]? {
     guard let value else { return nil }
     return try decode(value)
+  }
+
+  private func currentCapabilities(
+    elements: [UIElement], fingerprint: ScreenFingerprint
+  ) -> [UIActionCapability] {
+    let state = UIInteractionStateFingerprint.make(elements: elements).digest
+    return UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint).filter {
+      rejectedActionStates[$0.id] != state
+    }
+  }
+
+  /// Waits for the observable accessibility state to settle after input. Screen identity alone is
+  /// deliberately insufficient here: focus, selection, values, and scrolling can change without
+  /// navigation and still prove that the app handled the interaction.
+  private func settledSnapshot(
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight),
+    baseline: [UIElement]
+  ) async throws -> [UIElement] {
+    let baselineState = UIInteractionStateFingerprint.make(elements: baseline)
+    var latest = try await wda.snapshot(
+      udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+      preflight: context.preflight)
+    var latestState = UIInteractionStateFingerprint.make(elements: latest)
+    var stableSamples = 0
+    for sample in 0..<10 {
+      try await Task.sleep(for: .milliseconds(120))
+      let next = try await wda.snapshot(
+        udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+        preflight: context.preflight)
+      let nextState = UIInteractionStateFingerprint.make(elements: next)
+      stableSamples = nextState == latestState ? stableSamples + 1 : 0
+      latest = next
+      latestState = nextState
+      let changed = nextState != baselineState
+      if stableSamples >= 2 && (changed || sample >= 3) { break }
+    }
+    return latest
   }
 
   private func uuidValues(_ value: JSONValue?) -> [UUID] {
@@ -632,7 +788,8 @@ public actor RuntimeService {
     let preflight = await ToolchainDiscovery.preflight()
     guard let xcodebuild = preflight.xcodebuildPath, let developer = preflight.developerDirectory
     else { return failure(request.id, -32050, "Select full Xcode 26.5 before building") }
-    guard let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
+    guard
+      let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
       let scheme = request.params?["scheme"]?.stringValue ?? sessionConfiguration?.scheme,
       let destination = request.params?["destination"]?.stringValue
         ?? sessionConfiguration?.destinationSpecifier
@@ -671,7 +828,8 @@ public actor RuntimeService {
         "succeeded": .bool(outcome.succeeded),
         "evidenceIDs": .array([.string(item.id.uuidString)]),
         "log": .string(outcome.stdout + outcome.stderr),
-        "message": .string(outcome.succeeded ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
+        "message": .string(
+          outcome.succeeded ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
       ]
       if outcome.succeeded, action == "build" {
         let targets = try? await ToolchainDiscovery.appTargets(
@@ -697,7 +855,7 @@ public actor RuntimeService {
         preflight: context.preflight)
       let fingerprint = ScreenFingerprint.make(
         elements: elements, modal: false, navigationTitle: nil)
-      let actions = UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint)
+      let actions = currentCapabilities(elements: elements, fingerprint: fingerprint)
       await appGraph.observeScreen(fingerprint, actions: actions)
       await persistAppGraph()
       return success(
@@ -706,8 +864,11 @@ public actor RuntimeService {
           "actions": try jsonValue(actions),
           "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: elements)),
           "fingerprint": try jsonValue(fingerprint),
+          "progress": UIFlowProgressDetector.detect(in: elements).flatMap { try? jsonValue($0) }
+            ?? .null,
           "message": .string(
-            "Captured \(actions.count) host-resolved actions and \(elements.count) UI elements. Use actionID values exactly as returned."),
+            "Captured \(actions.count) host-resolved actions and \(elements.count) UI elements. Use actionID values exactly as returned."
+          ),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
       return failure(request.id, -32077, error.localizedDescription)
@@ -764,8 +925,9 @@ public actor RuntimeService {
       let coordinate = selectorCoordinate(request.params)
       let swipe = selectorSwipe(request.params)
       let actionID = request.params?["actionID"]?.stringValue
-      guard actionID != nil || identifier != nil || label != nil || path != nil || coordinate != nil
-        || swipe != nil
+      guard
+        actionID != nil || identifier != nil || label != nil || path != nil || coordinate != nil
+          || swipe != nil
       else {
         return failure(
           request.id, -32602,
@@ -782,11 +944,12 @@ public actor RuntimeService {
           preflight: context.preflight)
         let fingerprint = ScreenFingerprint.make(
           elements: elements, modal: false, navigationTitle: nil)
-        let actions = UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint)
+        let actions = currentCapabilities(elements: elements, fingerprint: fingerprint)
         guard let element = elements.first(where: { $0.childPath == path || $0.xpath == path }),
           let capability = actions.first(where: {
-            $0.id == UIActionCatalog.actionID(
-              fingerprint: fingerprint, childPath: element.childPath)
+            $0.id
+              == UIActionCatalog.actionID(
+                fingerprint: fingerprint, childPath: element.childPath)
           })
         else {
           return failure(request.id, -32086, "The recorded graph action is stale on this screen")
@@ -908,12 +1071,21 @@ public actor RuntimeService {
       }
       let beforeFingerprint = ScreenFingerprint.make(
         elements: before, modal: false, navigationTitle: nil)
-      guard let resolved = UIActionCatalog.resolve(
-        actionID: actionID, action: action, elements: before, fingerprint: beforeFingerprint)
+      let beforeState = UIInteractionStateFingerprint.make(elements: before).digest
+      guard rejectedActionStates[actionID] != beforeState else {
+        return failure(
+          request.id, -32086,
+          "That action already produced no observable result on this screen. Choose a different currentUI action."
+        )
+      }
+      guard
+        let resolved = UIActionCatalog.resolve(
+          actionID: actionID, action: action, elements: before, fingerprint: beforeFingerprint)
       else {
         return failure(
           request.id, -32086,
-          "That actionID is stale or does not support \(action). Read currentUI.actions and retry with one of the returned IDs.")
+          "That actionID is stale or does not support \(action). Read currentUI.actions and retry with one of the returned IDs."
+        )
       }
 
       let text = request.params?["text"]?.stringValue
@@ -924,7 +1096,7 @@ public actor RuntimeService {
             try await wda.performXPath(
               udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
               xpath: path, action: action, text: text, preflight: context.preflight)
-          } catch where action == "tap" {
+          } catch  where action == "tap" {
             try await wda.performFrameAction(
               udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
               frame: resolved.element.frame, action: action, preflight: context.preflight)
@@ -944,7 +1116,7 @@ public actor RuntimeService {
             try await wda.perform(
               udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
               identifier: identifier, action: action, text: text, preflight: context.preflight)
-          } catch where action == "tap" {
+          } catch  where action == "tap" {
             try await wda.performFrameAction(
               udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
               frame: resolved.element.frame, action: action, preflight: context.preflight)
@@ -961,7 +1133,7 @@ public actor RuntimeService {
               udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
               label: label, type: type, action: action, text: text,
               preflight: context.preflight)
-          } catch where action == "tap" {
+          } catch  where action == "tap" {
             try await wda.performFrameAction(
               udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
               frame: resolved.element.frame, action: action, preflight: context.preflight)
@@ -973,35 +1145,48 @@ public actor RuntimeService {
           frame: resolved.element.frame, action: action, preflight: context.preflight)
       }
 
-      var after = try await wda.snapshot(
-        udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
-        preflight: context.preflight)
-      for _ in 0..<10 {
-        try await Task.sleep(for: .milliseconds(150))
-        let next = try await wda.snapshot(
+      var after = try await settledSnapshot(context: context, baseline: before)
+      var stateChanged =
+        UIInteractionStateFingerprint.make(elements: before)
+        != UIInteractionStateFingerprint.make(elements: after)
+      var usedPhysicalRetry = false
+      if action == "tap", !stateChanged,
+        resolved.capability.source == "accessibilityContainer"
+      {
+        // XCTest can report a successful semantic click on a framework accessibility wrapper
+        // without delivering it to the visual control. A single physical activation-point retry
+        // is reserved for that wrapper case; native controls are never double-activated.
+        try await wda.performFrameAction(
           udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
-          preflight: context.preflight)
-        if ScreenFingerprint.make(elements: after, modal: false, navigationTitle: nil)
-          == ScreenFingerprint.make(elements: next, modal: false, navigationTitle: nil)
-        {
-          after = next
-          break
-        }
-        after = next
+          frame: resolved.element.frame, action: action, preflight: context.preflight)
+        usedPhysicalRetry = true
+        after = try await settledSnapshot(context: context, baseline: before)
+        stateChanged =
+          UIInteractionStateFingerprint.make(elements: before)
+          != UIInteractionStateFingerprint.make(elements: after)
       }
       let afterFingerprint = ScreenFingerprint.make(
         elements: after, modal: false, navigationTitle: nil)
+      let actionSucceeded = stateChanged
+      let diagnostic =
+        actionSucceeded
+        ? "Host-resolved \(action) on \(resolved.capability.title) (\(resolved.capability.role))"
+        : "\(resolved.capability.title) accepted \(action), but the app exposed no observable state change"
       let item = Evidence(
-        kind: .uiAction, status: .passed, taskGeneration: await ledger.generation,
+        kind: .uiAction, status: actionSucceeded ? .passed : .failed,
+        taskGeneration: await ledger.generation,
         destinationUDID: context.udid,
-        diagnosticSummary:
-          "Host-resolved \(action) on \(resolved.capability.title) (\(resolved.capability.role))",
+        diagnosticSummary: diagnostic,
         deterministic: true)
       try await ledger.record(item)
-      _ = await appGraph.observe(
-        from: beforeFingerprint, to: afterFingerprint, selector: resolved.selector,
-        build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
-      let actions = UIActionCatalog.capabilities(elements: after, fingerprint: afterFingerprint)
+      if actionSucceeded {
+        _ = await appGraph.observe(
+          from: beforeFingerprint, to: afterFingerprint, selector: resolved.selector,
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+      } else {
+        rejectedActionStates[actionID] = beforeState
+      }
+      let actions = currentCapabilities(elements: after, fingerprint: afterFingerprint)
       await appGraph.observeScreen(afterFingerprint, actions: actions)
       await persistAppGraph()
       if var journey = activeJourney {
@@ -1019,9 +1204,16 @@ public actor RuntimeService {
           "beforeFingerprint": try jsonValue(beforeFingerprint),
           "afterFingerprint": try jsonValue(afterFingerprint),
           "screenChanged": .bool(beforeFingerprint != afterFingerprint),
+          "stateChanged": .bool(stateChanged),
+          "actionSucceeded": .bool(actionSucceeded),
+          "delivery": .string(usedPhysicalRetry ? "semanticThenPhysical" : "semantic"),
           "actions": try jsonValue(actions),
           "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: after)),
-          "message": .string(item.diagnosticSummary),
+          "message": .string(
+            actionSucceeded
+              ? item.diagnosticSummary
+              : "The host retired this no-op action for the current screen. Choose a different currentUI action."
+          ),
         ]))
     } catch let error as RPCError {
       return failure(request.id, error.code, error.message)
@@ -1071,7 +1263,8 @@ public actor RuntimeService {
         }
       }
       let found = matches.count == 1
-      let selectorSummary = capability?.title ?? identifier ?? actionID
+      let selectorSummary =
+        capability?.title ?? identifier ?? actionID
         ?? [type, label].compactMap { $0 }.joined(separator: " · ")
       let item = Evidence(
         kind: .uiAssertion, status: found ? .passed : .failed,
@@ -1115,13 +1308,15 @@ public actor RuntimeService {
   private func automationContext(_ request: RPCEnvelope) async throws -> (
     udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight
   ) {
-    guard let udid = request.params?["udid"]?.stringValue
-      ?? sessionConfiguration?.destination?.udid
+    guard
+      let udid = request.params?["udid"]?.stringValue
+        ?? sessionConfiguration?.destination?.udid
     else {
       throw RPCError(code: -32602, message: "udid is required")
     }
-    guard let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID
-      ?? sessionConfiguration?.target?.bundleID
+    guard
+      let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID
+        ?? sessionConfiguration?.target?.bundleID
     else {
       throw RPCError(code: -32602, message: "bundleID is required before the first UI session")
     }
@@ -1170,7 +1365,8 @@ public actor RuntimeService {
     params?["selector"]?["path"]?.stringValue ?? params?["path"]?.stringValue
   }
 
-  private func graphSelector(identifier: String?, label: String?, type: String?) -> ElementSelector? {
+  private func graphSelector(identifier: String?, label: String?, type: String?) -> ElementSelector?
+  {
     if let identifier, !identifier.isEmpty { return .accessibilityIdentifier(identifier) }
     if let label, let type, !label.isEmpty, !type.isEmpty {
       return .labelType(label: label, type: type)
@@ -1210,7 +1406,8 @@ public actor RuntimeService {
       let current: ScreenFingerprint = try? decode(currentValue)
     else { return failure(request.id, -32081, "Could not fingerprint the current app screen") }
     let snapshot = await appGraph.codableSnapshot()
-    guard let destination = snapshot.nodes.first(where: { $0.id == destinationDigest })?.fingerprint,
+    guard
+      let destination = snapshot.nodes.first(where: { $0.id == destinationDigest })?.fingerprint,
       let path = await appGraph.path(
         from: current, to: destination,
         build: sessionConfiguration?.buildFingerprint ?? "unknown")
@@ -1267,11 +1464,13 @@ public actor RuntimeService {
     let durationMS = Int(coordinate["durationMS"]?.numberValue ?? 350)
     return (
       min(max(startX, 0), 1), min(max(startY, 0), 1), min(max(endX, 0), 1),
-      min(max(endY, 0), 1), durationMS)
+      min(max(endY, 0), 1), durationMS
+    )
   }
 
   private func listTests(_ request: RPCEnvelope) async -> RPCEnvelope {
-    guard let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
+    guard
+      let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
       let scheme = request.params?["scheme"]?.stringValue ?? sessionConfiguration?.scheme
     else { return failure(request.id, -32602, "container and scheme are required") }
     let preflight = await resolvedToolchainPreflight()
@@ -1294,8 +1493,9 @@ public actor RuntimeService {
   }
 
   private func queryLogs(_ request: RPCEnvelope) async -> RPCEnvelope {
-    guard let udid = request.params?["udid"]?.stringValue
-      ?? sessionConfiguration?.destination?.udid,
+    guard
+      let udid = request.params?["udid"]?.stringValue
+        ?? sessionConfiguration?.destination?.udid,
       let process = request.params?["process"]?.stringValue
         ?? sessionConfiguration?.target?.bundleID, !process.isEmpty
     else { return failure(request.id, -32602, "udid and process are required") }
@@ -1450,7 +1650,8 @@ public actor RuntimeService {
       }
       if launched.succeeded {
         emit(
-          .appLaunched, message: "Launched \(bundleID) on \(udid).", target: sessionConfiguration?.target,
+          .appLaunched, message: "Launched \(bundleID) on \(udid).",
+          target: sessionConfiguration?.target,
           destinationUDID: udid)
       }
       return success(
@@ -1459,7 +1660,8 @@ public actor RuntimeService {
           "launched": .bool(launched.succeeded),
           "evidenceIDs": .array([.string(item.id.uuidString)]),
           "developmentServerPort": .number(Double(developmentServerPort)),
-          "message": .string(launched.succeeded ? "Application launched." : "Application launch failed."),
+          "message": .string(
+            launched.succeeded ? "Application launched." : "Application launch failed."),
         ]))
     } catch { return failure(request.id, -32053, error.localizedDescription) }
   }

@@ -50,43 +50,57 @@ public enum AgentRuntimeToolCatalog {
           "journeyID": string("ID returned by an earlier journey.run call"),
           "complete": boolean("Finish the journey after these steps and capture final evidence"),
           "steps": array(
-            items: object([
-              "id": string("Stable step ID"), "title": string("Short user-visible step title"),
-              "criterionID": string("Acceptance criterion ID"),
-              "actionID": string("Exact opaque ID from the latest currentUI.actions array"),
-              "selector": object([
-                "identifier": string("Legacy accessibility identifier fallback"),
-                "label": string("Legacy unique accessibility label fallback"),
-                "type": string("Legacy accessibility role fallback"),
-              ]),
-              "action": string("One action listed by the selected actionID"),
-              "text": string("Text for a type action"),
-              "expectScreenChanged": boolean("Require a different host fingerprint after the action"),
-              "assertVisible": boolean("With no action, assert actionID is visible. Legacy action steps interpret this as expectScreenChanged."),
-            ], required: ["id", "title", "actionID"]))
+            items: object(
+              [
+                "id": string("Stable step ID"), "title": string("Short user-visible step title"),
+                "criterionID": string("Acceptance criterion ID"),
+                "actionID": string("Exact opaque ID from the latest currentUI.actions array"),
+                "selector": object([
+                  "identifier": string("Legacy accessibility identifier fallback"),
+                  "label": string("Legacy unique accessibility label fallback"),
+                  "type": string("Legacy accessibility role fallback"),
+                ]),
+                "action": string(
+                  "One action listed by the selected actionID",
+                  allowed: ["tap", "type", "clear", "scrollUp", "scrollDown"]),
+                "text": string("Text for a type action"),
+                "expectScreenChanged": boolean(
+                  "Require a different host fingerprint after the action"),
+                "assertVisible": boolean(
+                  "With no action, assert actionID is visible. Legacy action steps interpret this as expectScreenChanged."
+                ),
+              ], required: ["id", "title", "actionID"])),
         ], required: ["goal"], readOnly: false, destructive: false, idempotent: false),
       tool(
         "journey.status", "Read the current testing journey and its step results.",
         properties: ["journeyID": string("Journey ID; omit for the active journey")],
         readOnly: true),
       tool(
-        "journey.cancel", "Cancel only the active testing journey. This does not stop the app, Simulator, or development server.",
+        "journey.cancel",
+        "Cancel only the active testing journey. This does not stop the app, Simulator, or development server.",
         properties: ["journeyID": string("Journey ID; omit for the active journey")],
         readOnly: false, destructive: false, idempotent: true),
       tool(
-        "ui.snapshot", "Inspect the current app. Returns host-issued actions before hierarchy details; use their opaque IDs instead of creating selectors.",
+        "ui.snapshot",
+        "Inspect the current app. Returns host-issued actions before hierarchy details; use their opaque IDs instead of creating selectors.",
         properties: [:], readOnly: true),
       tool(
-        "ui.actions", "List every currently host-resolved tap, type, clear, and scroll capability with an opaque screen-bound actionID.",
+        "ui.actions",
+        "List every currently host-resolved tap, type, clear, and scroll capability with an opaque screen-bound actionID.",
         properties: [:], readOnly: true),
       tool(
-        "ui.find", "Find semantic UI elements in the current app using an accessibility identifier or unique label and type.",
+        "ui.find",
+        "Find semantic UI elements in the current app using an accessibility identifier or unique label and type.",
         properties: ["selector": selectorSchema], required: ["selector"], readOnly: true),
       tool(
-        "ui.perform", "Perform one action using an exact actionID from the latest ui.actions response. The ID is bound to the current screen and safely becomes stale after navigation.",
+        "ui.perform",
+        "Perform one action using an exact actionID from the latest ui.actions response. The ID is bound to the current screen and safely becomes stale after navigation.",
         properties: [
           "actionID": string("Exact opaque ID returned by ui.actions"),
-          "selector": selectorSchema, "action": string("An action advertised for this actionID"),
+          "selector": selectorSchema,
+          "action": string(
+            "An action advertised for this actionID",
+            allowed: ["tap", "type", "clear", "scrollUp", "scrollDown"]),
           "text": string("Text for type actions"),
         ], required: ["actionID", "action"], readOnly: false, destructive: false),
       tool(
@@ -95,24 +109,28 @@ public enum AgentRuntimeToolCatalog {
           "selector": selectorSchema, "timeoutSeconds": number("Timeout from 0.2 to 30 seconds"),
         ], required: ["selector"], readOnly: true),
       tool(
-        "ui.assert", "Record deterministic evidence that a current host-issued actionID is visible.",
+        "ui.assert",
+        "Record deterministic evidence that a current host-issued actionID is visible.",
         properties: [
           "criterionID": string("Acceptance criterion ID"),
           "actionID": string("Exact opaque ID returned by ui.actions"),
           "selector": selectorSchema,
         ], required: ["criterionID", "actionID"], readOnly: true),
       tool(
-        "ui.navigate", "Replay a previously observed deterministic App Graph path to a screen fingerprint.",
+        "ui.navigate",
+        "Replay a previously observed deterministic App Graph path to a screen fingerprint.",
         properties: ["screen": string("Destination screen fingerprint")], required: ["screen"],
         readOnly: false, destructive: false),
       tool(
-        "screenshot.capture", "Capture stable current Simulator evidence using host-selected context.",
+        "screenshot.capture",
+        "Capture stable current Simulator evidence using host-selected context.",
         properties: [:], readOnly: true),
       tool(
         "logs.query", "Query bounded logs for the host-selected app.",
         properties: ["seconds": number("Lookback seconds, from 1 to 3600")], readOnly: true),
       tool(
-        "verification.status", "Read host-validated evidence completeness for the active generation.",
+        "verification.status",
+        "Read host-validated evidence completeness for the active generation.",
         properties: [:], readOnly: true),
       tool(
         "verification.submit", "Submit current evidence IDs for host validation.",
@@ -171,8 +189,12 @@ public enum AgentRuntimeToolCatalog {
       ]))
   }
 
-  private static func string(_ description: String) -> JSONValue {
-    .object(["type": .string("string"), "description": .string(description)])
+  private static func string(_ description: String, allowed: [String]? = nil) -> JSONValue {
+    var schema: [String: JSONValue] = [
+      "type": .string("string"), "description": .string(description),
+    ]
+    if let allowed { schema["enum"] = .array(allowed.map(JSONValue.string)) }
+    return .object(schema)
   }
   private static func boolean(_ description: String) -> JSONValue {
     .object(["type": .string("boolean"), "description": .string(description)])
@@ -200,7 +222,9 @@ public enum AgentRuntimeToolCatalog {
     case "object":
       guard case .object(let values) = value else { return "\(path) must be an object" }
       let properties: [String: JSONValue]
-      if case .object(let declared)? = schema["properties"] { properties = declared } else {
+      if case .object(let declared)? = schema["properties"] {
+        properties = declared
+      } else {
         properties = [:]
       }
       if schema["additionalProperties"]?.boolValue == false,
@@ -229,7 +253,11 @@ public enum AgentRuntimeToolCatalog {
         }
       }
     case "string":
-      guard case .string = value else { return "\(path) must be a string" }
+      guard case .string(let stringValue) = value else { return "\(path) must be a string" }
+      let allowed = schema["enum"]?.arrayValue?.compactMap(\.stringValue) ?? []
+      if !allowed.isEmpty, !allowed.contains(stringValue) {
+        return "\(path) must be one of: \(allowed.joined(separator: ", "))"
+      }
     case "boolean":
       guard case .bool = value else { return "\(path) must be a boolean" }
     case "number":

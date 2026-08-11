@@ -178,6 +178,35 @@ public struct JourneyStep: Codable, Identifiable, Hashable, Sendable {
     self.assertVisible = assertVisible
   }
 
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case title
+    case criterionID
+    case actionID
+    case selector
+    case action
+    case text
+    case expectVisible
+    case expectScreenChanged
+    case assertVisible
+  }
+
+  /// Agent tool calls intentionally use sparse JSON. Keep newly added, optional journey behavior
+  /// backward compatible so a model never has to send legacy flags just to perform an action.
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(String.self, forKey: .id)
+    title = try values.decode(String.self, forKey: .title)
+    criterionID = try values.decodeIfPresent(String.self, forKey: .criterionID)
+    actionID = try values.decodeIfPresent(String.self, forKey: .actionID)
+    selector = try values.decodeIfPresent(JourneySelector.self, forKey: .selector)
+    action = try values.decodeIfPresent(String.self, forKey: .action)
+    text = try values.decodeIfPresent(String.self, forKey: .text)
+    expectVisible = try values.decodeIfPresent(JourneySelector.self, forKey: .expectVisible)
+    expectScreenChanged = try values.decodeIfPresent(Bool.self, forKey: .expectScreenChanged)
+    assertVisible = try values.decodeIfPresent(Bool.self, forKey: .assertVisible) ?? false
+  }
+
   public var assertsCurrentActionVisibility: Bool {
     action == nil && assertVisible && expectVisible == nil
   }
@@ -328,7 +357,9 @@ public enum AgentToolTraceValidator {
     if intent.requiresRunningApp, journeyIndex == nil {
       violations.append("journey.run was not used")
     }
-    if let firstDirectUI = trace.firstIndex(where: { ["ui.perform", "ui.navigate"].contains($0.name) }) {
+    if let firstDirectUI = trace.firstIndex(where: {
+      ["ui.perform", "ui.navigate"].contains($0.name)
+    }) {
       if journeyIndex.map({ firstDirectUI < $0 }) ?? true {
         violations.append("UI interaction occurred before the host-owned journey")
       }
@@ -339,7 +370,8 @@ public enum AgentToolTraceValidator {
     }
     let journeySteps = trace.filter { $0.name == "journey.run" }
       .flatMap { $0.arguments["steps"]?.arrayValue ?? [] }
-    for step in journeySteps where step["action"]?.stringValue != nil
+    for step in journeySteps
+    where step["action"]?.stringValue != nil
       && step["actionID"]?.stringValue == nil
     {
       violations.append("a journey action used a model-authored selector instead of actionID")
