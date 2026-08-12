@@ -31,6 +31,25 @@ enum IOSDevSnapshotMain {
     } else if !arguments.contains("--empty") {
       model.loadDesignPreview()
     }
+
+    if arguments.contains("--code") {
+      model.showSnapshotPage("code")
+    } else if arguments.contains("--changes") {
+      model.showSnapshotPage("changes")
+    } else if arguments.contains("--deploy") {
+      model.showSnapshotPage("deploy")
+    } else if arguments.contains("--settings") {
+      model.showSnapshotPage("settings")
+    }
+    if arguments.contains("--terminal") {
+      model.showSnapshotWorkspaceTab("terminal")
+    } else if arguments.contains("--logs") {
+      model.showSnapshotWorkspaceTab("logs")
+    } else if arguments.contains("--changes-tab") {
+      model.showSnapshotWorkspaceTab("changes")
+    } else if arguments.contains("--evidence") {
+      model.showSnapshotWorkspaceTab("evidence")
+    }
     let content = WorkbenchView().environmentObject(model).frame(
       width: size.width, height: size.height
     )

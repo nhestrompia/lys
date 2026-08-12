@@ -3,22 +3,31 @@ import IOSDevCore
 import SwiftUI
 
 enum PrimarySection: String, CaseIterable, Identifiable {
-  case agent = "Agent"
+  case agent = "Develop"
   case code = "Code"
-  case files = "Files"
-  case git = "Git"
+  case git = "Deploy"
+  case changes = "Changes"
   case settings = "Settings"
 
   var id: String { rawValue }
   var symbol: String {
     switch self {
-    case .agent: "sparkles.square.filled.on.square"
+    case .agent: "sparkles"
     case .code: "chevron.left.forwardslash.chevron.right"
-    case .files: "folder"
-    case .git: "arrow.triangle.branch"
+    case .git: "paperplane"
+    case .changes: "square.and.pencil"
     case .settings: "gearshape"
     }
   }
+}
+
+enum EvidenceWorkspaceTab: String, CaseIterable, Identifiable {
+  case terminal = "Terminal"
+  case logs = "Logs"
+  case evidence = "Evidence"
+  case changes = "Changes"
+
+  var id: String { rawValue }
 }
 
 struct FileNode: Identifiable, Hashable {
@@ -251,6 +260,8 @@ public final class AppModel: ObservableObject {
   @Published var startDevServerOnRun = true
   @Published var terminalEntries: [TerminalEntry] = []
   @Published public var isTerminalExpanded = false
+  @Published var evidenceWorkspaceTab: EvidenceWorkspaceTab = .evidence
+  @Published public var isEvidenceWorkspaceOpen = false
   let simulatorLiveSession = SimulatorLiveSession()
 
   var selectedDestination: Destination? {
@@ -600,7 +611,14 @@ public final class AppModel: ObservableObject {
     Task { await refreshDestinations() }
   }
 
-  public func toggleTerminal() { isTerminalExpanded.toggle() }
+  public func toggleTerminal() {
+    isTerminalExpanded.toggle()
+    if isTerminalExpanded { evidenceWorkspaceTab = .terminal }
+  }
+
+  public func toggleEvidenceWorkspace() {
+    isEvidenceWorkspaceOpen.toggle()
+  }
 
   func clearTerminal() {
     guard !terminalEntries.contains(where: { $0.state == .running }) else { return }
@@ -2000,6 +2018,26 @@ public final class AppModel: ObservableObject {
     selectedDestinationID = destinations[0].udid
     refreshAdapters()
     refreshWDAStatus()
+  }
+
+  public func showSnapshotPage(_ page: String) {
+    switch page {
+    case "code": section = .code
+    case "changes": section = .changes
+    case "deploy": section = .git
+    case "settings": section = .settings
+    default: section = .agent
+    }
+  }
+
+  public func showSnapshotWorkspaceTab(_ tab: String) {
+    isEvidenceWorkspaceOpen = true
+    switch tab {
+    case "terminal": evidenceWorkspaceTab = .terminal
+    case "logs": evidenceWorkspaceTab = .logs
+    case "changes": evidenceWorkspaceTab = .changes
+    default: evidenceWorkspaceTab = .evidence
+    }
   }
 
   private func loadRepository(_ repository: URL, loadID: UUID) async {

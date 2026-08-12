@@ -40,7 +40,7 @@ Users open existing Xcode projects or workspaces, select an application scheme a
 
 ## Brand Commitments
 
-The working name is deliberately undecided. The product must feel lean, native, transparent, and evidence-led rather than like a smaller visual clone of Xcode or a chatbot attached to an editor.
+The product is named Lys. It must feel lean, native, transparent, and evidence-led rather than like a smaller visual clone of Xcode or a chatbot attached to an editor.
 
 ## Evidence on Hand
 
