@@ -48,6 +48,15 @@ public actor EvidenceLedger {
     guard item.taskGeneration <= generation else {
       throw RPCError(code: -32020, message: "Evidence generation is in the future")
     }
+    if item.kind == .uiAssertion, item.status == .passed {
+      for index in evidence.indices
+      where evidence[index].taskGeneration == item.taskGeneration
+        && evidence[index].kind == .uiAssertion && evidence[index].status == .failed
+        && evidence[index].criterionID == item.criterionID
+      {
+        evidence[index].acknowledged = true
+      }
+    }
     evidence.append(item)
   }
   public func allEvidence() -> [Evidence] { evidence }
@@ -64,12 +73,23 @@ public actor EvidenceLedger {
     }
     if requirement.uiChanged {
       if !passed.contains(.launch) { missing.append("Fresh successful launch") }
-      if !current.contains(where: {
-        $0.kind == .uiAssertion && $0.status == .passed && $0.deterministic
-          && (requirement.criterionIDs.isEmpty
-            || ($0.criterionID.map(requirement.criterionIDs.contains) ?? false))
-      }) {
+      let passedCriterionIDs = Set(
+        current.compactMap { item in
+          guard item.kind == .uiAssertion, item.status == .passed, item.deterministic else {
+            return nil as String?
+          }
+          return item.criterionID
+        })
+      if requirement.criterionIDs.isEmpty,
+        !current.contains(where: {
+          $0.kind == .uiAssertion && $0.status == .passed && $0.deterministic
+        })
+      {
         missing.append("Deterministic UI assertion tied to an acceptance criterion")
+      } else {
+        for criterionID in requirement.criterionIDs where !passedCriterionIDs.contains(criterionID) {
+          missing.append("Acceptance criterion \(criterionID)")
+        }
       }
       if !passed.contains(.screenshot) { missing.append("Fresh screenshot") }
     }
@@ -88,7 +108,7 @@ public actor EvidenceLedger {
       hasRuntimeFailure
       || current.contains {
         relevantKinds.contains($0.kind) && $0.status == .failed
-          && ($0.kind != .runtimeLog || !$0.acknowledged)
+          && !$0.acknowledged
       }
     let hasBlocker = current.contains {
       relevantKinds.contains($0.kind) && $0.status == .blocked

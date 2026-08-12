@@ -6,7 +6,7 @@ swiftc="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoo
 frameworks="/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
 testing_lib="/Library/Developer/CommandLineTools/Library/Developer/usr/lib"
 
-SDKROOT="$sdk" SWIFT_EXEC="$swiftc" CLANG_MODULE_CACHE_PATH="${TMPDIR:-/private/tmp}/iosdev-module-cache" \
+SDKROOT="$sdk" SWIFT_EXEC="$swiftc" CLANG_MODULE_CACHE_PATH="${TMPDIR:-/private/tmp}/lys-module-cache" \
 swift test --disable-sandbox \
   -Xswiftc -F -Xswiftc "$frameworks" \
   -Xlinker "-F$frameworks" \

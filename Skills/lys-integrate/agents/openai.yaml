@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrate Lys"
+  short_description: "Build and prove reachable Lys testing flows"
+  default_prompt: "Use $lys-integrate to add or repair a reachable Lys flow and prove it from the app's real entry state."

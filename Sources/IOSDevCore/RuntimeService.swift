@@ -6,12 +6,31 @@ private struct DevelopmentLaunchContext: Sendable {
   var bundleID: String
 }
 
+private struct XcodeOperationKey: Hashable, Sendable {
+  var action: String
+  var container: String
+  var scheme: String
+  var configuration: String
+  var destination: String
+  var generation: Int
+}
+
+private struct XcodeExecution: Sendable {
+  var outcome: ProcessOutcome
+  var resultPath: URL
+  var evidenceID: UUID
+  var appTargets: [AppTarget]
+}
+
 public actor RuntimeService {
   public let workspace: URL
   public let token: String
   private let runner = ProcessRunner()
   private let devServerRunner = ProcessRunner()
   private let ledger = EvidenceLedger()
+  private let operationCoordinator: WorkspaceOperationCoordinator
+  private let xcodeOperations = CoalescingOperationRegistry<XcodeOperationKey, XcodeExecution>()
+  private let artifactCache: BuildArtifactCache
   private let appGraph = AppGraph()
   private let store: SQLiteStore?
   private let wda: WDAController
@@ -26,24 +45,32 @@ public actor RuntimeService {
   private var devServerRecoveryTask: Task<Void, Never>?
   private var lastDevelopmentLaunch: DevelopmentLaunchContext?
   private var sessionConfiguration: RuntimeSessionConfiguration?
+  private var interactionBlueprint: InteractionBlueprint?
+  private var projectConfiguration: LysConfiguration?
+  private var sessionStoppedByHost = false
   private var activeJourney: JourneyRecord?
   private var runtimeEvents: [RuntimeEvent] = []
   private var nextEventSequence = 1
   private var lastBuiltGeneration: Int?
   private var developmentServerPort = 8081
+  /// Actions that reached WDA but produced no observable app reaction, keyed to the exact
+  /// interaction-state digest so a later focus/value/layout change makes them eligible again.
+  private var rejectedActionStates: [String: String] = [:]
 
   public init(workspace: URL, token: String, stateRoot: URL? = nil) {
     self.workspace = workspace.standardizedFileURL
     self.token = token
+    operationCoordinator = WorkspaceOperationCoordinator(workspace: workspace)
+    artifactCache = BuildArtifactCache(workspace: workspace)
     let support =
       (try? FileManager.default.url(
         for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil,
         create: true)) ?? URL(fileURLWithPath: NSTemporaryDirectory())
     wda = WDAController(
       stateRoot: support.appending(
-        path: "IOSDevWorkbench/WebDriverAgent", directoryHint: .isDirectory))
+        path: "Lys/WebDriverAgent", directoryHint: .isDirectory))
     store = try? SQLiteStore(
-      url: (stateRoot ?? support.appending(path: "IOSDevWorkbench/Runtime"))
+      url: (stateRoot ?? support.appending(path: "Lys/Runtime"))
         .appending(path: "metadata.sqlite3"))
   }
 
@@ -70,8 +97,20 @@ public actor RuntimeService {
           ]))
       case "session.configure":
         return await configureSession(request)
+      case "session.stop":
+        return stopSession(request)
+      case "session.resume":
+        return resumeSession(request)
       case "session.status":
         return success(request.id, await sessionStatus())
+      case "app.describe": return await describeApp(request)
+      case "flow.list": return listFlows(request)
+      case "flow.run": return await runFlow(request)
+      case "flow.step": return await runFlowStep(request)
+      case "flow.finish": return await finishFlow(request)
+      case "flow.status": return await journeyStatus(request)
+      case "flow.stop": return await cancelJourney(request)
+      case "evidence.summary": return await evidenceSummary(request)
       case "runtime.events":
         return success(request.id, runtimeEventPage(after: request.params?["after"]?.numberValue))
       case "workspace.mutated":
@@ -147,8 +186,9 @@ public actor RuntimeService {
           make: { AppleCommandBuilder.resetAppData(simctl: $0, udid: udid, bundleID: bundleID) },
           evidenceKind: .runtimeLog)
       case "screenshot.capture":
-        guard let udid = request.params?["udid"]?.stringValue
-          ?? sessionConfiguration?.destination?.udid
+        guard
+          let udid = request.params?["udid"]?.stringValue
+            ?? sessionConfiguration?.destination?.udid
         else {
           return failure(request.id, -32602, "udid is required")
         }
@@ -176,10 +216,8 @@ public actor RuntimeService {
         return success(request.id, try jsonValue(await ledger.allEvidence()))
       case "verification.submit":
         return await submitVerification(request)
-      case "journey.run": return await runJourney(request)
-      case "journey.status": return await journeyStatus(request)
-      case "journey.cancel": return await cancelJourney(request)
       case "ui.snapshot": return await uiSnapshot(request)
+      case "ui.actions": return await uiSnapshot(request)
       case "ui.prepare": return await uiPrepare(request)
       case "ui.find": return await uiFind(request)
       case "ui.perform": return await uiPerform(request)
@@ -198,7 +236,17 @@ public actor RuntimeService {
     }
     do {
       let configuration: RuntimeSessionConfiguration = try decode(params)
+      let loadedBlueprint = try InteractionBlueprintDiscovery.load(in: workspace)
+      let projectConfigurationURL = workspace.appending(path: ".lys/config.json")
+      let loadedProjectConfiguration =
+        FileManager.default.fileExists(atPath: projectConfigurationURL.path)
+        ? try LysConfiguration.load(from: projectConfigurationURL) : nil
       sessionConfiguration = configuration
+      interactionBlueprint = loadedBlueprint
+      projectConfiguration = loadedProjectConfiguration
+      sessionStoppedByHost = false
+      activeJourney = nil
+      rejectedActionStates = [:]
       if let destination = configuration.destination {
         cachedSimulatorRuntimes[destination.udid] = destination.runtime
       }
@@ -218,6 +266,8 @@ public actor RuntimeService {
           "configured": .bool(true), "intent": try jsonValue(configuration.intent),
           "message": .string("Host testing policy configured."),
         ]))
+    } catch let error as RPCError {
+      return failure(request.id, error.code, "Lys contract invalid: \(error.message)")
     } catch {
       return failure(request.id, -32602, "Invalid host session configuration: \(error)")
     }
@@ -226,11 +276,13 @@ public actor RuntimeService {
   private func sessionStatus() async -> JSONValue {
     .object([
       "configured": .bool(sessionConfiguration != nil),
+      "stoppedByHost": .bool(sessionStoppedByHost),
       "configuration": sessionConfiguration.flatMap { try? jsonValue($0) } ?? .null,
       "target": sessionConfiguration?.target.flatMap { try? jsonValue($0) } ?? .null,
       "journey": activeJourney.flatMap { try? jsonValue($0) } ?? .null,
       "developmentServerPort": .number(Double(developmentServerPort)),
-      "message": .string(activeJourney.map { "Journey \($0.status.rawValue)." } ?? "Session ready."),
+      "message": .string(
+        activeJourney.map { "Journey \($0.status.rawValue)." } ?? "Session ready."),
     ])
   }
 
@@ -256,12 +308,1110 @@ public actor RuntimeService {
     if runtimeEvents.count > 1_000 { runtimeEvents.removeFirst(runtimeEvents.count - 1_000) }
   }
 
-  private func runJourney(_ request: RPCEnvelope) async -> RPCEnvelope {
+  private func describeApp(_ request: RPCEnvelope) async -> RPCEnvelope {
+    let snapshot = await uiSnapshot(.init(id: request.id, method: "ui.snapshot"))
+    if let error = snapshot.error { return failure(request.id, error.code, error.message) }
+    let elements: [UIElement] =
+      snapshot.result?["elements"].flatMap { try? decode($0) } ?? []
+    let currentRoute = interactionBlueprint.flatMap { blueprintRoute(in: elements, blueprint: $0) }
+    let declaredCapabilities = (interactionBlueprint?.capabilities ?? []).map { capability in
+      return JSONValue.object([
+        "id": .string(capability.id),
+        "title": .string(capability.title),
+        "route": capability.route.map(JSONValue.string) ?? .null,
+        "action": .string(capability.action.rawValue),
+        "available": .bool(!blueprintMatches(capability.selector, in: elements).isEmpty),
+        "risk": capability.risk.map { .string($0.rawValue) } ?? .string("reversible"),
+        "parameters": (try? jsonValue(capability.parameters ?? [:])) ?? .object([:]),
+        "source": .string("blueprint"),
+      ])
+    }
+    let observedCapabilities = snapshot.result?["actions"]?.arrayValue ?? []
+    let routes = (interactionBlueprint?.routes ?? []).map { route in
+      JSONValue.object([
+        "id": .string(route.id), "title": .string(route.title),
+        "current": .bool(route.id == currentRoute?.id), "source": .string("blueprint"),
+      ])
+    }
+    return success(
+      request.id,
+      .object([
+        "contract": .bool(interactionBlueprint != nil),
+        "currentRoute": currentRoute.map { .string($0.id) } ?? .null,
+        "routes": .array(routes),
+        "capabilities": .array(declaredCapabilities + observedCapabilities),
+        "progress": snapshot.result?["progress"] ?? .null,
+        "stateVersion": snapshot.result?["fingerprint"]?["digest"] ?? .null,
+        "message": .string(
+          interactionBlueprint == nil
+            ? "No Lys contract was found; only exploratory interaction is available."
+            : "Merged the Lys contract with current executable controls."),
+      ]))
+  }
+
+  private func listFlows(_ request: RPCEnvelope) -> RPCEnvelope {
+    let flows = (interactionBlueprint?.flows ?? []).map { flow in
+      let context = flow.context.flatMap { id in
+        interactionBlueprint?.contexts?.first(where: { $0.id == id })
+      }
+      return JSONValue.object([
+        "id": .string(flow.id), "title": .string(flow.title),
+        "description": flow.description.map(JSONValue.string) ?? .null,
+        "context": flow.context.map(JSONValue.string) ?? .null,
+        "contextMode": context.map { .string($0.mode.rawValue) } ?? .null,
+        "startRoute": .string(flow.startRoute),
+        "entryRoutes": .array(flow.entryRoutes.map(JSONValue.string)),
+        "trusted": .bool(true),
+        "requiredSecrets": .array((flow.requiredSecrets ?? []).map(JSONValue.string)),
+        "parameters": (try? jsonValue(flow.parameters ?? [:])) ?? .object([:]),
+      ])
+    }
+    return success(
+      request.id,
+      .object([
+        "flows": .array(flows), "contractAvailable": .bool(interactionBlueprint != nil),
+        "message": .string(
+          flows.isEmpty
+            ? "No declared Lys flows; only exploratory testing is available."
+            : "Found \(flows.count) declared flow(s). Goals that do not uniquely match one of them run as exploratory and cannot receive trusted verification."),
+      ]))
+  }
+
+  private func evidenceSummary(_ request: RPCEnvelope) async -> RPCEnvelope {
+    let requirement = VerificationRequirement(
+      codeChanged: sessionConfiguration?.intent.allowsSourceWrites == true,
+      uiChanged: sessionConfiguration?.intent.requiresRunningApp == true,
+      testsChanged: sessionConfiguration?.intent.kind == .runTests,
+      criterionIDs: activeJourney?.steps.compactMap { $0.step.criterionID } ?? [])
+    let report = await ledger.verify(requirement)
+    let journeyStatus = activeJourney?.status.rawValue ?? "notStarted"
+    let trusted = activeJourney?.mode == .declared && activeJourney?.status == .passed
+      && report.status == .verified
+    let status: VerificationStatus = trusted
+      ? .verified
+      : (activeJourney?.status == .failed ? .failed : report.status)
+    var missing = report.missing
+    if !trusted {
+      missing.append(
+        activeJourney?.mode == .exploratory
+          ? "A declared Lys flow for trusted verification"
+          : "The declared Lys flow reaching its terminal state")
+    }
+    return success(
+      request.id,
+      .object([
+        "status": .string(status.rawValue),
+        "flowStatus": .string(journeyStatus),
+        "missing": .array(missing.map(JSONValue.string)),
+        "evidenceCount": .number(Double(report.currentEvidence.count)),
+        "message": .string(
+          trusted
+            ? "Lys verified the requested flow."
+            : "Lys verification still needs: \(missing.joined(separator: "; "))."),
+      ]))
+  }
+
+  private func runFlow(_ request: RPCEnvelope) async -> RPCEnvelope {
+    if let blueprint = interactionBlueprint {
+      let requestedID = request.params?["flowID"]?.stringValue
+      let goal = request.params?["goal"]?.stringValue ?? ""
+      if let requestedID {
+        guard let flow = blueprint.flows.first(where: { $0.id == requestedID }) else {
+          let available = blueprint.flows.map(\.id).joined(separator: ", ")
+          return failure(
+            request.id, -32112,
+            "Unknown Lys flow \(requestedID). Available flows: \(available)")
+        }
+        let parameters = request.params?["parameters"]?.objectValue ?? [:]
+        return await runBlueprintFlow(
+          request, blueprint: blueprint, flow: flow, parameters: parameters)
+      }
+      if let flow = LysFlowMatcher.match(goal: goal, in: blueprint.flows) {
+        let parameters = request.params?["parameters"]?.objectValue ?? [:]
+        return await runBlueprintFlow(
+          request, blueprint: blueprint, flow: flow, parameters: parameters)
+      }
+      // A partial contract must not make the rest of the app untestable. Unmatched goals run in
+      // exploratory mode and can collect useful evidence, but they never become trusted green.
+      return await runJourney(
+        .init(
+          id: request.id, method: "flow.run",
+          params: .object(["goal": .string(goal.isEmpty ? "Explore and test the app" : goal)])))
+    }
+    return await runJourney(
+      .init(
+        id: request.id, method: "flow.run",
+        params: .object(["goal": request.params?["goal"] ?? .string("Explore and test the app")])))
+  }
+
+  private func runFlowStep(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let flowID = request.params?["flowID"]?.stringValue,
+      let capabilityID = request.params?["capabilityID"]?.stringValue,
+      let action = request.params?["action"]?.stringValue
+    else { return failure(request.id, -32602, "flowID, capabilityID, and action are required") }
+    var step: [String: JSONValue] = [
+      "id": .string(request.params?["stepID"]?.stringValue ?? UUID().uuidString),
+      "title": .string(request.params?["title"]?.stringValue ?? "Exercise app capability"),
+      "actionID": .string(capabilityID), "action": .string(action),
+    ]
+    if let text = request.params?["text"] { step["text"] = text }
+    if let changed = request.params?["expectScreenChanged"] {
+      step["expectScreenChanged"] = changed
+    }
+    return await runJourney(
+      .init(
+        id: request.id, method: "flow.step",
+        params: .object([
+          "goal": .string(activeJourney?.goal ?? "Explore and test the app"),
+          "journeyID": .string(flowID), "steps": .array([.object(step)]),
+        ])))
+  }
+
+  private func finishFlow(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let flowID = request.params?["flowID"]?.stringValue else {
+      return failure(request.id, -32602, "flowID is required")
+    }
+    return await runJourney(
+      .init(
+        id: request.id, method: "flow.finish",
+        params: .object([
+          "goal": .string(activeJourney?.goal ?? "Explore and test the app"),
+          "journeyID": .string(flowID), "complete": .bool(true),
+        ])))
+  }
+
+  private func runBlueprintFlow(
+    _ request: RPCEnvelope, blueprint: InteractionBlueprint, flow: BlueprintFlow,
+    parameters: [String: JSONValue]
+  ) async -> RPCEnvelope {
     guard var configuration = sessionConfiguration else {
       return failure(request.id, -32083, "The host has not configured this testing session")
     }
-    let goal = request.params?["goal"]?.stringValue?.trimmingCharacters(
-      in: .whitespacesAndNewlines) ?? ""
+    if let expectedBundleID = blueprint.app?.bundleIdentifier,
+      let selectedBundleID = configuration.target?.bundleID,
+      expectedBundleID != selectedBundleID
+    {
+      return failure(
+        request.id, -32124,
+        "Lys contract expects \(expectedBundleID), but the selected app is \(selectedBundleID)")
+    }
+    for (name, parameter) in flow.parameters ?? [:]
+    where parameter.required == true && parameters[name] == nil {
+      return failure(request.id, -32113, "Flow \(flow.id) requires parameter \(name)")
+    }
+    let undeclared = parameters.keys.sorted().filter { flow.parameters?[$0] == nil }
+    if let first = undeclared.first {
+      return failure(request.id, -32113, "Flow \(flow.id) does not declare parameter \(first)")
+    }
+    for (name, value) in parameters {
+      guard let parameter = flow.parameters?[name] else { continue }
+      if parameter.sensitive == true {
+        return failure(
+          request.id, -32114,
+          "Sensitive input \(name) must be a Lys secret, not an agent-supplied parameter")
+      }
+      if !blueprintParameterValue(value, satisfies: parameter) {
+        return failure(
+          request.id, -32113,
+          "Flow parameter \(name) does not satisfy type \(parameter.type)")
+      }
+    }
+    var journey = JourneyRecord(goal: flow.title, mode: .declared)
+    activeJourney = journey
+    emit(.journeyStarted, message: flow.title, journeyID: journey.id)
+    do {
+      for secret in flow.requiredSecrets ?? [] {
+        guard blueprintSecret(secret) != nil else {
+          throw RPCError(
+            code: -32114,
+            message:
+              "Flow \(flow.id) requires secret \(secret). Add it through Lys's Keychain-backed secret settings."
+          )
+        }
+      }
+      let ready = try await ensureJourneyApp(configuration: &configuration, journeyID: journey.id)
+      sessionConfiguration = configuration
+      journey.currentFingerprint = ready.fingerprint
+      journey.status = .running
+      activeJourney = journey
+
+      if let contextID = flow.context,
+        let context = blueprint.contexts?.first(where: { $0.id == contextID })
+      {
+        let current = try await currentBlueprintElements()
+        if !(await blueprintPredicatesPass(
+          context.readyWhen, elements: current, blueprint: blueprint))
+        {
+          for secret in context.requiredSecrets ?? [] {
+            guard blueprintSecret(secret) != nil else {
+              throw RPCError(
+                code: -32114,
+                message:
+                  "Authentication context \(context.id) requires secret \(secret). Add it through Lys's Keychain-backed secret settings."
+              )
+            }
+          }
+          if context.mode == .authenticatedSession, let session = context.session {
+            try await launchAuthenticatedTestSession(
+              session, parameters: parameters, configuration: configuration,
+              journeyID: journey.id)
+          }
+          if context.mode == .uiFlow, let startRoute = context.startRoute {
+            let current = try await currentBlueprintElements()
+            if blueprintRoute(in: current, blueprint: blueprint)?.id != startRoute {
+              try await executeBlueprintSteps(
+                [
+                  .init(
+                    id: "lys.context.entry", title: "Reach \(startRoute)", kind: .navigate,
+                    route: startRoute)
+                ], blueprint: blueprint, parameters: parameters, journey: &journey)
+            }
+          }
+          try await executeBlueprintSteps(
+            context.prepare, blueprint: blueprint, parameters: parameters, journey: &journey)
+          let prepared = try await currentBlueprintElements()
+          guard
+            await blueprintPredicatesPass(
+              context.readyWhen, elements: prepared, blueprint: blueprint)
+          else {
+            throw RPCError(
+              code: -32115, message: "Authentication context \(context.id) is not ready")
+          }
+        }
+      }
+
+      let current = try await currentBlueprintElements()
+      let currentRoute = blueprintRoute(in: current, blueprint: blueprint)?.id
+      guard let currentRoute else {
+        throw RPCError(
+          code: -32127,
+          message:
+            "Lys screen instrumentation error: the current screen does not match any declared route. Ensure it exposes exactly one lys.screen.* marker."
+        )
+      }
+      guard
+        BlueprintNavigationPlanner.path(
+          from: currentRoute, to: flow.startRoute,
+          capabilities: blueprint.capabilities ?? []) != nil
+      else {
+        throw RPCError(
+          code: -32127,
+          message:
+            "Lys routing error: the observed route \(currentRoute) has no safe declared path to \(flow.startRoute) for flow \(flow.id). Add the real route/resultsIn controls, or use a context that normalizes the app state."
+        )
+      }
+      if currentRoute != flow.startRoute {
+        try await executeBlueprintSteps(
+          [
+            .init(
+              id: "lys.entry", title: "Reach \(flow.startRoute)", kind: .navigate,
+              route: flow.startRoute)
+          ], blueprint: blueprint, parameters: parameters, journey: &journey)
+      }
+
+      try await executeBlueprintSteps(
+        flow.steps, blueprint: blueprint, parameters: parameters, journey: &journey)
+      let finalElements = try await currentBlueprintElements()
+      var criterionIDs: [String] = []
+      for (index, predicate) in flow.acceptance.enumerated() {
+        let criterionID = "\(flow.id).acceptance.\(index + 1)"
+        criterionIDs.append(criterionID)
+        let passed = await blueprintPredicatePasses(
+          predicate, elements: finalElements, blueprint: blueprint)
+        let item = Evidence(
+          kind: .uiAssertion, status: passed ? .passed : .failed,
+          taskGeneration: await ledger.generation, criterionID: criterionID,
+          destinationUDID: configuration.destination?.udid,
+          diagnosticSummary: passed
+            ? "Blueprint acceptance \(index + 1) passed"
+            : "Blueprint acceptance \(index + 1) failed",
+          deterministic: true)
+        try await ledger.record(item)
+        journey.steps.append(
+          .init(
+            step: .init(
+              id: "acceptance.\(index + 1)", title: "Acceptance \(index + 1)",
+              criterionID: criterionID),
+            status: passed ? .passed : .failed, detail: item.diagnosticSummary,
+            evidenceIDs: [item.id]))
+        activeJourney = journey
+        if !passed {
+          throw RPCError(code: -32117, message: item.diagnosticSummary)
+        }
+      }
+      if let udid = configuration.destination?.udid {
+        _ = await captureStableScreenshot(
+          .init(id: nil, method: "screenshot.capture"), udid: udid)
+      }
+      let report = await ledger.verify(
+        .init(
+          codeChanged: configuration.intent.allowsSourceWrites, uiChanged: true,
+          testsChanged: false, criterionIDs: criterionIDs))
+      journey.status = report.status == .verified ? .passed : .failed
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(
+        .journeyFinished,
+        message: journey.status == .passed
+          ? "Blueprint flow verified." : report.missing.joined(separator: "; "),
+        journeyID: journey.id)
+      var result = try jsonValue(journey)
+      if case .object(var object) = result {
+        object["flowID"] = .string(flow.id)
+        object["verification"] = try jsonValue(report)
+        object["message"] = .string(
+          journey.status == .passed
+            ? "Blueprint flow \(flow.title) passed." : "Blueprint flow needs attention.")
+        result = .object(object)
+      }
+      return success(request.id, result)
+    } catch let error as RPCError {
+      journey.status = .failed
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(.journeyFinished, message: error.message, journeyID: journey.id)
+      return failure(request.id, error.code, error.message)
+    } catch {
+      journey.status = .failed
+      activeJourney = journey
+      return failure(request.id, -32118, error.localizedDescription)
+    }
+  }
+
+  private func executeBlueprintSteps(
+    _ steps: [BlueprintStep], blueprint: InteractionBlueprint,
+    parameters: [String: JSONValue], journey: inout JourneyRecord
+  ) async throws {
+    for declared in steps {
+      guard !sessionStoppedByHost, !Task.isCancelled else {
+        throw RPCError(code: -32097, message: "The blueprint flow was stopped")
+      }
+      if declared.kind == .repeatUntil {
+        guard let until = declared.until, let nested = declared.steps,
+          let maximum = declared.maximumIterations
+        else { throw RPCError(code: -32111, message: "Invalid repeat step \(declared.id)") }
+        var completed = false
+        for _ in 0..<maximum {
+          let elements = try await currentBlueprintElements()
+          if await blueprintPredicatePasses(until, elements: elements, blueprint: blueprint) {
+            completed = true
+            break
+          }
+          try await executeBlueprintSteps(
+            nested, blueprint: blueprint, parameters: parameters, journey: &journey)
+        }
+        if !completed {
+          let elements = try await currentBlueprintElements()
+          completed = await blueprintPredicatePasses(
+            until, elements: elements, blueprint: blueprint)
+        }
+        let step = JourneyStep(id: declared.id, title: declared.title)
+        journey.steps.append(
+          .init(
+            step: step, status: completed ? .passed : .failed,
+            detail: completed ? "Repeat condition reached." : "Repeat budget exhausted."))
+        activeJourney = journey
+        if !completed {
+          throw RPCError(code: -32119, message: "Repeat step \(declared.id) exhausted its budget")
+        }
+        continue
+      }
+
+      var result: JourneyStepResult
+      switch declared.kind {
+      case .invoke:
+        guard let capabilityID = declared.capability,
+          let capability = blueprint.capabilities?.first(where: { $0.id == capabilityID })
+        else { throw RPCError(code: -32112, message: "Unknown blueprint capability") }
+        result = try await executeBlueprintCapability(
+          declared, capability: capability, blueprint: blueprint, parameters: parameters,
+          journeyID: journey.id)
+      case .assert:
+        guard let predicate = declared.predicate else {
+          throw RPCError(code: -32111, message: "Assertion requires a predicate")
+        }
+        let elements = try await currentBlueprintElements()
+        let passed = await blueprintPredicatePasses(
+          predicate, elements: elements, blueprint: blueprint)
+        let criterionID = "blueprint.\(declared.id)"
+        let item = Evidence(
+          kind: .uiAssertion, status: passed ? .passed : .failed,
+          taskGeneration: await ledger.generation, criterionID: criterionID,
+          destinationUDID: sessionConfiguration?.destination?.udid,
+          diagnosticSummary: passed ? "\(declared.title) passed" : "\(declared.title) failed",
+          deterministic: true)
+        try await ledger.record(item)
+        result = .init(
+          step: .init(id: declared.id, title: declared.title, criterionID: criterionID),
+          status: passed ? .passed : .failed, detail: item.diagnosticSummary,
+          evidenceIDs: [item.id])
+      case .navigate:
+        let elements = try await currentBlueprintElements()
+        let currentRoute = blueprintRoute(in: elements, blueprint: blueprint)?.id
+        let targetRoute = declared.route
+        var reached = currentRoute == targetRoute
+        var navigationFailure: String?
+        if !reached, let currentRoute, let targetRoute,
+          let path = BlueprintNavigationPlanner.path(
+            from: currentRoute, to: targetRoute, capabilities: blueprint.capabilities ?? [])
+        {
+          for (index, capability) in path.enumerated() {
+            let navigationStep = BlueprintStep(
+              id: "\(declared.id).\(index + 1)", title: capability.title, kind: .invoke,
+              capability: capability.id)
+            let navigationResult = try await executeBlueprintCapability(
+              navigationStep, capability: capability, blueprint: blueprint,
+              parameters: parameters, journeyID: journey.id)
+            guard navigationResult.status == .passed else {
+              navigationFailure =
+                  "Lys transition delivery error: \(capability.id) failed on \(currentRoute): \(navigationResult.detail)"
+              break
+            }
+            if let expectedRoute = capability.resultsIn {
+              let observed = try await waitForBlueprintRoute(
+                expectedRoute, blueprint: blueprint)
+              guard observed.reached else {
+                navigationFailure =
+                  "Lys transition verification error: \(capability.id) was invoked, but expected route \(expectedRoute) was not observed. "
+                  + "Observed route: \(observed.route ?? "unrecognized"). Verify the action is attached to the real control, its handler navigates, and the destination exposes lys.screen.\(expectedRoute)."
+                break
+              }
+            }
+          }
+          if navigationFailure == nil {
+            let navigated = try await waitForBlueprintRoute(targetRoute, blueprint: blueprint)
+            reached = navigated.reached
+            if !reached {
+              navigationFailure =
+                "Declared path finished, but route \(targetRoute) was not observed. Observed route: \(navigated.route ?? "unrecognized")."
+            }
+          }
+        } else if !reached {
+          if let currentRoute, let targetRoute {
+            navigationFailure =
+              "Lys contract coverage error: no safe transition path exists from \(currentRoute) to \(targetRoute). Add the real control as a capability with route \(currentRoute) and resultsIn \(targetRoute), and include \(currentRoute) in the flow entryRoutes."
+          } else {
+            navigationFailure =
+              "Lys screen instrumentation error: the visible screen does not match a declared route. Ensure it exposes exactly one declared lys.screen.* marker."
+          }
+        }
+        result = .init(
+          step: .init(id: declared.id, title: declared.title),
+          status: reached ? .passed : .failed,
+          detail: reached
+            ? "Route reached."
+            : navigationFailure
+              ?? "No declared transition path reached route \(targetRoute ?? "unknown") from \(currentRoute ?? "an unrecognized current route").")
+      case .repeatUntil: continue
+      }
+      journey.steps.removeAll { $0.id == result.id }
+      journey.steps.append(result)
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(
+        .journeyStepFinished, message: result.detail, journeyID: journey.id,
+        stepID: declared.id)
+      if result.status == .failed {
+        throw RPCError(code: -32120, message: result.detail)
+      }
+    }
+  }
+
+  /// Starts a protected test session without asking the agent to type credentials through the UI.
+  /// Values are resolved inside the host and reach the Simulator only through SIMCTL_CHILD_ launch
+  /// environment entries. Authentication itself remains testable with a separate `.uiFlow`
+  /// context that drives the real login controls.
+  private func launchAuthenticatedTestSession(
+    _ session: BlueprintAuthenticatedSession, parameters: [String: JSONValue],
+    configuration: RuntimeSessionConfiguration, journeyID: UUID
+  ) async throws {
+    guard let destination = configuration.destination, let target = configuration.target else {
+      throw RPCError(code: -32125, message: "Lys cannot prepare authentication without an app")
+    }
+    let preflight = await resolvedToolchainPreflight()
+    guard let simctlPath = preflight.simctlPath,
+      let developerDirectory = preflight.developerDirectory
+    else { throw RPCError(code: -32050, message: "Full Xcode is unavailable") }
+
+    let resolved = try resolveBlueprintInputs(session.environment, parameters: parameters)
+    var values: [String: String] = [:]
+    for (key, value) in resolved {
+      guard let string = value.stringValue else {
+        throw RPCError(
+          code: -32113,
+          message: "Authenticated session environment \(key) must resolve to a string")
+      }
+      values[key] = string
+    }
+
+    let simctl = URL(fileURLWithPath: simctlPath)
+    let terminate = AppleCommandBuilder.terminate(
+      simctl: simctl, udid: destination.udid, bundleID: target.bundleID)
+    _ = try? await runner.run(
+      executable: terminate.executable, arguments: terminate.arguments,
+      workingDirectory: workspace, environment: ["DEVELOPER_DIR": developerDirectory])
+
+    var launchArguments = session.arguments ?? []
+    if !launchArguments.contains("-LysTesting") { launchArguments.append("-LysTesting") }
+    let launch = AppleCommandBuilder.authenticatedLaunch(
+      simctl: simctl, udid: destination.udid, bundleID: target.bundleID,
+      developerDirectory: developerDirectory, values: values,
+      arguments: launchArguments)
+    let outcome = try await runner.run(
+      executable: launch.executable, arguments: launch.arguments, workingDirectory: workspace,
+      environment: launch.environment)
+    let evidence = Evidence(
+      kind: .launch, status: outcome.succeeded ? .passed : .failed,
+      taskGeneration: await ledger.generation, destinationUDID: destination.udid,
+      diagnosticSummary: outcome.succeeded
+        ? "Lys prepared the authenticated test session"
+        : "Authenticated test session launch failed: \(outcome.stderr)")
+    try await ledger.record(evidence)
+    guard outcome.succeeded else {
+      throw RPCError(code: -32125, message: evidence.diagnosticSummary)
+    }
+    lastLaunchedBundleID = target.bundleID
+    emit(
+      .appLaunched, message: "Authenticated test session ready for validation.",
+      journeyID: journeyID, target: target, destinationUDID: destination.udid)
+
+    // Force WDA to observe the relaunched process before context readyWhen is evaluated.
+    for _ in 0..<20 {
+      if (try? await wda.snapshot(
+        udid: destination.udid, runtime: destination.runtime, bundleID: target.bundleID,
+        preflight: preflight)) != nil
+      { return }
+      try await Task.sleep(for: .milliseconds(150))
+    }
+    throw RPCError(code: -32125, message: "Authenticated test session did not become observable")
+  }
+
+  private func executeBlueprintCapability(
+    _ declared: BlueprintStep, capability: BlueprintCapability,
+    blueprint: InteractionBlueprint, parameters: [String: JSONValue], journeyID: UUID
+  ) async throws -> JourneyStepResult {
+    if capability.risk == .destructive || capability.risk == .external {
+      throw RPCError(
+        code: -32123,
+        message:
+          "Capability \(capability.id) is \(capability.risk?.rawValue ?? "restricted") and requires explicit user approval in Lys. Agents cannot self-approve it."
+      )
+    }
+    var elements = try await currentBlueprintElements()
+    if let expectedRoute = capability.route,
+      blueprintRoute(in: elements, blueprint: blueprint)?.id != expectedRoute
+    {
+      throw RPCError(
+        code: -32121,
+        message: "Capability \(capability.id) is only valid on route \(expectedRoute)")
+    }
+    let context = try await automationContext(.init())
+    var selected: UIElement?
+    switch BlueprintControlResolver.resolve(capability.selector, in: elements) {
+    case .visible(let element):
+      selected = element
+    case .offscreen(let element):
+      if let revealed = try await revealBlueprintControl(
+        capability.selector, expectedRoute: capability.route, blueprint: blueprint,
+        context: context)
+      {
+        elements = revealed.elements
+        selected = revealed.element
+      } else {
+        // Native XCTest click performs its own scroll-to-visible and remains a useful fallback.
+        selected = element
+      }
+    case .ambiguous:
+      throw RPCError(
+        code: -32121, message: "Capability \(capability.id) is ambiguous; add a relational selector or index")
+    case .missing:
+      if let revealed = try await revealBlueprintControl(
+        capability.selector, expectedRoute: capability.route, blueprint: blueprint,
+        context: context)
+      {
+        elements = revealed.elements
+        selected = revealed.element
+      }
+    }
+    if selected == nil, let identifier = capability.selector.identifier {
+      // XCTest queries can resolve non-virtualized descendants that page source omitted; the
+      // native click then scrolls the element into view. Keep this as the final semantic attempt.
+      selected = UIElement(
+        type: capability.selector.role ?? "Any", identifier: identifier,
+        label: capability.selector.name ?? capability.selector.text, visible: false,
+        hittable: false, frame: .init(x: 0, y: 0, width: 0, height: 0),
+        childPath: "semantic.\(capability.id)", owningApplication: context.bundleID,
+        availableActions: [blueprintPrimitiveAction(capability.action)], accessible: true)
+    }
+    guard let selected else {
+      throw RPCError(
+        code: -32121,
+        message:
+          "No control matching capability \(capability.id) was found after bounded semantic scrolling on route \(capability.route ?? "unknown")")
+    }
+    let fingerprint = ScreenFingerprint.make(elements: elements, modal: false, navigationTitle: nil)
+    let actionID = UIActionCatalog.actionID(
+      fingerprint: fingerprint, childPath: selected.childPath)
+    let resolvedArguments = try resolveBlueprintInputs(
+      declared.arguments ?? [:], parameters: parameters)
+    let unknownArguments = resolvedArguments.keys.sorted().filter {
+      capability.parameters?[$0] == nil
+    }
+    if let first = unknownArguments.first {
+      throw RPCError(
+        code: -32113,
+        message: "Capability \(capability.id) does not declare argument \(first)")
+    }
+    for (name, parameter) in capability.parameters ?? [:] {
+      if parameter.required == true, resolvedArguments[name] == nil {
+        throw RPCError(
+          code: -32113, message: "Capability \(capability.id) requires argument \(name)")
+      }
+      guard let value = resolvedArguments[name] else { continue }
+      if !blueprintParameterValue(value, satisfies: parameter) {
+        throw RPCError(
+          code: -32113,
+          message: "Capability argument \(name) does not satisfy type \(parameter.type)")
+      }
+      if parameter.sensitive == true, declared.arguments?[name]?.secret == nil {
+        throw RPCError(
+          code: -32114,
+          message: "Sensitive capability argument \(name) must reference a protected secret")
+      }
+    }
+    let primitive = blueprintPrimitiveAction(capability.action)
+    let performed = await performBlueprintAction(
+      action: primitive, arguments: resolvedArguments, selected: selected, before: elements,
+      context: context)
+    if let error = performed.error { throw error }
+    let passed = performed.result?["actionSucceeded"]?.boolValue == true
+    var detail = performed.result?["message"]?.stringValue ?? declared.title
+    if passed, let expected = declared.expect, !expected.isEmpty {
+      var after: [UIElement]
+      if let value = performed.result?["elements"], let decoded: [UIElement] = try? decode(value) {
+        after = decoded
+      } else {
+        after = try await currentBlueprintElements()
+      }
+      var expectedReached = await blueprintPredicatesPass(
+        expected, elements: after, blueprint: blueprint)
+      if !expectedReached {
+        for _ in 0..<25 {
+          try await Task.sleep(for: .milliseconds(120))
+          after = try await currentBlueprintElements()
+          if await blueprintPredicatesPass(expected, elements: after, blueprint: blueprint) {
+            expectedReached = true
+            break
+          }
+        }
+      }
+      if !expectedReached {
+        let observed = blueprintRoute(in: after, blueprint: blueprint)?.id ?? "unrecognized"
+        detail =
+          "\(declared.title) ran, but its expected state was not reached within 3 seconds. Observed route: \(observed)."
+        return .init(
+          step: .init(
+            id: declared.id, title: declared.title, actionID: actionID, action: primitive),
+          status: .failed, detail: detail,
+          evidenceIDs: uuidValues(performed.result?["evidenceIDs"]))
+      }
+    }
+    return .init(
+      step: .init(
+        id: declared.id, title: declared.title, actionID: actionID, action: primitive),
+      status: passed ? .passed : .failed, detail: detail,
+      evidenceIDs: uuidValues(performed.result?["evidenceIDs"]))
+  }
+
+  private func performBlueprintAction(
+    action: String, arguments: [String: JSONValue], selected: UIElement,
+    before: [UIElement],
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight)
+  ) async -> RPCEnvelope {
+    do {
+      var usedPhysicalRetry = false
+      if action == "type" || action == "clear" {
+        let text = arguments["text"]?.stringValue ?? arguments["value"]?.stringValue
+        if action == "type", text == nil {
+          return failure(nil, -32602, "Blueprint type action requires a text argument")
+        }
+        if let identifier = selected.identifier {
+          try await wda.perform(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            identifier: identifier, label: nil, type: selected.type,
+            action: action, text: text, preflight: context.preflight)
+        } else if let xpath = selected.xpath {
+          try await wda.performXPath(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            xpath: xpath, action: action, text: text, preflight: context.preflight)
+        } else {
+          try await wda.perform(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            identifier: selected.identifier, label: selected.label, type: selected.type,
+            action: action, text: text, preflight: context.preflight)
+        }
+      } else if action == "tap" {
+        do {
+          if let identifier = selected.identifier {
+            try await wda.perform(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              identifier: identifier, label: nil, type: selected.type,
+              action: action, text: nil, preflight: context.preflight)
+          } else if let xpath = selected.xpath {
+            try await wda.performXPath(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              xpath: xpath, action: action, text: nil, preflight: context.preflight)
+          } else {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: selected.frame, action: action, arguments: arguments,
+              preflight: context.preflight)
+            usedPhysicalRetry = true
+          }
+        } catch {
+          if let xpath = selected.xpath {
+            try await wda.performXPath(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              xpath: xpath, action: action, text: nil, preflight: context.preflight)
+          } else if selected.visible != false && selected.frame.width > 1
+            && selected.frame.height > 1
+          {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: selected.frame, action: action, arguments: arguments,
+              preflight: context.preflight)
+            usedPhysicalRetry = true
+          } else {
+            throw error
+          }
+        }
+      } else {
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: selected.frame, action: action, arguments: arguments,
+          preflight: context.preflight)
+      }
+
+      var after = try await settledSnapshot(context: context, baseline: before)
+      let beforeFingerprint = ScreenFingerprint.make(
+        elements: before, modal: false, navigationTitle: nil)
+      var stateChanged =
+        UIInteractionStateFingerprint.make(elements: before)
+        != UIInteractionStateFingerprint.make(elements: after)
+      if action == "tap", !stateChanged, !usedPhysicalRetry, selected.visible != false,
+        selected.frame.width > 1, selected.frame.height > 1
+      {
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: selected.frame, action: action, arguments: arguments,
+          preflight: context.preflight)
+        usedPhysicalRetry = true
+        after = try await settledSnapshot(context: context, baseline: before)
+        stateChanged =
+          UIInteractionStateFingerprint.make(elements: before)
+          != UIInteractionStateFingerprint.make(elements: after)
+      }
+      let afterFingerprint = ScreenFingerprint.make(
+        elements: after, modal: false, navigationTitle: nil)
+      let title = selected.label ?? selected.identifier ?? selected.type
+      let diagnostic =
+        stateChanged
+        ? "Blueprint-resolved \(action) on \(title)"
+        : "\(title) accepted \(action), but the app exposed no observable state change"
+      let item = Evidence(
+        kind: .uiAction, status: stateChanged ? .passed : .failed,
+        taskGeneration: await ledger.generation, destinationUDID: context.udid,
+        diagnosticSummary: diagnostic, deterministic: true)
+      try await ledger.record(item)
+      if stateChanged {
+        _ = await appGraph.observe(
+          from: beforeFingerprint, to: afterFingerprint,
+          selector: .hierarchyPath(selected.xpath ?? selected.childPath),
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+      }
+      let actions = currentCapabilities(elements: after, fingerprint: afterFingerprint)
+      await appGraph.observeScreen(afterFingerprint, actions: actions)
+      await persistAppGraph()
+      emit(
+        .uiAction, message: diagnostic, journeyID: activeJourney?.id,
+        destinationUDID: context.udid)
+      return success(
+        nil,
+        .object([
+          "actionSucceeded": .bool(stateChanged), "stateChanged": .bool(stateChanged),
+          "screenChanged": .bool(beforeFingerprint != afterFingerprint),
+          "beforeFingerprint": try jsonValue(beforeFingerprint),
+          "afterFingerprint": try jsonValue(afterFingerprint),
+          "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: after)),
+          "delivery": .string(usedPhysicalRetry ? "semanticThenPhysical" : "semantic"),
+          "message": .string(diagnostic),
+        ]))
+    } catch let error as RPCError {
+      return failure(nil, error.code, error.message)
+    } catch {
+      return failure(nil, -32077, error.localizedDescription)
+    }
+  }
+
+  private func currentBlueprintElements() async throws -> [UIElement] {
+    let snapshot = await uiSnapshot(.init(id: nil, method: "ui.snapshot"))
+    if let error = snapshot.error { throw error }
+    guard let value = snapshot.result?["elements"] else { return [] }
+    return try decode(value)
+  }
+
+  private func revealBlueprintControl(
+    _ selector: BlueprintSelector, expectedRoute: String?, blueprint: InteractionBlueprint,
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight)
+  ) async throws -> (elements: [UIElement], element: UIElement)? {
+    var elements = try await currentBlueprintElements()
+    let hidden = BlueprintControlResolver.matches(selector, in: elements, includeHidden: true)
+      .first
+    var directions = ["scrollUp", "scrollDown"]
+    if let hidden,
+      let surface = BlueprintRevealPlanner.scrollSurface(in: elements, action: "scrollUp")
+    {
+      let preferred = BlueprintRevealPlanner.preferredAction(
+        for: hidden, scrollSurface: surface)
+      directions = preferred == "scrollUp"
+        ? ["scrollUp", "scrollDown"] : ["scrollDown", "scrollUp"]
+    }
+
+    for direction in directions {
+      for _ in 0..<12 {
+        guard
+          let surface = BlueprintRevealPlanner.scrollSurface(
+            in: elements, action: direction)
+        else { break }
+        let before = UIInteractionStateFingerprint.make(elements: elements)
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: surface.frame, action: direction, preflight: context.preflight)
+        try await Task.sleep(for: .milliseconds(120))
+        elements = try await currentBlueprintElements()
+        if let expectedRoute,
+          blueprintRoute(in: elements, blueprint: blueprint)?.id != expectedRoute
+        {
+          throw RPCError(
+            code: -32121,
+            message:
+              "Revealing a control for route \(expectedRoute) unexpectedly left that route")
+        }
+        switch BlueprintControlResolver.resolve(selector, in: elements) {
+        case .visible(let element):
+          return (elements, element)
+        case .offscreen:
+          break
+        case .ambiguous:
+          throw RPCError(
+            code: -32121,
+            message: "The requested capability became ambiguous while scrolling; refine its selector")
+        case .missing:
+          break
+        }
+        if UIInteractionStateFingerprint.make(elements: elements) == before { break }
+      }
+    }
+    return nil
+  }
+
+  private func waitForBlueprintRoute(
+    _ expectedRoute: String, blueprint: InteractionBlueprint
+  ) async throws -> (reached: Bool, route: String?) {
+    var observed: String?
+    for attempt in 0..<26 {
+      let elements = try await currentBlueprintElements()
+      observed = blueprintRoute(in: elements, blueprint: blueprint)?.id
+      if observed == expectedRoute { return (true, observed) }
+      if attempt < 25 { try await Task.sleep(for: .milliseconds(120)) }
+    }
+    return (false, observed)
+  }
+
+  private func blueprintRoute(
+    in elements: [UIElement], blueprint: InteractionBlueprint
+  ) -> BlueprintRoute? {
+    let matches = (blueprint.routes ?? []).filter { route in
+      route.match.allSatisfy {
+        blueprintPredicatePassesSynchronously($0, elements: elements, blueprint: blueprint)
+      }
+    }
+    return matches.count == 1 ? matches[0] : nil
+  }
+
+  private func blueprintPredicatesPass(
+    _ predicates: [BlueprintPredicate], elements: [UIElement], blueprint: InteractionBlueprint
+  ) async -> Bool {
+    for predicate in predicates {
+      if !(await blueprintPredicatePasses(predicate, elements: elements, blueprint: blueprint)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  private func blueprintPredicatePasses(
+    _ predicate: BlueprintPredicate, elements: [UIElement], blueprint: InteractionBlueprint
+  ) async -> Bool {
+    if predicate.kind == .noCrash {
+      let generation = await ledger.generation
+      return !(await ledger.allEvidence()).contains {
+        $0.taskGeneration == generation && $0.kind == .runtimeLog && $0.status == .failed
+          && !$0.acknowledged
+      }
+    }
+    if predicate.kind == .appIdle {
+      guard let context = try? await automationContext(.init()) else { return false }
+      let first = UIInteractionStateFingerprint.make(elements: elements)
+      try? await Task.sleep(for: .milliseconds(160))
+      guard
+        let next = try? await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+      else { return false }
+      return UIInteractionStateFingerprint.make(elements: next) == first
+    }
+    return blueprintPredicatePassesSynchronously(
+      predicate, elements: elements, blueprint: blueprint)
+  }
+
+  private func blueprintPredicatePassesSynchronously(
+    _ predicate: BlueprintPredicate, elements: [UIElement], blueprint: InteractionBlueprint
+  ) -> Bool {
+    switch predicate.kind {
+    case .route:
+      guard let routeID = predicate.route,
+        let route = blueprint.routes?.first(where: { $0.id == routeID })
+      else { return false }
+      return route.match.allSatisfy {
+        blueprintPredicatePassesSynchronously($0, elements: elements, blueprint: blueprint)
+      }
+    case .visible:
+      return predicate.selector.map { !blueprintMatches($0, in: elements).isEmpty } ?? false
+    case .absent:
+      return predicate.selector.map { blueprintMatches($0, in: elements).isEmpty } ?? false
+    case .enabled:
+      return predicate.selector.map { blueprintMatches($0, in: elements).contains { $0.enabled } }
+        ?? false
+    case .selected:
+      return predicate.selector.map { blueprintMatches($0, in: elements).contains { $0.selected } }
+        ?? false
+    case .value:
+      return predicate.selector.map { selector in
+        blueprintMatches(selector, in: elements).contains { $0.value == predicate.equals }
+      } ?? false
+    case .text:
+      guard let selector = predicate.selector, let pattern = predicate.matches,
+        let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+      else { return false }
+      return blueprintMatches(selector, in: elements).contains { element in
+        let text = element.label ?? element.value ?? ""
+        return expression.firstMatch(
+          in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
+      }
+    case .progressComplete:
+      return UIFlowProgressDetector.detect(in: elements)?.isComplete == true
+    case .appIdle:
+      return false  // Evaluated asynchronously using two matching runtime snapshots.
+    case .noCrash:
+      return true  // The asynchronous ledger check is performed by blueprintPredicatePasses.
+    }
+  }
+
+  private func blueprintMatches(
+    _ selector: BlueprintSelector, in elements: [UIElement]
+  ) -> [UIElement] {
+    BlueprintControlResolver.matches(selector, in: elements)
+  }
+
+  private func blueprintPrimitiveAction(_ action: BlueprintActionKind) -> String {
+    switch action {
+    case .tap, .toggle, .select, .dismiss, .back: "tap"
+    case .type: "type"
+    case .clear: "clear"
+    case .scrollUp: "scrollUp"
+    case .scrollDown: "scrollDown"
+    case .doubleTap: "doubleTap"
+    case .longPress: "longPress"
+    case .swipe: "swipe"
+    case .drag: "drag"
+    case .setSlider: "setSlider"
+    }
+  }
+
+  private func resolveBlueprintInputs(
+    _ inputs: [String: BlueprintInput], parameters: [String: JSONValue]
+  ) throws -> [String: JSONValue] {
+    var resolved: [String: JSONValue] = [:]
+    for (name, input) in inputs {
+      let sources = [input.literal != nil, input.parameter != nil, input.secret != nil].filter {
+        $0
+      }
+      guard sources.count == 1 else {
+        throw RPCError(
+          code: -32111,
+          message:
+            "Blueprint input \(name) must declare exactly one of literal, parameter, or secret")
+      }
+      if let literal = input.literal { resolved[name] = literal }
+      if let parameter = input.parameter {
+        guard let value = parameters[parameter] else {
+          throw RPCError(code: -32113, message: "Missing flow parameter \(parameter)")
+        }
+        resolved[name] = value
+      }
+      if let secret = input.secret {
+        guard let value = blueprintSecret(secret) else {
+          throw RPCError(code: -32114, message: "Missing protected secret \(secret)")
+        }
+        resolved[name] = .string(value)
+      }
+    }
+    return resolved
+  }
+
+  private func blueprintParameterValue(
+    _ value: JSONValue, satisfies parameter: BlueprintParameter
+  ) -> Bool {
+    switch parameter.type {
+    case "string": return value.stringValue != nil
+    case "number": return value.numberValue != nil
+    case "boolean": return value.boolValue != nil
+    case "enum":
+      guard let value = value.stringValue else { return false }
+      return parameter.values?.contains(value) == true
+    default: return false
+    }
+  }
+
+  private func blueprintSecret(_ name: String) -> String? {
+    if let value = BlueprintSecretStore.read(account: name) { return value }
+    if let reference = projectConfiguration?.secrets?.first(where: {
+      $0.environmentKey == name
+    }), let value = BlueprintSecretStore.read(account: reference.keychainAccount) {
+      return value
+    }
+    let key =
+      "LYS_SECRET_"
+      + name.uppercased().map { character in
+        character.isLetter || character.isNumber ? character : "_"
+      }
+    return ProcessInfo.processInfo.environment[String(key)]
+  }
+
+  private func runJourney(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard !sessionStoppedByHost else {
+      return failure(
+        request.id, -32097,
+        "The host stopped this agent turn. Wait for a new user request before testing again.")
+    }
+    guard var configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let goal =
+      request.params?["goal"]?.stringValue?.trimmingCharacters(
+        in: .whitespacesAndNewlines) ?? ""
     guard !goal.isEmpty else { return failure(request.id, -32602, "goal is required") }
     let requestedID = request.params?["journeyID"]?.stringValue.flatMap(UUID.init(uuidString:))
     if let requestedID, activeJourney?.id != requestedID {
@@ -295,6 +1445,7 @@ public actor RuntimeService {
       }
 
       let steps: [JourneyStep] = try decodeOptionalArray(request.params?["steps"]) ?? []
+      var needsRecovery = false
       if !steps.isEmpty {
         journey.status = .running
         for step in steps {
@@ -315,15 +1466,44 @@ public actor RuntimeService {
           emit(
             .journeyStepFinished, message: result.detail, journeyID: journey.id, stepID: step.id)
           if result.status == .failed {
-            journey.status = .failed
+            journey.status = .ready
             activeJourney = journey
-            emit(.journeyFinished, message: "Journey failed at \(step.title).", journeyID: journey.id)
-            return success(request.id, try jsonValue(journey))
+            needsRecovery = true
+            emit(
+              .warning,
+              message:
+                "\(step.title) needs a different current action. The app remains attached for recovery.",
+              journeyID: journey.id, stepID: step.id)
+            break
           }
         }
       }
 
-      if request.params?["complete"]?.boolValue == true {
+      let snapshot =
+        configuration.intent.requiresRunningApp
+        ? await uiSnapshot(.init(id: nil, method: "ui.snapshot")) : nil
+      let progress: UIFlowProgress? = snapshot?.result?["progress"].flatMap { value in
+        guard value != .null else { return nil }
+        return try? decode(value)
+      }
+      var completionBlocked = false
+      if request.params?["complete"]?.boolValue == true, !needsRecovery,
+        let progress, !progress.isComplete
+      {
+        completionBlocked = true
+        needsRecovery = true
+        journey.status = .ready
+        journey.updatedAt = Date()
+        activeJourney = journey
+        let remaining =
+          progress.remaining > 0
+          ? "Exercise the remaining \(progress.remaining) item(s), then reach the terminal result."
+          : "Finish the current item and reach the terminal result."
+        emit(
+          .warning,
+          message: "Completion blocked at \(progress.sourceText). \(remaining)",
+          journeyID: journey.id)
+      } else if request.params?["complete"]?.boolValue == true, !needsRecovery {
         if configuration.intent.requiresRunningApp, let udid = configuration.destination?.udid {
           _ = await captureStableScreenshot(
             .init(id: nil, method: "screenshot.capture", params: .object(["udid": .string(udid)])),
@@ -333,24 +1513,31 @@ public actor RuntimeService {
           codeChanged: configuration.intent.allowsSourceWrites,
           uiChanged: configuration.intent.requiresRunningApp, testsChanged: false,
           criterionIDs: journey.steps.compactMap { $0.step.criterionID })
-        let report = await ledger.verify(requirement)
-        journey.status = report.status == .verified ? .passed : .failed
+        _ = await ledger.verify(requirement)
+        // A model-guided discovery may produce a useful draft and evidence, but it is not a Lys
+        // contract run. Only declared host-owned flows can become trusted green verification.
+        journey.status = .failed
         journey.updatedAt = Date()
         activeJourney = journey
         emit(
           .journeyFinished,
-          message: journey.status == .passed ? "Journey verified." : report.missing.joined(separator: "; "),
+          message:
+            "Exploratory interaction finished without a Lys contract; trusted verification was not granted.",
           journeyID: journey.id)
       }
 
-      let snapshot = configuration.intent.requiresRunningApp
-        ? await uiSnapshot(.init(id: nil, method: "ui.snapshot")) : nil
       var result = (try? jsonValue(journey)) ?? .object([:])
       if case .object(var object) = result {
+        object["recoverable"] = .bool(needsRecovery)
+        object["completionBlocked"] = .bool(completionBlocked)
         object["message"] = .string(
-          journey.status == .ready
-            ? "App attached. Continue this journey with semantic steps; no rebuild was needed."
-            : "Journey \(journey.status.rawValue).")
+          completionBlocked && progress != nil
+            ? "The app still reports \(progress!.sourceText). Continue the same journey through its terminal result before completing."
+            : needsRecovery
+              ? "The attempted step was not valid on the current screen. Choose an exact actionID from currentUI.actions and retry in this journey."
+              : (journey.status == .ready
+                ? "App attached. Choose exact actionID values from currentUI.actions; submit one screen-changing interaction at a time."
+                : "Journey \(journey.status.rawValue)."))
         if let currentUI = snapshot?.result { object["currentUI"] = currentUI }
         result = .object(object)
       }
@@ -400,6 +1587,33 @@ public actor RuntimeService {
       ]))
   }
 
+  private func stopSession(_ request: RPCEnvelope) -> RPCEnvelope {
+    sessionStoppedByHost = true
+    if var journey = activeJourney {
+      journey.status = .cancelled
+      journey.updatedAt = Date()
+      activeJourney = journey
+      emit(
+        .journeyFinished,
+        message: "Agent stopped by the host; the app and development server remain available.",
+        journeyID: journey.id)
+    }
+    return success(
+      request.id,
+      .object([
+        "stopped": .bool(true),
+        "message": .string("Agent stopped; the running app was preserved."),
+      ]))
+  }
+
+  private func resumeSession(_ request: RPCEnvelope) -> RPCEnvelope {
+    if sessionStoppedByHost {
+      sessionStoppedByHost = false
+      activeJourney = nil
+    }
+    return success(request.id, .object(["resumed": .bool(true)]))
+  }
+
   private func ensureJourneyApp(
     configuration: inout RuntimeSessionConfiguration, journeyID: UUID
   ) async throws -> (elements: [UIElement], fingerprint: ScreenFingerprint) {
@@ -414,9 +1628,20 @@ public actor RuntimeService {
     if let error = booted.error { throw error }
 
     let generation = await ledger.generation
-    let targetPathExists = configuration.target?.productPath.map {
-      FileManager.default.fileExists(atPath: $0.path)
-    } ?? false
+    let selectedProductExists =
+      configuration.target?.productPath.map { FileManager.default.fileExists(atPath: $0.path) }
+      ?? false
+    if !selectedProductExists, let container = configuration.container,
+      let destination = configuration.destinationSpecifier
+    {
+      configuration.target = artifactCache.load(
+        container: container, scheme: configuration.scheme,
+        configuration: configuration.configuration, destination: destination)
+    }
+    let targetPathExists =
+      configuration.target?.productPath.map {
+        FileManager.default.fileExists(atPath: $0.path)
+      } ?? false
     let mutationNeedsBuild =
       configuration.intent.allowsSourceWrites && lastBuiltGeneration != generation
     let missingTargetNeedsBuild = configuration.target == nil || !targetPathExists
@@ -446,9 +1671,12 @@ public actor RuntimeService {
 
     if shouldBuild {
       guard configuration.intent.buildPolicy != .never else {
-        throw RPCError(code: -32052, message: "No compatible built app is available for this session")
+        throw RPCError(
+          code: -32052, message: "No compatible built app is available for this session")
       }
-      emit(.buildStarted, message: "Building because no compatible current app is available.", journeyID: journeyID)
+      emit(
+        .buildStarted, message: "Building because no compatible current app is available.",
+        journeyID: journeyID)
       let built = await build(.init(id: nil, method: "build.run"))
       if let error = built.error { throw error }
       guard built.result?["succeeded"]?.boolValue == true else {
@@ -460,7 +1688,9 @@ public actor RuntimeService {
         configuration.target = target
       }
       lastBuiltGeneration = generation
-      emit(.buildFinished, message: "Build completed once for generation \(generation).", journeyID: journeyID)
+      emit(
+        .buildFinished, message: "Build completed once for generation \(generation).",
+        journeyID: journeyID)
     }
 
     if configuration.target == nil {
@@ -509,42 +1739,128 @@ public actor RuntimeService {
 
   private func executeJourneyStep(_ step: JourneyStep, journeyID: UUID) async -> JourneyStepResult {
     var evidenceIDs: [UUID] = []
-    guard let selector = step.selector,
-      selector.identifier?.isEmpty == false || selector.label?.isEmpty == false
-    else {
-      return .init(step: step, status: .failed, detail: "A deterministic selector is required.")
+    guard step.actionID?.isEmpty == false || step.selector != nil else {
+      return .init(
+        step: step, status: .failed,
+        detail: "Choose an exact actionID from currentUI.actions and retry.")
     }
-    let selectorValue = (try? jsonValue(selector)) ?? .object([:])
-    if let action = step.action {
-      var params: [String: JSONValue] = ["selector": selectorValue, "action": .string(action)]
+    let selectorValue = step.selector.flatMap { try? jsonValue($0) }
+    var screenChanged = false
+    let requestedAction = step.action?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let actionAlias = requestedAction?.lowercased().replacingOccurrences(of: "_", with: "")
+    let impliedVisibilityAssertion = ["assert", "assertvisible", "visible", "verify", "check"]
+      .contains(actionAlias ?? "")
+    let effectiveAction: String?
+    switch actionAlias {
+    case "tap": effectiveAction = "tap"
+    case "type": effectiveAction = "type"
+    case "clear": effectiveAction = "clear"
+    case "scrollup": effectiveAction = "scrollUp"
+    case "scrolldown": effectiveAction = "scrollDown"
+    case "click", "press", "select", "activate": effectiveAction = "tap"
+    case "input", "enter",
+      "fill" where step.text != nil:
+      effectiveAction = "type"
+    case _ where impliedVisibilityAssertion: effectiveAction = nil
+    default: effectiveAction = requestedAction
+    }
+    if let effectiveAction,
+      !["tap", "type", "clear", "scrollUp", "scrollDown"].contains(effectiveAction)
+    {
+      return .init(
+        step: step, status: .failed,
+        detail:
+          "Unsupported journey action “\(effectiveAction)”. Use the exact action advertised by currentUI.actions; visibility checks omit action and set assertVisible=true."
+      )
+    }
+    if let action = effectiveAction {
+      var params: [String: JSONValue] = ["action": .string(action)]
+      if let actionID = step.actionID { params["actionID"] = .string(actionID) }
+      if let selectorValue { params["selector"] = selectorValue }
       if let text = step.text { params["text"] = .string(text) }
       let performed = await uiPerform(
         .init(id: nil, method: "ui.perform", params: .object(params)))
       if let error = performed.error {
-        return .init(step: step, status: .failed, detail: error.message)
+        return .init(
+          step: step, status: .failed,
+          detail: "\(error.message) The host refreshed currentUI.actions for recovery.")
       }
       evidenceIDs += uuidValues(performed.result?["evidenceIDs"])
+      if performed.result?["actionSucceeded"]?.boolValue == false {
+        return .init(
+          step: step, status: .failed,
+          detail: performed.result?["message"]?.stringValue
+            ?? "The control accepted input but produced no observable app response. The host removed it from currentUI.actions.",
+          evidenceIDs: evidenceIDs)
+      }
+      screenChanged =
+        performed.result?["screenChanged"]?.boolValue
+        ?? (performed.result?["beforeFingerprint"] != performed.result?["afterFingerprint"])
     }
-    if step.assertVisible {
+
+    if let expected = step.expectVisible {
+      let expectedValue = (try? jsonValue(expected)) ?? .object([:])
       let asserted = await uiAssert(
         .init(
           id: nil, method: "ui.assert",
           params: .object([
-            "selector": selectorValue,
-            "criterionID": .string(step.criterionID ?? step.id),
+            "selector": expectedValue,
+            "criterionID": .string(step.criterionID ?? journeyID.uuidString),
           ])))
       if let error = asserted.error {
-        return .init(step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
+        return .init(
+          step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
       }
       evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
-      guard asserted.result?["passed"]?.boolValue == true else {
+      if asserted.result?["passed"]?.boolValue != true {
         return .init(
-          step: step, status: .failed, detail: "The final assertion did not pass.",
+          step: step, status: .failed, detail: "The expected post-action element is not visible.",
+          evidenceIDs: evidenceIDs)
+      }
+    } else if step.assertsCurrentActionVisibility || impliedVisibilityAssertion {
+      var assertion: [String: JSONValue] = [
+        "criterionID": .string(step.criterionID ?? journeyID.uuidString)
+      ]
+      if let actionID = step.actionID { assertion["actionID"] = .string(actionID) }
+      if let selectorValue { assertion["selector"] = selectorValue }
+      let asserted = await uiAssert(
+        .init(id: nil, method: "ui.assert", params: .object(assertion)))
+      if let error = asserted.error {
+        return .init(
+          step: step, status: .failed, detail: error.message, evidenceIDs: evidenceIDs)
+      }
+      evidenceIDs += uuidValues(asserted.result?["evidenceIDs"])
+      if asserted.result?["passed"]?.boolValue != true {
+        return .init(
+          step: step, status: .failed, detail: "The current action is no longer visible.",
+          evidenceIDs: evidenceIDs)
+      }
+    } else if step.requiresScreenChange {
+      let item = Evidence(
+        kind: .uiAssertion, status: screenChanged ? .passed : .failed,
+        taskGeneration: await ledger.generation,
+        criterionID: step.criterionID ?? journeyID.uuidString,
+        destinationUDID: sessionConfiguration?.destination?.udid,
+        diagnosticSummary: screenChanged
+          ? "The screen changed after \(step.title)."
+          : "The screen did not change after \(step.title).",
+        deterministic: true)
+      try? await ledger.record(item)
+      evidenceIDs.append(item.id)
+      emit(
+        .assertion, message: item.diagnosticSummary, journeyID: journeyID,
+        stepID: step.id, destinationUDID: sessionConfiguration?.destination?.udid)
+      if !screenChanged {
+        return .init(
+          step: step, status: .failed,
+          detail: "The action ran, but its required screen change did not occur.",
           evidenceIDs: evidenceIDs)
       }
     }
     return .init(
-      step: step, status: .passed, detail: "\(step.title) completed.",
+      step: step, status: .passed,
+      detail: screenChanged
+        ? "\(step.title) completed; the screen changed." : "\(step.title) completed.",
       evidenceIDs: evidenceIDs)
   }
 
@@ -555,6 +1871,43 @@ public actor RuntimeService {
   private func decodeOptionalArray<T: Decodable>(_ value: JSONValue?) throws -> [T]? {
     guard let value else { return nil }
     return try decode(value)
+  }
+
+  private func currentCapabilities(
+    elements: [UIElement], fingerprint: ScreenFingerprint
+  ) -> [UIActionCapability] {
+    let state = UIInteractionStateFingerprint.make(elements: elements).digest
+    return UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint).filter {
+      rejectedActionStates[$0.id] != state
+    }
+  }
+
+  /// Waits for the observable accessibility state to settle after input. Screen identity alone is
+  /// deliberately insufficient here: focus, selection, values, and scrolling can change without
+  /// navigation and still prove that the app handled the interaction.
+  private func settledSnapshot(
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight),
+    baseline: [UIElement]
+  ) async throws -> [UIElement] {
+    let baselineState = UIInteractionStateFingerprint.make(elements: baseline)
+    var latest = try await wda.snapshot(
+      udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+      preflight: context.preflight)
+    var latestState = UIInteractionStateFingerprint.make(elements: latest)
+    var stableSamples = 0
+    for sample in 0..<10 {
+      try await Task.sleep(for: .milliseconds(120))
+      let next = try await wda.snapshot(
+        udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+        preflight: context.preflight)
+      let nextState = UIInteractionStateFingerprint.make(elements: next)
+      stableSamples = nextState == latestState ? stableSamples + 1 : 0
+      latest = next
+      latestState = nextState
+      let changed = nextState != baselineState
+      if stableSamples >= 2 && (changed || sample >= 3) { break }
+    }
+    return latest
   }
 
   private func uuidValues(_ value: JSONValue?) -> [UUID] {
@@ -575,7 +1928,8 @@ public actor RuntimeService {
     let preflight = await ToolchainDiscovery.preflight()
     guard let xcodebuild = preflight.xcodebuildPath, let developer = preflight.developerDirectory
     else { return failure(request.id, -32050, "Select full Xcode 26.5 before building") }
-    guard let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
+    guard
+      let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
       let scheme = request.params?["scheme"]?.stringValue ?? sessionConfiguration?.scheme,
       let destination = request.params?["destination"]?.stringValue
         ?? sessionConfiguration?.destinationSpecifier
@@ -590,46 +1944,97 @@ public actor RuntimeService {
     }
     do {
       let generation = await ledger.generation
-      let resultPath = workspace.appending(
-        path: ".iosdev/artifacts/build-\(UUID().uuidString).xcresult")
-      let derived = workspace.appending(path: ".iosdev/cache/DerivedData")
-      try FileManager.default.createDirectory(
-        at: resultPath.deletingLastPathComponent(), withIntermediateDirectories: true)
-      try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
-      let flag = container.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
-      let outcome = try await runner.run(
-        executable: URL(fileURLWithPath: xcodebuild),
-        arguments: [
-          flag, container, "-scheme", scheme, "-configuration",
-          request.params?["configuration"]?.stringValue ?? "Debug", "-destination", destination,
-          "-derivedDataPath", derived.path, "-resultBundlePath", resultPath.path, action,
-        ], workingDirectory: workspace, environment: ["DEVELOPER_DIR": developer])
-      let item = Evidence(
-        kind: evidenceKind, status: outcome.succeeded ? .passed : .failed,
-        taskGeneration: generation,
-        artifactPaths: [resultPath.path],
-        diagnosticSummary: outcome.succeeded ? "xcodebuild \(action) completed" : outcome.stderr)
-      try await ledger.record(item)
+      let configuration =
+        request.params?["configuration"]?.stringValue
+        ?? sessionConfiguration?.configuration ?? "Debug"
+      let key = XcodeOperationKey(
+        action: action, container: URL(fileURLWithPath: container).standardizedFileURL.path,
+        scheme: scheme, configuration: configuration, destination: destination,
+        generation: generation)
+      let workspace = workspace
+      let coordinator = operationCoordinator
+      let runner = runner
+      let ledger = ledger
+      let artifactCache = artifactCache
+      let previouslySelectedTarget = sessionConfiguration?.target
+      let execution = try await xcodeOperations.run(key: key) {
+        let lease = try await coordinator.acquire(action == "test" ? .test : .build)
+        defer { lease.release() }
+        guard FileManager.default.fileExists(atPath: container) else {
+          throw RPCError(
+            code: -32098,
+            message:
+              "The selected Xcode container disappeared before \(action): \(container). Lys did not start xcodebuild; finish or rerun Expo preparation, then select the generated workspace."
+          )
+        }
+        let resultPath = workspace.appending(
+          path: ".lys/artifacts/build-\(UUID().uuidString).xcresult")
+        let derived = workspace.appending(path: ".lys/cache/DerivedData")
+        try FileManager.default.createDirectory(
+          at: resultPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
+        let flag = container.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
+        let outcome = try await runner.run(
+          executable: URL(fileURLWithPath: xcodebuild),
+          arguments: [
+            flag, container, "-scheme", scheme, "-configuration", configuration,
+            "-destination", destination, "-derivedDataPath", derived.path,
+            "-resultBundlePath", resultPath.path, action,
+          ], workingDirectory: workspace, environment: ["DEVELOPER_DIR": developer])
+        let diagnostic = outcome.stdout + outcome.stderr
+        if !outcome.succeeded && WorkspaceOperationDiagnostics.isBuildDatabaseLock(diagnostic) {
+          throw RPCError(
+            code: -32098,
+            message:
+              "Lys detected an overlapping Xcode operation (build.db is locked). This is a host orchestration error, not an app build failure; the last successful app remains available."
+          )
+        }
+        var targets: [AppTarget] = []
+        if outcome.succeeded, action == "build" {
+          targets = (try? await ToolchainDiscovery.appTargets(
+            container: URL(fileURLWithPath: container), scheme: scheme,
+            configuration: configuration, destination: destination,
+            xcodebuild: URL(fileURLWithPath: xcodebuild),
+            developerDirectory: URL(fileURLWithPath: developer), derivedData: derived)) ?? []
+          if targets.isEmpty, let target = previouslySelectedTarget,
+            target.productPath.map({ FileManager.default.fileExists(atPath: $0.path) }) == true
+          {
+            targets = [target]
+          }
+          if let target = targets.first {
+            try? artifactCache.save(
+              .init(
+                container: container, scheme: scheme, configuration: configuration,
+                destination: destination, target: target))
+          }
+        }
+        let item = Evidence(
+          kind: evidenceKind, status: outcome.succeeded ? .passed : .failed,
+          taskGeneration: generation, artifactPaths: [resultPath.path],
+          diagnosticSummary: outcome.succeeded ? "xcodebuild \(action) completed" : outcome.stderr)
+        try await ledger.record(item)
+        return XcodeExecution(
+          outcome: outcome, resultPath: resultPath, evidenceID: item.id, appTargets: targets)
+      }
       var result: [String: JSONValue] = [
-        "succeeded": .bool(outcome.succeeded),
-        "evidenceIDs": .array([.string(item.id.uuidString)]),
-        "log": .string(outcome.stdout + outcome.stderr),
-        "message": .string(outcome.succeeded ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
+        "succeeded": .bool(execution.outcome.succeeded),
+        "evidenceIDs": .array([.string(execution.evidenceID.uuidString)]),
+        "log": .string(execution.outcome.stdout + execution.outcome.stderr),
+        "message": .string(
+          execution.outcome.succeeded
+            ? "xcodebuild \(action) completed." : "xcodebuild \(action) failed."),
       ]
-      if outcome.succeeded, action == "build" {
-        let targets = try? await ToolchainDiscovery.appTargets(
-          container: URL(fileURLWithPath: container), scheme: scheme,
-          configuration: request.params?["configuration"]?.stringValue
-            ?? sessionConfiguration?.configuration ?? "Debug",
-          destination: destination, xcodebuild: URL(fileURLWithPath: xcodebuild),
-          developerDirectory: URL(fileURLWithPath: developer),
-          derivedData: workspace.appending(path: ".iosdev/cache/DerivedData"))
-        result["appTargets"] = (try? jsonValue(targets ?? [])) ?? .array([])
+      if execution.outcome.succeeded, action == "build" {
+        result["appTargets"] = (try? jsonValue(execution.appTargets)) ?? .array([])
       }
       return success(
         request.id,
         .object(result))
-    } catch { return failure(request.id, -32052, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32052, error.localizedDescription)
+    }
   }
 
   private func uiSnapshot(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -640,12 +2045,20 @@ public actor RuntimeService {
         preflight: context.preflight)
       let fingerprint = ScreenFingerprint.make(
         elements: elements, modal: false, navigationTitle: nil)
+      let actions = currentCapabilities(elements: elements, fingerprint: fingerprint)
+      await appGraph.observeScreen(fingerprint, actions: actions)
+      await persistAppGraph()
       return success(
         request.id,
         .object([
-          "elements": try jsonValue(elements),
+          "actions": try jsonValue(actions),
+          "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: elements)),
           "fingerprint": try jsonValue(fingerprint),
-          "message": .string("Captured \(elements.count) semantic UI elements."),
+          "progress": UIFlowProgressDetector.detect(in: elements).flatMap { try? jsonValue($0) }
+            ?? .null,
+          "message": .string(
+            "Captured \(actions.count) host-resolved actions and \(elements.count) UI elements. Use actionID values exactly as returned."
+          ),
         ]))
     } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
       return failure(request.id, -32077, error.localizedDescription)
@@ -698,13 +2111,42 @@ public actor RuntimeService {
       let identifier = selectorIdentifier(request.params)
       let label = selectorLabel(request.params)
       let type = selectorType(request.params)
+      let path = selectorPath(request.params)
       let coordinate = selectorCoordinate(request.params)
       let swipe = selectorSwipe(request.params)
-      guard identifier != nil || label != nil || coordinate != nil || swipe != nil else {
+      let actionID = request.params?["actionID"]?.stringValue
+      guard
+        actionID != nil || identifier != nil || label != nil || path != nil || coordinate != nil
+          || swipe != nil
+      else {
         return failure(
-          request.id, -32602, "selector identifier, label, or coordinate gesture is required")
+          request.id, -32602,
+          "actionID from the current action catalog, or a legacy selector, is required")
       }
       let context = try await automationContext(request)
+      if let actionID {
+        return await performCatalogAction(
+          request, actionID: actionID, action: action, context: context)
+      }
+      if let path {
+        let elements = try await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+        let fingerprint = ScreenFingerprint.make(
+          elements: elements, modal: false, navigationTitle: nil)
+        let actions = currentCapabilities(elements: elements, fingerprint: fingerprint)
+        guard let element = elements.first(where: { $0.childPath == path || $0.xpath == path }),
+          let capability = actions.first(where: {
+            $0.id
+              == UIActionCatalog.actionID(
+                fingerprint: fingerprint, childPath: element.childPath)
+          })
+        else {
+          return failure(request.id, -32086, "The recorded graph action is stale on this screen")
+        }
+        return await performCatalogAction(
+          request, actionID: capability.id, action: action, context: context, before: elements)
+      }
       if let coordinate {
         guard action == "tap" else {
           return failure(request.id, -32602, "Coordinate selectors support tap only")
@@ -803,25 +2245,217 @@ public actor RuntimeService {
     }
   }
 
+  private func performCatalogAction(
+    _ request: RPCEnvelope, actionID: String, action: String,
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight),
+    before suppliedBefore: [UIElement]? = nil
+  ) async -> RPCEnvelope {
+    do {
+      let before: [UIElement]
+      if let suppliedBefore {
+        before = suppliedBefore
+      } else {
+        before = try await wda.snapshot(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          preflight: context.preflight)
+      }
+      let beforeFingerprint = ScreenFingerprint.make(
+        elements: before, modal: false, navigationTitle: nil)
+      let beforeState = UIInteractionStateFingerprint.make(elements: before).digest
+      guard rejectedActionStates[actionID] != beforeState else {
+        return failure(
+          request.id, -32086,
+          "That action already produced no observable result on this screen. Choose a different currentUI action."
+        )
+      }
+      guard
+        let resolved = UIActionCatalog.resolve(
+          actionID: actionID, action: action, elements: before, fingerprint: beforeFingerprint)
+      else {
+        return failure(
+          request.id, -32086,
+          "That actionID is stale or does not support \(action). Read currentUI.actions and retry with one of the returned IDs."
+        )
+      }
+
+      let text = request.params?["text"]?.stringValue
+      switch resolved.selector {
+      case .hierarchyPath(let path):
+        if path.hasPrefix("/"), !["scrollUp", "scrollDown"].contains(action) {
+          do {
+            try await wda.performXPath(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              xpath: path, action: action, text: text, preflight: context.preflight)
+          } catch  where action == "tap" {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: resolved.element.frame, action: action, preflight: context.preflight)
+          }
+        } else {
+          try await wda.performFrameAction(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            frame: resolved.element.frame, action: action, preflight: context.preflight)
+        }
+      case .accessibilityIdentifier(let identifier):
+        if ["scrollUp", "scrollDown"].contains(action) {
+          try await wda.performFrameAction(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            frame: resolved.element.frame, action: action, preflight: context.preflight)
+        } else {
+          do {
+            try await wda.perform(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              identifier: identifier, action: action, text: text, preflight: context.preflight)
+          } catch  where action == "tap" {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: resolved.element.frame, action: action, preflight: context.preflight)
+          }
+        }
+      case .labelType(let label, let type):
+        if ["scrollUp", "scrollDown"].contains(action) {
+          try await wda.performFrameAction(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            frame: resolved.element.frame, action: action, preflight: context.preflight)
+        } else {
+          do {
+            try await wda.perform(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              label: label, type: type, action: action, text: text,
+              preflight: context.preflight)
+          } catch  where action == "tap" {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: resolved.element.frame, action: action, preflight: context.preflight)
+          }
+        }
+      case .ancestor, .coordinate:
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: resolved.element.frame, action: action, preflight: context.preflight)
+      }
+
+      var after = try await settledSnapshot(context: context, baseline: before)
+      var stateChanged =
+        UIInteractionStateFingerprint.make(elements: before)
+        != UIInteractionStateFingerprint.make(elements: after)
+      var usedPhysicalRetry = false
+      if action == "tap", !stateChanged,
+        resolved.capability.source == "accessibilityContainer"
+      {
+        // XCTest can report a successful semantic click on a framework accessibility wrapper
+        // without delivering it to the visual control. A single physical activation-point retry
+        // is reserved for that wrapper case; native controls are never double-activated.
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: resolved.element.frame, action: action, preflight: context.preflight)
+        usedPhysicalRetry = true
+        after = try await settledSnapshot(context: context, baseline: before)
+        stateChanged =
+          UIInteractionStateFingerprint.make(elements: before)
+          != UIInteractionStateFingerprint.make(elements: after)
+      }
+      let afterFingerprint = ScreenFingerprint.make(
+        elements: after, modal: false, navigationTitle: nil)
+      let actionSucceeded = stateChanged
+      let diagnostic =
+        actionSucceeded
+        ? "Host-resolved \(action) on \(resolved.capability.title) (\(resolved.capability.role))"
+        : "\(resolved.capability.title) accepted \(action), but the app exposed no observable state change"
+      let item = Evidence(
+        kind: .uiAction, status: actionSucceeded ? .passed : .failed,
+        taskGeneration: await ledger.generation,
+        destinationUDID: context.udid,
+        diagnosticSummary: diagnostic,
+        deterministic: true)
+      try await ledger.record(item)
+      if actionSucceeded {
+        _ = await appGraph.observe(
+          from: beforeFingerprint, to: afterFingerprint, selector: resolved.selector,
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+      } else {
+        rejectedActionStates[actionID] = beforeState
+      }
+      let actions = currentCapabilities(elements: after, fingerprint: afterFingerprint)
+      await appGraph.observeScreen(afterFingerprint, actions: actions)
+      await persistAppGraph()
+      if var journey = activeJourney {
+        journey.currentFingerprint = afterFingerprint
+        journey.updatedAt = Date()
+        activeJourney = journey
+      }
+      emit(
+        .uiAction, message: item.diagnosticSummary, journeyID: activeJourney?.id,
+        destinationUDID: context.udid)
+      return success(
+        request.id,
+        .object([
+          "evidenceIDs": .array([.string(item.id.uuidString)]),
+          "beforeFingerprint": try jsonValue(beforeFingerprint),
+          "afterFingerprint": try jsonValue(afterFingerprint),
+          "screenChanged": .bool(beforeFingerprint != afterFingerprint),
+          "stateChanged": .bool(stateChanged),
+          "actionSucceeded": .bool(actionSucceeded),
+          "delivery": .string(usedPhysicalRetry ? "semanticThenPhysical" : "semantic"),
+          "actions": try jsonValue(actions),
+          "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: after)),
+          "message": .string(
+            actionSucceeded
+              ? item.diagnosticSummary
+              : "The host retired this no-op action for the current screen. Choose a different currentUI action."
+          ),
+        ]))
+    } catch let error as RPCError {
+      return failure(request.id, error.code, error.message)
+    } catch {
+      return failure(request.id, -32077, error.localizedDescription)
+    }
+  }
+
   private func uiAssert(_ request: RPCEnvelope) async -> RPCEnvelope {
     do {
       let identifier = selectorIdentifier(request.params)
       let label = selectorLabel(request.params)
       let type = selectorType(request.params)
-      guard identifier != nil || label != nil else {
-        return failure(request.id, -32602, "selector identifier or label is required")
+      let actionID = request.params?["actionID"]?.stringValue
+      guard actionID != nil || identifier != nil || label != nil else {
+        return failure(
+          request.id, -32602,
+          "actionID from the current action catalog, or a legacy selector, is required")
       }
       let context = try await automationContext(request)
       let elements = try await wda.snapshot(
         udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
         preflight: context.preflight)
-      let matches = elements.filter {
-        (identifier == nil || $0.identifier == identifier)
-          && (label == nil || $0.label == label)
-          && (type == nil || $0.type == type)
+      let fingerprint = ScreenFingerprint.make(
+        elements: elements, modal: false, navigationTitle: nil)
+      let capability = actionID.flatMap { id in
+        UIActionCatalog.capabilities(elements: elements, fingerprint: fingerprint)
+          .first(where: { $0.id == id })
+      }
+      let resolvedElement = capability.flatMap { capability in
+        capability.actions.first.flatMap { action in
+          UIActionCatalog.resolve(
+            actionID: capability.id, action: action, elements: elements,
+            fingerprint: fingerprint)?.element
+        }
+      }
+      let matches: [UIElement]
+      if let resolvedElement {
+        matches = [resolvedElement]
+      } else if actionID != nil {
+        matches = []
+      } else {
+        matches = elements.filter {
+          (identifier == nil || $0.identifier == identifier)
+            && (label == nil || $0.label == label)
+            && (type == nil || $0.type == type)
+        }
       }
       let found = matches.count == 1
-      let selectorSummary = identifier ?? [type, label].compactMap { $0 }.joined(separator: " · ")
+      let selectorSummary =
+        capability?.title ?? identifier ?? actionID
+        ?? [type, label].compactMap { $0 }.joined(separator: " · ")
       let item = Evidence(
         kind: .uiAssertion, status: found ? .passed : .failed,
         taskGeneration: await ledger.generation,
@@ -864,13 +2498,15 @@ public actor RuntimeService {
   private func automationContext(_ request: RPCEnvelope) async throws -> (
     udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight
   ) {
-    guard let udid = request.params?["udid"]?.stringValue
-      ?? sessionConfiguration?.destination?.udid
+    guard
+      let udid = request.params?["udid"]?.stringValue
+        ?? sessionConfiguration?.destination?.udid
     else {
       throw RPCError(code: -32602, message: "udid is required")
     }
-    guard let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID
-      ?? sessionConfiguration?.target?.bundleID
+    guard
+      let bundleID = request.params?["bundleID"]?.stringValue ?? lastLaunchedBundleID
+        ?? sessionConfiguration?.target?.bundleID
     else {
       throw RPCError(code: -32602, message: "bundleID is required before the first UI session")
     }
@@ -915,7 +2551,12 @@ public actor RuntimeService {
     params?["selector"]?["type"]?.stringValue ?? params?["type"]?.stringValue
   }
 
-  private func graphSelector(identifier: String?, label: String?, type: String?) -> ElementSelector? {
+  private func selectorPath(_ params: JSONValue?) -> String? {
+    params?["selector"]?["path"]?.stringValue ?? params?["path"]?.stringValue
+  }
+
+  private func graphSelector(identifier: String?, label: String?, type: String?) -> ElementSelector?
+  {
     if let identifier, !identifier.isEmpty { return .accessibilityIdentifier(identifier) }
     if let label, let type, !label.isEmpty, !type.isEmpty {
       return .labelType(label: label, type: type)
@@ -955,7 +2596,8 @@ public actor RuntimeService {
       let current: ScreenFingerprint = try? decode(currentValue)
     else { return failure(request.id, -32081, "Could not fingerprint the current app screen") }
     let snapshot = await appGraph.codableSnapshot()
-    guard let destination = snapshot.nodes.first(where: { $0.id == destinationDigest })?.fingerprint,
+    guard
+      let destination = snapshot.nodes.first(where: { $0.id == destinationDigest })?.fingerprint,
       let path = await appGraph.path(
         from: current, to: destination,
         build: sessionConfiguration?.buildFingerprint ?? "unknown")
@@ -969,7 +2611,9 @@ public actor RuntimeService {
       let performed = await uiPerform(
         .init(
           id: nil, method: "ui.perform",
-          params: .object(["selector": selector, "action": .string("tap")])))
+          params: .object([
+            "selector": selector, "action": .string(edge.action ?? "tap"),
+          ])))
       if let error = performed.error {
         await appGraph.recordFailure(edge.id)
         await persistAppGraph()
@@ -1010,11 +2654,13 @@ public actor RuntimeService {
     let durationMS = Int(coordinate["durationMS"]?.numberValue ?? 350)
     return (
       min(max(startX, 0), 1), min(max(startY, 0), 1), min(max(endX, 0), 1),
-      min(max(endY, 0), 1), durationMS)
+      min(max(endY, 0), 1), durationMS
+    )
   }
 
   private func listTests(_ request: RPCEnvelope) async -> RPCEnvelope {
-    guard let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
+    guard
+      let container = request.params?["container"]?.stringValue ?? sessionConfiguration?.container,
       let scheme = request.params?["scheme"]?.stringValue ?? sessionConfiguration?.scheme
     else { return failure(request.id, -32602, "container and scheme are required") }
     let preflight = await resolvedToolchainPreflight()
@@ -1023,6 +2669,13 @@ public actor RuntimeService {
     }
     let flag = container.hasSuffix(".xcworkspace") ? "-workspace" : "-project"
     do {
+      let lease = try await operationCoordinator.acquire(.testDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: container) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists: \(container)")
+      }
       let outcome = try await runner.run(
         executable: URL(fileURLWithPath: path),
         arguments: [flag, container, "-scheme", scheme, "-showTestPlans"],
@@ -1033,12 +2686,17 @@ public actor RuntimeService {
         $0.trimmingCharacters(in: .whitespacesAndNewlines)
       }.filter { !$0.isEmpty && !$0.hasPrefix("Test plans associated") }
       return success(request.id, .object(["testPlans": .array(plans.map(JSONValue.string))]))
-    } catch { return failure(request.id, -32057, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32057, error.localizedDescription)
+    }
   }
 
   private func queryLogs(_ request: RPCEnvelope) async -> RPCEnvelope {
-    guard let udid = request.params?["udid"]?.stringValue
-      ?? sessionConfiguration?.destination?.udid,
+    guard
+      let udid = request.params?["udid"]?.stringValue
+        ?? sessionConfiguration?.destination?.udid,
       let process = request.params?["process"]?.stringValue
         ?? sessionConfiguration?.target?.bundleID, !process.isEmpty
     else { return failure(request.id, -32602, "udid and process are required") }
@@ -1054,7 +2712,7 @@ public actor RuntimeService {
       let outcome = try await runner.run(
         executable: spec.executable, arguments: spec.arguments, workingDirectory: workspace,
         environment: ["DEVELOPER_DIR": developer], maximumOutputBytes: 4 * 1_024 * 1_024)
-      let artifact = workspace.appending(path: ".iosdev/artifacts/log-\(UUID().uuidString).txt")
+      let artifact = workspace.appending(path: ".lys/artifacts/log-\(UUID().uuidString).txt")
       try FileManager.default.createDirectory(
         at: artifact.deletingLastPathComponent(), withIntermediateDirectories: true)
       let contents = outcome.stdout + outcome.stderr
@@ -1083,11 +2741,22 @@ public actor RuntimeService {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
     do {
+      let lease = try await operationCoordinator.acquire(.projectDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: containerPath) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists: \(containerPath)")
+      }
       let listing = try await ToolchainDiscovery.listProject(
         container: URL(fileURLWithPath: containerPath), xcodebuild: URL(fileURLWithPath: path),
         developerDirectory: URL(fileURLWithPath: developer))
       return success(request.id, try jsonValue(listing))
-    } catch { return failure(request.id, -32055, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32055, error.localizedDescription)
+    }
   }
 
   private func discoverTargets(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -1100,14 +2769,25 @@ public actor RuntimeService {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
     do {
+      let lease = try await operationCoordinator.acquire(.targetDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: containerPath) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists: \(containerPath)")
+      }
       let targets = try await ToolchainDiscovery.appTargets(
         container: URL(fileURLWithPath: containerPath), scheme: scheme,
         configuration: request.params?["configuration"]?.stringValue ?? "Debug",
         destination: destination, xcodebuild: URL(fileURLWithPath: path),
         developerDirectory: URL(fileURLWithPath: developer),
-        derivedData: workspace.appending(path: ".iosdev/cache/DerivedData"))
+        derivedData: workspace.appending(path: ".lys/cache/DerivedData"))
       return success(request.id, try jsonValue(targets))
-    } catch { return failure(request.id, -32055, error.localizedDescription) }
+    } catch let error as WorkspaceOperationBusyError {
+      return failure(request.id, -32098, error.localizedDescription)
+    } catch let error as RPCError { return failure(request.id, error.code, error.message) } catch {
+      return failure(request.id, -32055, error.localizedDescription)
+    }
   }
 
   private func submitVerification(_ request: RPCEnvelope) async -> RPCEnvelope {
@@ -1193,7 +2873,8 @@ public actor RuntimeService {
       }
       if launched.succeeded {
         emit(
-          .appLaunched, message: "Launched \(bundleID) on \(udid).", target: sessionConfiguration?.target,
+          .appLaunched, message: "Launched \(bundleID) on \(udid).",
+          target: sessionConfiguration?.target,
           destinationUDID: udid)
       }
       return success(
@@ -1202,7 +2883,8 @@ public actor RuntimeService {
           "launched": .bool(launched.succeeded),
           "evidenceIDs": .array([.string(item.id.uuidString)]),
           "developmentServerPort": .number(Double(developmentServerPort)),
-          "message": .string(launched.succeeded ? "Application launched." : "Application launch failed."),
+          "message": .string(
+            launched.succeeded ? "Application launched." : "Application launch failed."),
         ]))
     } catch { return failure(request.id, -32053, error.localizedDescription) }
   }
@@ -1569,7 +3251,7 @@ public actor RuntimeService {
     }
     let simctl = URL(fileURLWithPath: path)
     let environment = ["DEVELOPER_DIR": developer]
-    let artifacts = workspace.appending(path: ".iosdev/artifacts", directoryHint: .isDirectory)
+    let artifacts = workspace.appending(path: ".lys/artifacts", directoryHint: .isDirectory)
     let output = artifacts.appending(path: "screenshot-\(UUID().uuidString).png")
     let settleDelay = min(max(Int(request.params?["settleDelayMS"]?.numberValue ?? 0), 0), 10_000)
     var temporaryFiles: [URL] = []
@@ -1654,7 +3336,7 @@ public actor RuntimeService {
       return failure(request.id, -32050, "Full Xcode is unavailable")
     }
     let previewDirectory = workspace.appending(
-      path: ".iosdev/cache/Preview", directoryHint: .isDirectory)
+      path: ".lys/cache/Preview", directoryHint: .isDirectory)
     let output = previewDirectory.appending(path: "preview-\(UUID().uuidString).png")
     let started = DispatchTime.now().uptimeNanoseconds
     do {

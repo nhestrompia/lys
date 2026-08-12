@@ -1,0 +1,210 @@
+{
+  "$schema": "../Schemas/lys-test-contract.schema.json",
+  "schemaVersion": 2,
+  "app": {
+    "bundleIdentifier": "com.example.learning",
+    "displayName": "Learning App",
+    "entryRoutes": ["home"]
+  },
+  "routes": [
+    {
+      "id": "auth.login",
+      "title": "Sign in",
+      "match": [{ "kind": "visible", "selector": { "identifier": "auth.email" } }]
+    },
+    {
+      "id": "home",
+      "title": "Home",
+      "match": [{ "kind": "visible", "selector": { "identifier": "practice.quiz" } }]
+    },
+    {
+      "id": "quiz.setup",
+      "title": "Quiz setup",
+      "match": [{ "kind": "visible", "selector": { "identifier": "quiz.start" } }]
+    },
+    {
+      "id": "quiz.question",
+      "title": "Quiz question",
+      "match": [{ "kind": "visible", "selector": { "identifier": "quiz.answer.correct" } }]
+    },
+    {
+      "id": "quiz.results",
+      "title": "Quiz results",
+      "terminal": true,
+      "match": [{ "kind": "visible", "selector": { "identifier": "quiz.results" } }]
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "auth.enterEmail",
+      "title": "Enter test email",
+      "route": "auth.login",
+      "action": "type",
+      "selector": { "identifier": "auth.email" },
+      "parameters": { "text": { "type": "string", "required": true, "sensitive": true } },
+      "risk": "reversible"
+    },
+    {
+      "id": "auth.enterPassword",
+      "title": "Enter test password",
+      "route": "auth.login",
+      "action": "type",
+      "selector": { "identifier": "auth.password" },
+      "parameters": { "text": { "type": "string", "required": true, "sensitive": true } },
+      "risk": "reversible"
+    },
+    {
+      "id": "auth.submit",
+      "title": "Sign in",
+      "route": "auth.login",
+      "resultsIn": "home",
+      "action": "tap",
+      "selector": { "identifier": "auth.submit" },
+      "risk": "reversible"
+    },
+    {
+      "id": "account.signOut",
+      "title": "Sign out test user",
+      "route": "home",
+      "resultsIn": "auth.login",
+      "action": "tap",
+      "selector": { "identifier": "account.signOut" },
+      "risk": "reversible"
+    },
+    {
+      "id": "home.openQuiz",
+      "title": "Open quiz",
+      "route": "home",
+      "resultsIn": "quiz.setup",
+      "action": "tap",
+      "selector": { "identifier": "practice.quiz" },
+      "risk": "readOnly"
+    },
+    {
+      "id": "quiz.start",
+      "title": "Start quiz",
+      "route": "quiz.setup",
+      "resultsIn": "quiz.question",
+      "action": "tap",
+      "selector": { "identifier": "quiz.start" },
+      "risk": "readOnly"
+    },
+    {
+      "id": "quiz.answerCorrect",
+      "title": "Choose the correct answer",
+      "route": "quiz.question",
+      "action": "tap",
+      "selector": { "identifier": "quiz.answer.correct" },
+      "risk": "readOnly"
+    }
+  ],
+  "contexts": [
+    {
+      "id": "authenticated.testUser",
+      "title": "Authenticated test user",
+      "mode": "authenticatedSession",
+      "requiredSecrets": ["test.session"],
+      "prepare": [],
+      "session": {
+        "environment": {
+          "LYS_TEST_SESSION_TOKEN": { "secret": "test.session" }
+        },
+        "arguments": ["-LysTesting"]
+      },
+      "readyWhen": [{ "kind": "route", "route": "home" }]
+    },
+    {
+      "id": "signedOut",
+      "title": "Signed-out user",
+      "mode": "uiFlow",
+      "requiredSecrets": ["test.email", "test.password"],
+      "startRoute": "home",
+      "entryRoutes": ["home"],
+      "prepare": [
+        {
+          "id": "auth.ensureSignedOut",
+          "title": "Return to signed-out state",
+          "kind": "invoke",
+          "capability": "account.signOut",
+          "expect": [{ "kind": "route", "route": "auth.login" }]
+        }
+      ],
+      "readyWhen": [{ "kind": "route", "route": "auth.login" }]
+    }
+  ],
+  "flows": [
+    {
+      "id": "auth.login",
+      "title": "Test sign in",
+      "description": "Exercises the real authentication interface and verifies the signed-in home screen.",
+      "context": "signedOut",
+      "requiredSecrets": ["test.email", "test.password"],
+      "startRoute": "auth.login",
+      "entryRoutes": ["auth.login"],
+      "steps": [
+        {
+          "id": "auth.email",
+          "title": "Fill email",
+          "kind": "invoke",
+          "capability": "auth.enterEmail",
+          "arguments": { "text": { "secret": "test.email" } }
+        },
+        {
+          "id": "auth.password",
+          "title": "Fill password",
+          "kind": "invoke",
+          "capability": "auth.enterPassword",
+          "arguments": { "text": { "secret": "test.password" } }
+        },
+        {
+          "id": "auth.submit",
+          "title": "Submit sign in",
+          "kind": "invoke",
+          "capability": "auth.submit",
+          "expect": [{ "kind": "route", "route": "home" }]
+        }
+      ],
+      "acceptance": [
+        { "kind": "route", "route": "home" },
+        { "kind": "noCrash" }
+      ]
+    },
+    {
+      "id": "quiz.complete",
+      "title": "Complete a quiz",
+      "description": "Signs in if needed, completes every question, and verifies results.",
+      "context": "authenticated.testUser",
+      "startRoute": "quiz.setup",
+      "entryRoutes": ["home"],
+      "steps": [
+        {
+          "id": "quiz.start",
+          "title": "Start quiz",
+          "kind": "invoke",
+          "capability": "quiz.start",
+          "expect": [{ "kind": "route", "route": "quiz.question" }]
+        },
+        {
+          "id": "quiz.questions",
+          "title": "Answer every question",
+          "kind": "repeatUntil",
+          "until": { "kind": "route", "route": "quiz.results" },
+          "maximumIterations": 20,
+          "steps": [
+            {
+              "id": "quiz.answer",
+              "title": "Answer current question",
+              "kind": "invoke",
+              "capability": "quiz.answerCorrect"
+            }
+          ]
+        }
+      ],
+      "acceptance": [
+        { "kind": "route", "route": "quiz.results" },
+        { "kind": "visible", "selector": { "identifier": "quiz.score" } },
+        { "kind": "noCrash" }
+      ]
+    }
+  ]
+}

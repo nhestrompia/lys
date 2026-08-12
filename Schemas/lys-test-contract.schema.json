@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lys.dev/schemas/test-contract-v2.json",
+  "title": "Lys test contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "app", "routes", "capabilities", "contexts", "flows"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 2 },
+    "app": { "$ref": "#/$defs/app" },
+    "routes": { "type": "array", "items": { "$ref": "#/$defs/route" } },
+    "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" } },
+    "contexts": { "type": "array", "items": { "$ref": "#/$defs/context" } },
+    "flows": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/flow" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$" },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entryRoutes"],
+      "properties": {
+        "bundleIdentifier": { "type": "string" },
+        "displayName": { "type": "string" },
+        "entryRoutes": {
+          "description": "Guaranteed bootstrap or restoration routes that every applicable flow must cover.",
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["identifier"] },
+        { "required": ["name"] },
+        { "required": ["text"] }
+      ],
+      "properties": {
+        "identifier": { "type": "string", "minLength": 1 },
+        "role": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 },
+        "above": { "type": "string" },
+        "below": { "type": "string" },
+        "descendantOf": { "type": "string" },
+        "index": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["route", "visible", "absent", "enabled", "selected", "value", "text", "progressComplete", "appIdle", "noCrash"]
+        },
+        "route": { "$ref": "#/$defs/id" },
+        "selector": { "$ref": "#/$defs/selector" },
+        "equals": { "type": "string" },
+        "matches": { "type": "string" }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["string", "number", "boolean", "enum"] },
+        "required": { "type": "boolean" },
+        "values": { "type": "array", "items": { "type": "string" } },
+        "sensitive": { "type": "boolean" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        { "required": ["literal"] },
+        { "required": ["parameter"] },
+        { "required": ["secret"] }
+      ],
+      "properties": {
+        "literal": true,
+        "parameter": { "$ref": "#/$defs/id" },
+        "secret": { "$ref": "#/$defs/id" }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "match"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "terminal": { "type": "boolean" },
+        "match": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "action", "selector"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "route": { "$ref": "#/$defs/id" },
+        "resultsIn": { "$ref": "#/$defs/id" },
+        "action": {
+          "enum": ["tap", "doubleTap", "longPress", "type", "clear", "toggle", "select", "scrollUp", "scrollDown", "swipe", "drag", "setSlider", "dismiss", "back"]
+        },
+        "selector": { "$ref": "#/$defs/selector" },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/parameter" }
+        },
+        "risk": { "enum": ["readOnly", "reversible", "destructive", "external"] }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["navigate", "invoke", "assert", "repeatUntil"] },
+        "route": { "$ref": "#/$defs/id" },
+        "capability": { "$ref": "#/$defs/id" },
+        "arguments": { "type": "object", "additionalProperties": { "$ref": "#/$defs/input" } },
+        "predicate": { "$ref": "#/$defs/predicate" },
+        "expect": { "type": "array", "items": { "$ref": "#/$defs/predicate" } },
+        "until": { "$ref": "#/$defs/predicate" },
+        "maximumIterations": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "navigate" } } }, "then": { "required": ["route"] } },
+        { "if": { "properties": { "kind": { "const": "invoke" } } }, "then": { "required": ["capability"] } },
+        { "if": { "properties": { "kind": { "const": "assert" } } }, "then": { "required": ["predicate"] } },
+        { "if": { "properties": { "kind": { "const": "repeatUntil" } } }, "then": { "required": ["until", "maximumIterations", "steps"] } }
+      ]
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "mode", "readyWhen"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["uiFlow", "authenticatedSession"] },
+        "requiredSecrets": { "type": "array", "items": { "$ref": "#/$defs/id" } },
+        "startRoute": { "$ref": "#/$defs/id" },
+        "entryRoutes": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "prepare": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+        "readyWhen": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } },
+        "session": { "$ref": "#/$defs/authenticatedSession" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "authenticatedSession" } } },
+          "then": { "required": ["session"] }
+        },
+        {
+          "if": {
+            "required": ["prepare"],
+            "properties": { "prepare": { "type": "array", "minItems": 1 } }
+          },
+          "then": { "required": ["startRoute", "entryRoutes"] }
+        }
+      ]
+    },
+    "authenticatedSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment"],
+      "properties": {
+        "environment": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "$ref": "#/$defs/input" }
+        },
+        "arguments": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "startRoute", "entryRoutes", "steps", "acceptance"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "context": { "$ref": "#/$defs/id" },
+        "startRoute": { "$ref": "#/$defs/id" },
+        "entryRoutes": {
+          "description": "Guaranteed coverage roots. SDK export and host loading add other declared routes with safe paths to startRoute.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "requiredSecrets": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "parameters": { "type": "object", "additionalProperties": { "$ref": "#/$defs/parameter" } },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } },
+        "acceptance": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/predicate" } }
+      }
+    }
+  }
+}

@@ -4,16 +4,44 @@ import Testing
 
 @Test func verificationCatalogHidesLifecycleAndBuildPrimitives() {
   let names = Set(AgentRuntimeToolCatalog.tools(for: .verifyCurrentApp).map(\.name))
-  #expect(names.contains("journey.run"))
-  #expect(names.contains("ui.perform"))
+  #expect(names.contains("app.describe"))
+  #expect(names.contains("flow.list"))
+  #expect(names.contains("flow.run"))
+  #expect(names.contains("flow.step"))
+  #expect(names.contains("flow.finish"))
+  #expect(names.contains("flow.stop"))
+  #expect(names.contains("evidence.summary"))
+  #expect(!names.contains("journey.run"))
+  #expect(!names.contains("ui.actions"))
+  #expect(!names.contains("ui.perform"))
   #expect(!names.contains("build.run"))
   #expect(!names.contains("devserver.stop"))
   #expect(!names.contains("app.terminate"))
 }
 
+@Test func discoveryStepsRequireHostIssuedCapabilityIDs() throws {
+  let perform = try #require(
+    AgentRuntimeToolCatalog.definition(named: "flow.step", for: .verifyCurrentApp))
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: perform,
+      arguments: .object([
+        "flowID": .string("flow-1"),
+        "action": .string("tap"),
+      ])) == "arguments.capabilityID is required")
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: perform,
+      arguments: .object([
+        "flowID": .string("flow-1"), "capabilityID": .string("action_123"),
+        "action": .string("tap"),
+      ]))
+      == nil)
+}
+
 @Test func mutationCatalogStillPrefersJourneyButPermitsExplicitBuildAndTests() {
   let names = Set(AgentRuntimeToolCatalog.tools(for: .modifyAndVerify).map(\.name))
-  #expect(names.contains("journey.run"))
+  #expect(names.contains("flow.run"))
   #expect(names.contains("build.run"))
   #expect(names.contains("test.run"))
   #expect(!names.contains("devserver.stop"))
@@ -26,7 +54,8 @@ import Testing
 }
 
 @Test func hostPolicyRejectsHallucinatedLifecycleCallsEvenWhenRuntimeSupportsThem() {
-  #expect(AgentRuntimeToolCatalog.allows("journey.run", for: .verifyCurrentApp))
+  #expect(AgentRuntimeToolCatalog.allows("flow.run", for: .verifyCurrentApp))
+  #expect(!AgentRuntimeToolCatalog.allows("journey.run", for: .verifyCurrentApp))
   #expect(!AgentRuntimeToolCatalog.allows("build.run", for: .verifyCurrentApp))
   #expect(!AgentRuntimeToolCatalog.allows("devserver.stop", for: .verifyCurrentApp))
   #expect(!AgentRuntimeToolCatalog.allows("app.reset_data", for: .modifyAndVerify))
@@ -40,7 +69,7 @@ import Testing
       for: screenshot, arguments: .object(["udid": .string("other-simulator")])) != nil)
 
   let journey = try #require(
-    AgentRuntimeToolCatalog.definition(named: "journey.run", for: .verifyCurrentApp))
+    AgentRuntimeToolCatalog.definition(named: "flow.run", for: .verifyCurrentApp))
   #expect(
     AgentRuntimeToolCatalog.argumentViolation(for: journey, arguments: .object([:]))
       == "arguments.goal is required")
@@ -49,13 +78,6 @@ import Testing
       for: journey,
       arguments: .object([
         "goal": .string("Test quiz"),
-        "steps": .array([
-          .object([
-            "id": .string("start"), "title": .string("Start quiz"),
-            "selector": .object([
-              "identifier": .string("quiz.start"), "coordinate": .number(0.5),
-            ]),
-          ])
-        ]),
-      ]))?.contains("coordinate") == true)
+        "selector": .object(["label": .string("Start quiz")]),
+      ]))?.contains("selector") == true)
 }

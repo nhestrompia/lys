@@ -68,7 +68,7 @@ private final class ProcessStreamCollector: @unchecked Sendable {
     lock.withLock {
       guard truncated else { return data }
       var result = data
-      result.append(Data("\n[iosdev: output truncated]\n".utf8))
+      result.append(Data("\n[lys: output truncated]\n".utf8))
       return result
     }
   }

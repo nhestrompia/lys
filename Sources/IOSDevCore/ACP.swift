@@ -44,7 +44,7 @@ public struct ACPInitialize: Codable, Equatable, Sendable {
     clientCapabilities = .init(
       fs: .init(readTextFile: true, writeTextFile: allowWrites), terminal: false)
     clientInfo = .init(
-      name: "iosdev-workbench", title: "iOSDev Workbench", version: clientVersion)
+      name: "lys", title: "Lys", version: clientVersion)
   }
 }
 

@@ -19,6 +19,7 @@ The public alpha coordinates powerful local developer tools outside the Mac App 
 - **Socket impersonation:** the runtime binds no network interface, uses a mode-0600 Unix socket, and requires a per-task token on every connection.
 - **Malicious archives:** optional adapter and WDA archives remain non-executable until exact version, license, checksum, compatibility, and release-signature validation pass.
 - **Credential leakage:** the app does not read CLI credential files. BYOK values belong in Keychain and are injected only into the chosen process. Diagnostic export applies literal, token-pattern, and repository-path redaction.
+- **Malicious flow contract:** generated Lys contracts are data, not executable code. They use a closed schema, bounded loops, host-resolved identifiers, and logical secret references. Destructive or external actions fail closed without separate user approval; an agent cannot self-approve through tool arguments.
 - **Stale or fabricated completion:** the host validates evidence IDs and mutation generations. Agent prose cannot set verification state.
 - **Resource exhaustion:** process output is intended to be bounded and persisted; child cancellation interrupts, waits five seconds, then terminates. Additional archive-size and log-buffer limits remain release-gate work.
 

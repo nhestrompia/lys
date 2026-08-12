@@ -396,8 +396,6 @@ private struct ToolbarMoreButton: View {
           Divider()
           Toggle("Start Expo development server", isOn: $model.startDevServerOnRun)
         }
-        Divider()
-        Button("Open Simulator", action: model.openSimulator)
       }
       .padding(10)
       .frame(width: 220, alignment: .leading)
@@ -471,6 +469,17 @@ private struct AgentPanel: View {
         }
         .font(.system(size: 10.5, weight: .medium))
         .foregroundStyle(model.isBusy ? Studio.accent : Studio.success)
+        if model.canStopAgent {
+          Button(action: model.stopAgent) {
+            Label("Stop", systemImage: "stop.fill")
+              .font(.system(size: 10.5, weight: .semibold))
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .tint(.red)
+          .help("Stop the agent while preserving the running app and development server")
+          .accessibilityLabel("Stop agent")
+        }
       }
       .padding(.horizontal, 20)
       .frame(height: 52)
@@ -493,6 +502,10 @@ private struct AgentPanel: View {
 
           if model.needsExpoPreparation {
             ExpoSetupCallout()
+          }
+
+          if let summary = model.taskSummary {
+            TaskSummaryCard(summary: summary)
           }
 
           if !model.plan.isEmpty {
@@ -639,6 +652,38 @@ private struct AgentPanel: View {
     if model.status.contains("failed") || model.status.contains("blocked") { return .warning }
     if model.isBusy { return .active }
     return .neutral
+  }
+}
+
+private struct TaskSummaryCard: View {
+  let summary: TaskCompletionSummary
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 9) {
+      HStack(spacing: 8) {
+        Image(systemName: summary.passed ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+          .foregroundStyle(summary.passed ? Studio.success : Studio.warning)
+        Text(summary.title).font(.system(size: 12, weight: .semibold))
+      }
+      summaryLine("Done", summary.done)
+      summaryLine("Worked", summary.worked)
+      summaryLine("Still lacking", summary.lacking)
+    }
+    .padding(12)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background((summary.passed ? Studio.success : Studio.warning).opacity(0.08))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("Test summary. \(summary.done) \(summary.worked) \(summary.lacking)")
+  }
+
+  private func summaryLine(_ label: String, _ value: String) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text(label.uppercased())
+        .font(.system(size: 8.5, weight: .bold))
+        .foregroundStyle(Studio.secondary)
+      Text(value).font(.system(size: 10.5)).fixedSize(horizontal: false, vertical: true)
+    }
   }
 }
 
@@ -1192,11 +1237,8 @@ private struct AppStage: View {
           .disabled(model.selectedTarget == nil || model.isBusy)
           .help("Relaunch the installed app and capture a fresh screenshot")
           Menu {
-            Button("Open Simulator", systemImage: "arrow.up.right.square", action: model.openSimulator)
-              .disabled(model.preflight?.isFullXcode != true)
             Button("Refresh App", systemImage: "arrow.clockwise", action: model.refreshApp)
               .disabled(model.selectedTarget == nil || model.isBusy)
-            Toggle("Open Apple Simulator after Run", isOn: $model.openLiveSimulatorOnRun)
             Button(
               "Capture Screenshot", systemImage: "camera", action: model.captureCurrentScreenshot
             )
@@ -1474,7 +1516,17 @@ private struct DevicePreview: View {
                 })
           }
           .help(previewInteractionHelp)
-          SimulatorLiveSurface(session: model.simulatorLiveSession)
+          SimulatorLiveSurface(
+            session: model.simulatorLiveSession,
+            onTap: { point in
+              model.tapPreview(normalizedX: Double(point.x), normalizedY: Double(point.y))
+            },
+            onSwipe: { start, end in
+              model.swipePreview(
+                startX: Double(start.x), startY: Double(start.y),
+                endX: Double(end.x), endY: Double(end.y))
+            }
+          )
             .help(
               "Live CoreSimulator display. Click, drag, scroll, and type directly in the app."
             )
@@ -1611,8 +1663,6 @@ private struct InteractionPalette: View {
           model.captureCurrentScreenshot()
         }
         .disabled(model.selectedTarget == nil)
-        Button("Open Simulator", systemImage: "arrow.up.right.square", action: model.openSimulator)
-          .disabled(model.preflight?.isFullXcode != true)
         Button("Inspect hierarchy", systemImage: "list.bullet.rectangle") {
           model.captureHierarchy()
           showInspector = true
@@ -1859,11 +1909,10 @@ private struct VerificationPanel: View {
           .lineLimit(1)
       }
       Spacer(minLength: 6)
-      Button("Simulator", action: model.openSimulator)
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .disabled(model.preflight?.isFullXcode != true)
-        .help("Open the selected Simulator")
+      Label("In-app", systemImage: "rectangle.inset.filled.and.person.filled")
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(Studio.success)
+        .help("The selected Simulator stays embedded in Lys")
     }
     .padding(.horizontal, 18)
     .frame(height: 64)
@@ -3508,6 +3557,8 @@ private struct GitWorkspace: View {
 
 private struct SettingsWorkspace: View {
   @EnvironmentObject var model: AppModel
+  @State private var testSecretID = ""
+  @State private var testSecretValue = ""
 
   var body: some View {
     VStack(spacing: 0) {
@@ -3575,6 +3626,39 @@ private struct SettingsWorkspace: View {
               Text(wdaBadge)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(wdaColor)
+            }
+          }
+        }
+        SettingsGroup(title: "Authenticated testing") {
+          SettingRow(
+            symbol: "key.fill", title: "Test-session secrets",
+            detail:
+              "Store local credentials by ID. Values are kept in Keychain and are never exposed to agents or diagnostics."
+          ) {
+            VStack(alignment: .trailing, spacing: 6) {
+              TextField("Secret ID", text: $testSecretID)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 190)
+              SecureField("Secret value", text: $testSecretValue)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 190)
+              Button("Save") {
+                model.saveTestSecret(id: testSecretID, value: testSecretValue)
+                testSecretValue = ""
+              }
+              .disabled(
+                testSecretID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  || testSecretValue.isEmpty)
+            }
+          }
+          if !model.testSecretIDs.isEmpty {
+            SettingRow(
+              symbol: "checkmark.shield", title: "Available secret IDs",
+              detail: model.testSecretIDs.joined(separator: " · ")
+            ) {
+              Text("\(model.testSecretIDs.count)")
+                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Studio.success)
             }
           }
         }

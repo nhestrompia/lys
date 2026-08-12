@@ -27,7 +27,24 @@ import Testing
   let report = await ledger.verify(
     .init(codeChanged: true, uiChanged: true, testsChanged: false, criterionIDs: ["profile"]))
   #expect(report.status == .partiallyVerified)
-  #expect(report.missing.contains { $0.contains("Deterministic") })
+  #expect(report.missing.contains("Acceptance criterion profile"))
+}
+
+@Test func everyAcceptanceCriterionMustPass() async throws {
+  let ledger = EvidenceLedger()
+  for item in [
+    Evidence(kind: .launch, status: .passed, taskGeneration: 0),
+    Evidence(
+      kind: .uiAssertion, status: .passed, taskGeneration: 0, criterionID: "flow.first"),
+    Evidence(kind: .screenshot, status: .passed, taskGeneration: 0),
+  ] { try await ledger.record(item) }
+
+  let report = await ledger.verify(
+    .init(
+      codeChanged: false, uiChanged: true, testsChanged: false,
+      criterionIDs: ["flow.first", "flow.second"]))
+  #expect(report.status == .partiallyVerified)
+  #expect(report.missing == ["Acceptance criterion flow.second"])
 }
 
 @Test func unacknowledgedCrashFailsVerification() async throws {
@@ -56,6 +73,24 @@ import Testing
   let report = await ledger.verify(
     .init(codeChanged: true, uiChanged: false, testsChanged: false))
   #expect(report.status == .verified)
+}
+
+@Test func successfulJourneyRetrySupersedesItsEarlierFailedAssertion() async throws {
+  let ledger = EvidenceLedger()
+  for item in [
+    Evidence(kind: .launch, status: .passed, taskGeneration: 0),
+    Evidence(
+      kind: .uiAssertion, status: .failed, taskGeneration: 0, criterionID: "journey-1",
+      diagnosticSummary: "First action did not change the screen"),
+    Evidence(
+      kind: .uiAssertion, status: .passed, taskGeneration: 0, criterionID: "journey-1",
+      diagnosticSummary: "Retry reached the quiz"),
+    Evidence(kind: .screenshot, status: .passed, taskGeneration: 0),
+  ] { try await ledger.record(item) }
+  let report = await ledger.verify(
+    .init(codeChanged: false, uiChanged: true, testsChanged: false))
+  #expect(report.status == .verified)
+  #expect(report.currentEvidence.first { $0.status == .failed }?.acknowledged == true)
 }
 
 @Test func hierarchyInspectorHidesEmptyStructuralNodes() {

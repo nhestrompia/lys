@@ -140,7 +140,7 @@ enum AppOperation: Equatable {
     switch self {
     case .idle: nil
     case .preparing: "Starting the local JavaScript development server."
-    case .building: "Waiting for Xcode to finish. The preview will update after launch."
+    case .building: "Waiting for Xcode to finish. The embedded Simulator will update after launch."
     case .launching: "Installing the latest build on the selected Simulator."
     case .refreshing: "Relaunching the installed app and capturing a fresh screenshot."
     }
@@ -158,7 +158,7 @@ enum PreviewInteractionState: Equatable {
     case .unavailable: "Interaction unavailable"
     case .warming: "Connecting interaction…"
     case .ready: "Interactive"
-    case .sending: "Updating preview…"
+    case .sending: "Updating Simulator…"
     }
   }
 }
@@ -195,6 +195,14 @@ private enum PreviewInteractionRequest {
   }
 }
 
+struct TaskCompletionSummary: Equatable {
+  var title: String
+  var done: String
+  var worked: String
+  var lacking: String
+  var passed: Bool
+}
+
 @MainActor
 public final class AppModel: ObservableObject {
   @Published var section: PrimarySection = .agent
@@ -224,6 +232,7 @@ public final class AppModel: ObservableObject {
   @Published var plan: [TaskPlanItem] = []
   @Published var evidence: [Evidence] = []
   @Published var verificationReport: VerificationReport?
+  @Published var taskSummary: TaskCompletionSummary?
   @Published var selectedElement: UIElement?
   @Published var hierarchyElements: [UIElement] = []
   @Published var notice: String?
@@ -245,9 +254,10 @@ public final class AppModel: ObservableObject {
     availability: .unsupported, title: "Checking semantic UI automation",
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
   @Published var recoverableWorkspaces: [RecoverableWorkspace] = []
+  @Published var testSecretIDs: [String] = BlueprintSecretStore.accounts()
+  @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
-  @Published var openLiveSimulatorOnRun = false
   @Published var terminalEntries: [TerminalEntry] = []
   @Published public var isTerminalExpanded = false
   @Published var evidenceWorkspaceTab: EvidenceWorkspaceTab = .evidence
@@ -303,6 +313,7 @@ public final class AppModel: ObservableObject {
     return nil
   }
   var hasAgentSession: Bool { activeACPSessionID != nil }
+  var canStopAgent: Bool { hasAgentSession && isBusy }
   var displayedAgentConfigOptions: [ACPConfigOption] {
     agentConfigOptions.isEmpty ? localAgentConfigOptions : agentConfigOptions
   }
@@ -319,7 +330,8 @@ public final class AppModel: ObservableObject {
       return "Will apply when the agent session connects"
     }
     if agentConfigCanChange {
-      return hasAgentSession ? "CLI session controls" : "Local CLI setting · choose before connecting"
+      return hasAgentSession
+        ? "CLI session controls" : "Local CLI setting · choose before connecting"
     }
     if hasAgentSession {
       return localAgentConfigOptions.isEmpty
@@ -405,13 +417,16 @@ public final class AppModel: ObservableObject {
   private var previewSessionID = UUID()
   private var terminalOutputBuffers: [UUID: String] = [:]
   private var terminalFlushTask: Task<Void, Never>?
+  private var agentStopRequested = false
+  private var simulatorWorkspaceObservers: [NSObjectProtocol] = []
+  private var embeddedSimulatorSessionActive = false
 
   public init() {
     let support =
       (try? FileManager.default.url(
         for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil,
         create: true)) ?? URL(fileURLWithPath: NSTemporaryDirectory())
-    let root = support.appending(path: "IOSDevWorkbench", directoryHint: .isDirectory)
+    let root = support.appending(path: "Lys", directoryHint: .isDirectory)
     taskRoot = root.appending(path: "Tasks", directoryHint: .isDirectory)
     runtimeRoot = root.appending(path: "Runtime", directoryHint: .isDirectory)
     adapterRoot = root.appending(path: "Adapters", directoryHint: .isDirectory)
@@ -420,6 +435,26 @@ public final class AppModel: ObservableObject {
     selectedAdapterID = adapters.first(where: { $0.executable != nil })?.id ?? ""
     localAgentConfigOptions = Self.readLocalAgentConfigOptions(
       for: adapters.first(where: { $0.id == selectedAdapterID }))
+    if ProcessInfo.processInfo.processName != "IOSDevSnapshot" {
+      let workspaceNotifications = NSWorkspace.shared.notificationCenter
+      for name in [
+        NSWorkspace.didLaunchApplicationNotification,
+        NSWorkspace.didActivateApplicationNotification,
+      ] {
+        simulatorWorkspaceObservers.append(
+          workspaceNotifications.addObserver(forName: name, object: nil, queue: .main) {
+            [weak self] notification in
+            guard
+              let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+            else { return }
+            Task { @MainActor [weak self] in
+              guard self?.embeddedSimulatorSessionActive == true else { return }
+              self?.suppressExternalSimulatorWindow(application)
+            }
+          })
+      }
+    }
     Task {
       await refreshToolchain()
       await refreshRecovery()
@@ -434,6 +469,36 @@ public final class AppModel: ObservableObject {
     panel.prompt = "Open Repository"
     guard panel.runModal() == .OK, let url = panel.url else { return }
     openRepository(url)
+  }
+
+  func saveTestSecret(id: String, value: String) {
+    let identifier = id.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !identifier.isEmpty, !value.isEmpty,
+      identifier.unicodeScalars.allSatisfy({
+        CharacterSet.alphanumerics.contains($0)
+          || CharacterSet(charactersIn: "._-").contains($0)
+      })
+    else {
+      notice = "Use a dot-separated secret ID and provide a non-empty value."
+      return
+    }
+    do {
+      try BlueprintSecretStore.write(value, account: identifier)
+      testSecretIDs = BlueprintSecretStore.accounts()
+      notice = "Saved \(identifier) in Keychain. The value is never shown to agents."
+    } catch {
+      notice = error.localizedDescription
+    }
+  }
+
+  func deleteTestSecret(id: String) {
+    do {
+      try BlueprintSecretStore.delete(account: id)
+      testSecretIDs = BlueprintSecretStore.accounts()
+      notice = "Removed \(id) from Keychain."
+    } catch {
+      notice = error.localizedDescription
+    }
   }
 
   func chooseXcode() {
@@ -476,6 +541,7 @@ public final class AppModel: ObservableObject {
     applyConflicts = []
     evidence = []
     verificationReport = nil
+    taskSummary = nil
     setCurrentScreenshot(nil)
     selectedTarget = nil
     selectedElement = nil
@@ -560,7 +626,10 @@ public final class AppModel: ObservableObject {
   }
 
   func prepareExpoProject() {
-    guard let repository, needsExpoPreparation else { return }
+    guard let repository, needsExpoPreparation, !isBusy, appOperation == .idle else {
+      notice = "Wait for the current build, test, or preparation operation to finish."
+      return
+    }
     let confirmation = NSAlert()
     confirmation.messageText = "Prepare this Expo project for iOS?"
     confirmation.informativeText =
@@ -580,6 +649,9 @@ public final class AppModel: ObservableObject {
         detail: "Dependency installation and native project generation may run.", state: .active))
     Task {
       do {
+        let coordinator = WorkspaceOperationCoordinator(workspace: repository)
+        let lease = try await coordinator.acquire(.expoPrebuild, wait: false)
+        defer { lease.release() }
         let environment = ["PATH": executableSearchPath()]
         if !FileManager.default.fileExists(atPath: repository.appending(path: "node_modules").path)
         {
@@ -624,12 +696,20 @@ public final class AppModel: ObservableObject {
         }
         selectedContainer = first
         files = Self.children(of: repository, depth: 0)
+        lease.release()
         await refreshProjectSelection()
         status = "Expo iOS project ready"
         timeline.append(
           .init(
             time: Self.now(), title: "iOS project generated",
             detail: first.path, state: .complete))
+      } catch let error as WorkspaceOperationBusyError {
+        status = "Expo setup blocked"
+        notice = error.localizedDescription
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Expo setup blocked", detail: error.localizedDescription,
+            state: .warning))
       } catch let error as RPCError {
         status = "Expo setup failed"
         notice = error.data?.stringValue.map { "\(error.message)\n\n\($0)" } ?? error.message
@@ -746,13 +826,16 @@ public final class AppModel: ObservableObject {
     let prompt = taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
     let intent = AgentTaskIntentRouter.classify(prompt)
     guard !intent.allowsSourceWrites || isGitRepository else {
-      notice = "Editing requires a Git repository. You can still ask the agent to inspect or test the running app."
+      notice =
+        "Editing requires a Git repository. You can still ask the agent to inspect or test the running app."
       return
     }
     taskPrompt = ""
     taskTitle = prompt
     activeTaskIntent = intent
     activeJourney = nil
+    taskSummary = nil
+    agentStopRequested = false
     generation = 0
     status = "Preparing task"
     isBusy = true
@@ -804,20 +887,32 @@ public final class AppModel: ObservableObject {
         plan[2].state = .active
         try await connectAgent(
           adapter: adapter, workspace: workspace, prompt: prompt, intent: intent)
+        guard !agentStopRequested else { return }
         plan[2].state = .complete
-        status = intent.allowsSourceWrites
+        status =
+          intent.allowsSourceWrites
           ? "Agent finished · review evidence" : "Testing finished · review evidence"
         if intent.allowsSourceWrites { try await refreshProposedChanges() }
         await refreshEvidence()
+        await createTaskSummary()
       } catch {
-        if activeWorktree == nil { status = "Task failed" } else { status = "Task needs attention" }
-        notice = error.localizedDescription
+        if agentStopRequested {
+          status = "Agent stopped"
+          await createTaskSummary(stopped: true)
+        } else {
+          if activeWorktree == nil {
+            status = "Task failed"
+          } else {
+            status = "Task needs attention"
+          }
+          notice = error.localizedDescription
+          timeline.append(
+            .init(
+              time: Self.now(), title: "Task preparation failed",
+              detail: error.localizedDescription, state: .warning))
+        }
         if plan.indices.contains(2), plan[2].state == .active { plan[2].state = .blocked }
         if activeWorktree == nil, plan.indices.contains(0) { plan[0].state = .blocked }
-        timeline.append(
-          .init(
-            time: Self.now(), title: "Task preparation failed",
-            detail: error.localizedDescription, state: .warning))
       }
       isBusy = false
     }
@@ -874,11 +969,13 @@ public final class AppModel: ObservableObject {
   }
 
   private func agentContext(prompt: String, workspace: URL, intent: AgentTaskIntent) -> String {
-    let sourcePolicy = intent.allowsSourceWrites
+    let sourcePolicy =
+      intent.allowsSourceWrites
       ? "Source edits are allowed only inside the isolated worktree at \(workspace.path)."
       : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
-    let journeyPolicy = intent.requiresRunningApp
-      ? "Call journey.run first with the user's goal and no steps. It attaches to the compatible current app and returns its semantic UI. Choose semantic actions using accessibility identifiers or unique label/type selectors. Continue the same journey with journeyID and short asserted steps, then call journey.run with complete=true. Never start, stop, install, terminate, or rebuild app infrastructure yourself."
+    let journeyPolicy =
+      intent.requiresRunningApp
+      ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host owns navigation from the current route to the flow start, authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. Do not pre-navigate or require the user to leave the app on a particular screen. If no declared flow matches the requested goal, state that the run is exploratory, then call flow.run without flowID and continue only through host-returned actions. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
     return """
       \(prompt)
@@ -897,7 +994,9 @@ public final class AppModel: ObservableObject {
       return
     }
     let pendingIntent = AgentTaskIntentRouter.classify(taskPrompt)
-    if let activeTaskIntent, pendingIntent.allowsSourceWrites && !activeTaskIntent.allowsSourceWrites {
+    if let activeTaskIntent,
+      pendingIntent.allowsSourceWrites && !activeTaskIntent.allowsSourceWrites
+    {
       activeACPClient?.cancel()
       activeACPClient = nil
       activeACPSessionID = nil
@@ -917,31 +1016,42 @@ public final class AppModel: ObservableObject {
     taskPrompt = ""
     isBusy = true
     status = "Agent working"
+    agentStopRequested = false
     timeline.append(
       .init(time: Self.now(), title: "You", detail: prompt, state: .complete))
     Task {
       do {
+        _ = try? await runtime.request(method: "session.resume")
         let result = try await client.request(
           method: "session/prompt",
           params: try jsonValue(ACPPrompt(sessionID: sessionID, text: prompt)))
         let reason = result.result?["stopReason"]?.stringValue ?? "completed"
+        guard !agentStopRequested else { return }
         finishAgentMessage()
         timeline.append(
           .init(
-            time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
-            state: reason == "end_turn" || reason == "completed" ? .complete : .warning))
+            time: Self.now(), title: "Agent response ended", detail: "Stop reason: \(reason)",
+            state: activeTaskIntent?.kind == .verifyCurrentApp ? .warning : .complete))
+        try await continueIncompleteTestingSession(client: client, sessionID: sessionID)
         if activeTaskIntent?.allowsSourceWrites == true { try await refreshProposedChanges() }
         await refreshEvidence()
-        status = activeTaskIntent?.allowsSourceWrites == true
+        await createTaskSummary()
+        status =
+          activeTaskIntent?.allowsSourceWrites == true
           ? "Agent finished · review evidence" : "Testing finished · review evidence"
       } catch {
         finishAgentMessage()
-        status = "Agent needs attention"
-        notice = error.localizedDescription
-        timeline.append(
-          .init(
-            time: Self.now(), title: "Agent turn failed", detail: error.localizedDescription,
-            state: .warning))
+        if agentStopRequested {
+          status = "Agent stopped"
+          await createTaskSummary(stopped: true)
+        } else {
+          status = "Agent needs attention"
+          notice = error.localizedDescription
+          timeline.append(
+            .init(
+              time: Self.now(), title: "Agent turn failed", detail: error.localizedDescription,
+              state: .warning))
+        }
       }
       isBusy = false
     }
@@ -1111,6 +1221,7 @@ public final class AppModel: ObservableObject {
   }
 
   func stop() {
+    agentStopRequested = true
     Task {
       if let sessionID = activeACPSessionID {
         try? activeACPClient?.notify(
@@ -1128,6 +1239,28 @@ public final class AppModel: ObservableObject {
         .init(
           time: Self.now(), title: "Operation cancelled",
           detail: "Child processes were interrupted.", state: .warning))
+    }
+  }
+
+  func stopAgent() {
+    guard canStopAgent else { return }
+    agentStopRequested = true
+    Task {
+      if let sessionID = activeACPSessionID {
+        try? activeACPClient?.notify(
+          method: "session/cancel",
+          params: .object(["sessionId": .string(sessionID)]))
+      }
+      _ = try? await runtime.request(method: "session.stop")
+      resolveAgentPermission(optionID: nil)
+      finishAgentMessage()
+      isBusy = false
+      status = "Agent stopped"
+      timeline.append(
+        .init(
+          time: Self.now(), title: "Agent stopped",
+          detail: "The running app and development server were preserved.", state: .warning))
+      await createTaskSummary(stopped: true)
     }
   }
 
@@ -1221,7 +1354,7 @@ public final class AppModel: ObservableObject {
 
   func tapPreview(normalizedX: Double, normalizedY: Double) {
     guard let destination = selectedDestination, let target = selectedTarget else {
-      notice = "Build and run the app before interacting with its preview."
+      notice = "Build and run the app before interacting with the embedded Simulator."
       return
     }
     guard wdaStatus.availability == .ready else {
@@ -1258,7 +1391,7 @@ public final class AppModel: ObservableObject {
     startX: Double, startY: Double, endX: Double, endY: Double
   ) {
     guard let destination = selectedDestination, let target = selectedTarget else {
-      notice = "Build and run the app before interacting with its preview."
+      notice = "Build and run the app before interacting with the embedded Simulator."
       return
     }
     guard wdaStatus.availability == .ready else {
@@ -1358,7 +1491,7 @@ public final class AppModel: ObservableObject {
     } catch {
       if selectedDestinationID == destination.udid, selectedTarget?.bundleID == target.bundleID {
         previewInteractionState = .unavailable
-        notice = "Preview interaction failed: \(error.localizedDescription)"
+        notice = "Embedded Simulator interaction failed: \(error.localizedDescription)"
       }
     }
     previewTapWorker = nil
@@ -1428,8 +1561,9 @@ public final class AppModel: ObservableObject {
   }
 
   private func beginLiveSimulatorSession(destination: Destination) {
+    embeddedSimulatorSessionActive = true
+    suppressExternalSimulatorWindows()
     let sessionID = previewSessionID
-    launchSimulatorApplicationInBackground(destination: destination)
     Task {
       do {
         try await ensureRuntime()
@@ -1456,21 +1590,8 @@ public final class AppModel: ObservableObject {
     }
   }
 
-  private func launchSimulatorApplicationInBackground(destination: Destination) {
-    guard
-      NSRunningApplication.runningApplications(
-        withBundleIdentifier: "com.apple.iphonesimulator"
-      ).isEmpty,
-      let app = NSWorkspace.shared.urlForApplication(
-        withBundleIdentifier: "com.apple.iphonesimulator")
-    else { return }
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.activates = false
-    configuration.arguments = ["-CurrentDeviceUDID", destination.udid]
-    NSWorkspace.shared.openApplication(at: app, configuration: configuration)
-  }
-
   private func resetPreviewInteraction() {
+    embeddedSimulatorSessionActive = false
     simulatorLiveSession.stop()
     previewTapWorker?.cancel()
     previewWarmupTask?.cancel()
@@ -1642,27 +1763,22 @@ public final class AppModel: ObservableObject {
     }
   }
 
-  func openSimulator() {
-    guard
-      let app = NSWorkspace.shared.urlForApplication(
-        withBundleIdentifier: "com.apple.iphonesimulator")
-    else {
-      notice = "Simulator.app is unavailable. Select a full Xcode installation first."
-      return
+  private func suppressExternalSimulatorWindows() {
+    for application in NSRunningApplication.runningApplications(
+      withBundleIdentifier: "com.apple.iphonesimulator")
+    {
+      suppressExternalSimulatorWindow(application)
     }
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.activates = true
-    if let destination = selectedDestination {
-      configuration.arguments = ["-CurrentDeviceUDID", destination.udid]
-    }
-    NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
-      if let error { Task { @MainActor in self.notice = error.localizedDescription } }
-    }
+  }
+
+  private func suppressExternalSimulatorWindow(_ application: NSRunningApplication) {
+    guard embeddedSimulatorSessionActive, !application.isHidden else { return }
+    _ = application.hide()
   }
 
   func exportDiagnostics() {
     let panel = NSSavePanel()
-    panel.nameFieldStringValue = "iosdev-diagnostics.json"
+    panel.nameFieldStringValue = "lys-diagnostics.json"
     guard panel.runModal() == .OK, let url = panel.url else { return }
     do {
       let redactor = SecretRedactor(repositoryRoots: [repository].compactMap { $0 })
@@ -1683,6 +1799,225 @@ public final class AppModel: ObservableObject {
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       try encoder.encode(payload).write(to: url, options: .atomic)
     } catch { notice = error.localizedDescription }
+  }
+
+  public func loadDesignPreview() {
+    designPreview = true
+    activeACPSessionID = "synthetic-agent-session"
+    repository = URL(fileURLWithPath: "/Synthetic/TravelApp")
+    activeWorktree = URL(fileURLWithPath: "/Synthetic/Tasks/profile-dark-mode")
+    isGitRepository = true
+    branchName = "main"
+    status = "Verifying"
+    isBusy = true
+    generation = 2
+    terminalEntries = [
+      TerminalEntry(
+        command:
+          "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace /Synthetic/TravelApp.xcworkspace -scheme TravelApp build",
+        workingDirectory: "/Synthetic/TravelApp", state: .succeeded)
+    ]
+    terminalEntries[0].output = "** BUILD SUCCEEDED **\n"
+    isTerminalExpanded = ProcessInfo.processInfo.environment["LYS_SNAPSHOT_TERMINAL"] == "1"
+    taskTitle =
+      "Add dark mode support to the Profile screen and verify it on small and large iPhones."
+    activeTaskIntent = AgentTaskIntentRouter.classify(taskTitle)
+    var journey = JourneyRecord(goal: "Verify Profile appearance and navigation")
+    journey.status = .running
+    journey.steps = [
+      .init(
+        step: .init(id: "open-profile", title: "Open Profile", assertVisible: true),
+        status: .passed, detail: "Profile heading is visible."),
+      .init(
+        step: .init(id: "open-appearance", title: "Open Appearance", assertVisible: true),
+        status: .passed, detail: "Appearance is set to Dark."),
+      .init(
+        step: .init(id: "verify-large", title: "Verify on large iPhone", assertVisible: true),
+        status: .running, detail: "Inspecting the current semantic screen."),
+    ]
+    journey.currentFingerprint = .init(digest: "9b3f81d219preview", owningApplication: "TravelApp")
+    activeJourney = journey
+    selectedScheme = "TravelApp"
+    selectedDestinationID = "SYNTHETIC-IPHONE"
+    destinations = [
+      .init(
+        udid: "SYNTHETIC-IPHONE", name: "iPhone 16 Pro", deviceType: "iPhone 16 Pro",
+        runtime: "iOS 18.2", state: "Booted")
+    ]
+    plan = [
+      .init(title: "Review Profile implementation", state: .complete),
+      .init(title: "Update colors and assets", state: .complete),
+      .init(title: "Build and run on small phone", state: .complete),
+      .init(title: "Verify dark mode appearance", state: .active),
+      .init(title: "Run on large phone", state: .waiting),
+    ]
+    timeline = [
+      .init(
+        time: "10:42", title: "Read ProfileView.swift", detail: "Synthetic fixture",
+        state: .complete),
+      .init(
+        time: "10:44", title: "Build succeeded", detail: "Synthetic fixture · 24s", state: .complete
+      ),
+      .init(
+        time: "10:46", title: "Application launched", detail: "Synthetic fixture", state: .complete),
+      .init(time: "10:47", title: "Verifying Profile", detail: "Synthetic fixture", state: .active),
+    ]
+    evidence = [
+      .init(
+        kind: .build, status: .passed, taskGeneration: 2,
+        diagnosticSummary: "Synthetic fixture · build succeeded in 24s"),
+      .init(
+        kind: .launch, status: .passed, taskGeneration: 2,
+        diagnosticSummary: "Synthetic fixture · app launched"),
+      .init(
+        kind: .uiAssertion, status: .passed, taskGeneration: 2, criterionID: "profile-dark",
+        diagnosticSummary: "Synthetic fixture · 5 assertions passed"),
+      .init(
+        kind: .screenshot, status: .informational, taskGeneration: 2,
+        diagnosticSummary: "Synthetic fixture · comparing screenshots"),
+      .init(
+        kind: .runtimeLog, status: .passed, taskGeneration: 2,
+        diagnosticSummary: "Synthetic fixture · no unacknowledged errors"),
+    ]
+    verificationReport = .init(
+      status: .partiallyVerified, currentEvidence: evidence, staleEvidence: [],
+      missing: ["Fresh screenshot"])
+    proposedChanges = [
+      .init(path: "ProfileView.swift", kind: .modified, binary: false),
+      .init(path: "ProfileColors.swift", kind: .modified, binary: false),
+      .init(path: "Assets.xcassets", kind: .modified, binary: true),
+      .init(path: "ProfileTests.swift", kind: .added, binary: false),
+    ]
+  }
+
+  public func loadTaskSummaryPreview() {
+    loadDesignPreview()
+    isBusy = false
+    status = "Testing completed"
+    plan = plan.map { item in
+      var item = item
+      item.state = .complete
+      return item
+    }
+    if var journey = activeJourney {
+      journey.status = .passed
+      journey.steps = journey.steps.map { result in
+        var result = result
+        result.status = .passed
+        result.detail = result.detail.isEmpty ? "Host check passed." : result.detail
+        return result
+      }
+      activeJourney = journey
+    }
+    if let index = evidence.firstIndex(where: { $0.kind == .screenshot }) {
+      evidence[index].status = .passed
+      evidence[index].diagnosticSummary = "Synthetic fixture · final screen captured"
+    }
+    verificationReport = .init(
+      status: .verified, currentEvidence: evidence, staleEvidence: [], missing: [])
+    taskSummary = .init(
+      title: "Testing completed",
+      done: "Exercised 12 interactions for “Verify Profile appearance and navigation”.",
+      worked:
+        "App launch, 3 deterministic assertions, final screenshot, and terminal journey verification passed.",
+      lacking: "No outstanding host checks.", passed: true)
+    timeline.append(
+      .init(
+        time: "10:49", title: "Test summary",
+        detail:
+          "Done: Exercised the complete flow.\nWorked: Launch, assertions, screenshot, and terminal verification passed.\nStill missing: Nothing.",
+        state: .complete))
+  }
+
+  public func loadDesignFailurePreview() {
+    loadDesignPreview()
+    isBusy = false
+    status = "Build failed"
+    generation = 3
+    timeline.append(
+      .init(
+        time: "10:49", title: "Build failed", detail: "Synthetic fixture · compiler error",
+        state: .warning))
+    let failed = Evidence(
+      kind: .build, status: .failed, taskGeneration: 3,
+      diagnosticSummary: "Synthetic fixture · ProfileColors.swift:42")
+    evidence.append(failed)
+    verificationReport = .init(
+      status: .failed, currentEvidence: [failed], staleEvidence: Array(evidence.dropLast()),
+      missing: ["Fresh successful build", "Launch and UI evidence are stale"])
+  }
+
+  public func loadJourneyRecoveryPreview() {
+    loadDesignPreview()
+    isBusy = false
+    status = "Testing · retry ready"
+    guard var journey = activeJourney else { return }
+    journey.status = .ready
+    journey.steps = [
+      .init(
+        step: .init(
+          id: "open-quiz", title: "Open Practice Quiz", actionID: "action_start",
+          action: "tap", expectScreenChanged: true),
+        status: .failed,
+        detail: "That action is stale. Current app actions were refreshed."),
+      .init(
+        step: .init(
+          id: "quiz-visible", title: "Quiz controls are visible",
+          actionID: "action_answer_a", assertVisible: true),
+        status: .waiting),
+    ]
+    activeJourney = journey
+  }
+
+  public func loadDesignBuildPreview() {
+    loadDesignPreview()
+    setCurrentScreenshot(nil)
+    appOperation = .building
+    isBusy = true
+    status = "Building"
+    timeline.append(
+      .init(
+        time: "10:49", title: "Build started", detail: "TravelApp · iPhone 16 Pro",
+        state: .active))
+  }
+
+  public func loadPermissionPreview() {
+    loadDesignPreview()
+    status = "Awaiting permission"
+    pendingAgentPermission = .init(
+      toolCallID: "synthetic-command", title: "Run this command?",
+      detail: "Codex wants to run the command below. Review it before continuing.",
+      scopeLabel: "Isolated task",
+      scopeDetail: "/Synthetic/Tasks/profile-dark-mode",
+      command: "npm install @testing-library/react-native --save-dev",
+      options: [
+        .init(id: "allow-once", name: "Allow Once", kind: "allow_once"),
+        .init(id: "allow-task", name: "Allow For This Session", kind: "allow_always"),
+        .init(id: "reject-once", name: "Reject", kind: "reject_once"),
+        .init(id: "reject-always", name: "Reject Always", kind: "reject_always"),
+      ])
+    timeline.append(
+      .init(
+        time: "10:48", title: "Install test dependency",
+        detail: "Waiting for your approval", state: .active, category: .tool))
+  }
+
+  public func loadSettingsPreview() {
+    section = .settings
+    preflight = .init(
+      developerDirectory: "/Applications/Xcode.app/Contents/Developer",
+      xcodebuildPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+      simctlPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/simctl",
+      xcodeVersion: "26.6", xcodeBuild: "17F113", isFullXcode: true, issues: [])
+    destinations = [
+      .init(
+        udid: "D8368E82-B87A-459C-ADE0-473ABC9CFD54", name: "iPhone 17 Pro",
+        deviceType: "iPhone 17 Pro", runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+        state: "Booted")
+    ]
+    selectedDestinationID = destinations[0].udid
+    refreshAdapters()
+    refreshWDAStatus()
   }
 
   public func showSnapshotPage(_ page: String) {
@@ -1753,6 +2088,16 @@ public final class AppModel: ObservableObject {
       return
     }
     do {
+      let workspace = repository ?? container.deletingLastPathComponent()
+      let coordinator = WorkspaceOperationCoordinator(workspace: workspace)
+      let lease = try await coordinator.acquire(.projectDiscovery)
+      defer { lease.release() }
+      guard FileManager.default.fileExists(atPath: container.path) else {
+        throw RPCError(
+          code: -32098,
+          message: "The selected Xcode container no longer exists. Refresh the generated project before continuing."
+        )
+      }
       let listing = try await ToolchainDiscovery.listProject(
         container: container, xcodebuild: URL(fileURLWithPath: xcodebuild),
         developerDirectory: URL(fileURLWithPath: developer))
@@ -1860,9 +2205,9 @@ public final class AppModel: ObservableObject {
       throw RPCError(code: -32091, message: "The selected agent did not negotiate ACP v1")
     }
     let mcp = ACPMCPServer(
-      name: "iOS Development Runtime", command: try mcpExecutable().path,
+      name: "Lys Runtime", command: try mcpExecutable().path,
       env: try await runtime.mcpEnvironment().merging(
-        ["IOSDEV_INTENT_KIND": intent.kind.rawValue], uniquingKeysWith: { _, task in task }))
+        ["LYS_INTENT_KIND": intent.kind.rawValue], uniquingKeysWith: { _, task in task }))
     let session = try await client.request(
       method: "session/new", params: try jsonValue(ACPNewSession(cwd: workspace, mcpServers: [mcp]))
     )
@@ -1883,12 +2228,114 @@ public final class AppModel: ObservableObject {
     let result = try await client.request(
       method: "session/prompt",
       params: try jsonValue(ACPPrompt(sessionID: sessionID, text: context)))
+    guard !agentStopRequested else { return }
     let reason = result.result?["stopReason"]?.stringValue ?? "completed"
     finishAgentMessage()
     timeline.append(
       .init(
-        time: Self.now(), title: "Agent turn finished", detail: "Stop reason: \(reason)",
-        state: reason == "end_turn" || reason == "completed" ? .complete : .warning))
+        time: Self.now(), title: "Agent response ended", detail: "Stop reason: \(reason)",
+        state: intent.kind == .verifyCurrentApp ? .warning : .complete))
+    try await continueIncompleteTestingSession(client: client, sessionID: sessionID)
+  }
+
+  private func continueIncompleteTestingSession(client: ACPClient, sessionID: String) async throws {
+    guard activeTaskIntent?.kind == .verifyCurrentApp, !agentStopRequested else { return }
+    guard let value = try? await runtime.request(method: "flow.status"),
+      let journey: JourneyRecord = try? decodeRuntimeValue(value)
+    else {
+      throw RPCError(
+        code: -32096,
+        message: "The agent did not start the required host-owned app journey.")
+    }
+    if journey.status == .ready || journey.status == .running || journey.status == .preparing {
+      activeJourney = journey
+      throw RPCError(
+        code: -32096,
+        message:
+          "The agent response ended before Lys reached the flow's terminal state. The app remains attached and no additional model turns were started."
+      )
+    }
+  }
+
+  private func createTaskSummary(stopped: Bool = false) async {
+    await refreshEvidence()
+    if let value = try? await runtime.request(method: "flow.status"),
+      let journey: JourneyRecord = try? decodeRuntimeValue(value)
+    {
+      activeJourney = journey
+    }
+    let currentEvidence = evidence.filter { $0.taskGeneration == generation }
+    let actionCount = currentEvidence.filter { $0.kind == .uiAction && $0.status == .passed }.count
+    let assertionCount = currentEvidence.filter {
+      $0.kind == .uiAssertion && $0.status == .passed
+    }.count
+    let hasLaunch = currentEvidence.contains { $0.kind == .launch && $0.status == .passed }
+    let hasScreenshot = currentEvidence.contains { $0.kind == .screenshot && $0.status == .passed }
+    let verified: Bool
+    if case .verified? = verificationReport?.status,
+      activeTaskIntent?.kind != .verifyCurrentApp || activeJourney?.status == .passed
+    {
+      verified = true
+    } else {
+      verified = false
+    }
+
+    let done: String
+    if stopped {
+      done = "Stopped after \(actionCount) completed app interaction(s)."
+    } else if let journey = activeJourney {
+      switch journey.status {
+      case .passed:
+        done = "Completed “\(journey.goal)” with \(actionCount) app interaction(s)."
+      case .failed:
+        done =
+          "Attempted “\(journey.goal)”; the flow did not complete. \(actionCount) interaction(s) passed before failure."
+      case .cancelled:
+        done = "Cancelled “\(journey.goal)” after \(actionCount) completed interaction(s)."
+      case .preparing, .ready, .running:
+        done =
+          "Started “\(journey.goal)”, but it did not reach a terminal result. \(actionCount) interaction(s) passed."
+      }
+    } else {
+      done = "Finished the requested task and collected the available evidence."
+    }
+
+    var workedParts: [String] = []
+    if hasLaunch { workedParts.append("app launch") }
+    if assertionCount > 0 { workedParts.append("\(assertionCount) deterministic assertion(s)") }
+    if hasScreenshot { workedParts.append("final screenshot") }
+    if activeJourney?.status == .passed { workedParts.append("terminal journey verification") }
+    let worked =
+      workedParts.isEmpty
+      ? "No host-validated checks completed." : workedParts.joined(separator: ", ") + " passed."
+
+    let lacking: String
+    if stopped {
+      lacking = "The remaining journey and final verification were not run."
+    } else if let missing = verificationReport?.missing, !missing.isEmpty {
+      lacking = missing.joined(separator: "; ") + "."
+    } else if activeJourney?.status == .failed {
+      lacking = "The journey ended with a failed host check; review the failed step above."
+    } else {
+      lacking = "No outstanding host checks."
+    }
+
+    taskSummary = .init(
+      title: stopped
+        ? "Testing stopped" : (verified ? "Testing completed" : "Testing needs attention"),
+      done: done, worked: worked, lacking: lacking, passed: verified && !stopped)
+    timeline.removeAll { $0.title == "Test summary" }
+    timeline.append(
+      .init(
+        time: Self.now(), title: "Test summary",
+        detail: "Done: \(done)\nWorked: \(worked)\nStill missing: \(lacking)",
+        state: verified && !stopped ? .complete : .warning))
+    if plan.indices.contains(3) {
+      plan[3].state = verified && !stopped ? .complete : .blocked
+    }
+    if plan.indices.contains(4) {
+      plan[4].state = verified && !stopped ? .complete : .blocked
+    }
   }
 
   private func recordAgentMutation() async {
@@ -1911,7 +2358,8 @@ public final class AppModel: ObservableObject {
     case "agent_message_chunk":
       guard let text = update["content"]?["text"]?.stringValue, !text.isEmpty else { return }
       consumeAgentMessageChunk(
-        text, messageID: update["messageId"]?.stringValue
+        text,
+        messageID: update["messageId"]?.stringValue
           ?? update["content"]?["messageId"]?.stringValue)
     case "tool_call", "tool_call_update":
       finishAgentMessage()
@@ -1989,8 +2437,10 @@ public final class AppModel: ObservableObject {
       let option = request.options.first(where: { $0.id == optionID })
       timeline.append(
         .init(
-          time: Self.now(), title: option?.isAllow == true ? "Permission granted" : "Permission denied",
-          detail: option?.displayName ?? "The action was cancelled", state: option?.isAllow == true ? .complete : .warning,
+          time: Self.now(),
+          title: option?.isAllow == true ? "Permission granted" : "Permission denied",
+          detail: option?.displayName ?? "The action was cancelled",
+          state: option?.isAllow == true ? .complete : .warning,
           category: .permission))
       updateToolPermissionState(
         toolCallID: request.toolCallID,
@@ -2044,7 +2494,8 @@ public final class AppModel: ObservableObject {
 
   private func consumeAgentToolUpdate(_ update: JSONValue) {
     guard let toolCallID = update["toolCallId"]?.stringValue else { return }
-    var context = agentToolContexts[toolCallID]
+    var context =
+      agentToolContexts[toolCallID]
       ?? AgentToolContext(toolCallID: toolCallID)
     context.title = update["title"]?.stringValue ?? context.title
     context.name = update["name"]?.stringValue ?? context.name
@@ -2057,18 +2508,20 @@ public final class AppModel: ObservableObject {
     agentToolContexts[toolCallID] = context
 
     let status = context.status ?? "in_progress"
-    let state: TimelineItem.State = switch status {
-    case "completed": .complete
-    case "failed": .warning
-    case "pending": .waiting
-    default: .active
-    }
-    let detail: String = switch status {
-    case "completed": "Completed"
-    case "failed": conciseToolFailure(context.rawOutput) ?? "Failed"
-    case "pending": "Waiting"
-    default: "In progress"
-    }
+    let state: TimelineItem.State =
+      switch status {
+      case "completed": .complete
+      case "failed": .warning
+      case "pending": .waiting
+      default: .active
+      }
+    let detail: String =
+      switch status {
+      case "completed": "Completed"
+      case "failed": conciseToolFailure(context.rawOutput) ?? "Failed"
+      case "pending": "Waiting"
+      default: "In progress"
+      }
     let title = humanizedToolTitle(context)
     if let timelineID = agentToolTimelineIDs[toolCallID],
       let index = timeline.firstIndex(where: { $0.id == timelineID })
@@ -2091,19 +2544,21 @@ public final class AppModel: ObservableObject {
       guard let title = entry["content"]?.stringValue ?? entry["title"]?.stringValue,
         !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       else { return nil }
-      let state: TaskPlanItem.State = switch entry["status"]?.stringValue {
-      case "completed": .complete
-      case "in_progress": .active
-      case "blocked": .blocked
-      default: .waiting
-      }
+      let state: TaskPlanItem.State =
+        switch entry["status"]?.stringValue {
+        case "completed": .complete
+        case "in_progress": .active
+        case "blocked": .blocked
+        default: .waiting
+        }
       return .init(title: title, state: state)
     }
   }
 
   private func mergedToolContext(toolCall: JSONValue?, toolCallID: String?) -> AgentToolContext {
     let identifier = toolCallID ?? UUID().uuidString
-    var context = agentToolContexts[identifier]
+    var context =
+      agentToolContexts[identifier]
       ?? AgentToolContext(toolCallID: identifier)
     context.title = toolCall?["title"]?.stringValue ?? context.title
     context.name = toolCall?["name"]?.stringValue ?? context.name
@@ -2121,7 +2576,8 @@ public final class AppModel: ObservableObject {
     title: String, detail: String, scopeLabel: String, scopeDetail: String?, command: String?
   ) {
     let command = commandText(from: context.rawInput)
-    let workingDirectory = context.rawInput?["cwd"]?.stringValue
+    let workingDirectory =
+      context.rawInput?["cwd"]?.stringValue
       ?? context.rawInput?["workingDirectory"]?.stringValue
     let firstLocation = context.locations.first
     let isInsideTask = [workingDirectory, firstLocation].compactMap { $0 }.contains {
@@ -2130,7 +2586,8 @@ public final class AppModel: ObservableObject {
       let root = taskWorkspace.standardizedFileURL.path
       return path == root || path.hasPrefix(root + "/")
     }
-    let scopeLabel = runtimeToolKey(context) != nil
+    let scopeLabel =
+      runtimeToolKey(context) != nil
       ? (selectedDestination?.name ?? "Selected Simulator")
       : isInsideTask ? "Isolated task" : context.kind == "fetch" ? "Network" : "Agent process"
     let scopeDetail = workingDirectory ?? firstLocation
@@ -2141,12 +2598,14 @@ public final class AppModel: ObservableObject {
         return (
           "Reset the app's data?",
           "\(selectedAgentDisplayName) wants to erase this app's data on the selected Simulator. This cannot be undone.",
-          scopeLabel, scopeDetail, nil)
+          scopeLabel, scopeDetail, nil
+        )
       }
       return (
         "Allow app testing?",
         "\(selectedAgentDisplayName) wants to \(action.lowercased()) using Lys's iOS runtime.",
-        scopeLabel, scopeDetail, nil)
+        scopeLabel, scopeDetail, nil
+      )
     }
 
     switch context.kind {
@@ -2154,29 +2613,34 @@ public final class AppModel: ObservableObject {
       return (
         "Run this command?",
         "\(selectedAgentDisplayName) wants to run the command below. Review it before continuing.",
-        scopeLabel, scopeDetail, command)
+        scopeLabel, scopeDetail, command
+      )
     case "edit", "move":
       return (
         "Change files in this task?",
         "Changes stay in the isolated task worktree. Your original checkout is unchanged until review.",
-        scopeLabel, scopeDetail, command)
+        scopeLabel, scopeDetail, command
+      )
     case "delete":
       return (
         "Delete files from this task?",
         "The agent wants to remove files from the isolated task. Review the affected location before continuing.",
-        scopeLabel, scopeDetail, command)
+        scopeLabel, scopeDetail, command
+      )
     case "fetch":
       return (
         "Allow network access?",
         "\(selectedAgentDisplayName) wants to access an external resource.", scopeLabel,
-        scopeDetail, command)
+        scopeDetail, command
+      )
     default:
       let meaningful = [context.title, context.name]
         .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         .first { !$0.isEmpty && !Self.looksLikeMachineToolName($0) }
       return (
         "Allow this agent action?", meaningful ?? "Review this action before continuing.",
-        scopeLabel, scopeDetail, command)
+        scopeLabel, scopeDetail, command
+      )
     }
   }
 
@@ -2192,9 +2656,10 @@ public final class AppModel: ObservableObject {
   }
 
   private func permissionResponse(id: RPCID?, optionID: String?) -> RPCEnvelope {
-    let outcome: JSONValue = optionID.map {
-      .object(["outcome": .string("selected"), "optionId": .string($0)])
-    } ?? .object(["outcome": .string("cancelled")])
+    let outcome: JSONValue =
+      optionID.map {
+        .object(["outcome": .string("selected"), "optionId": .string($0)])
+      } ?? .object(["outcome": .string("cancelled")])
     return .init(id: id, result: .object(["outcome": outcome]))
   }
 
@@ -2212,7 +2677,8 @@ public final class AppModel: ObservableObject {
     timeline.append(
       .init(
         time: Self.now(), title: "App testing access ready",
-        detail: "Routine build, Simulator, UI, screenshot, and log tools are allowed for this task.",
+        detail:
+          "Routine build, Simulator, UI, screenshot, and log tools are allowed for this task.",
         state: .complete, category: .permission))
   }
 
@@ -2234,7 +2700,8 @@ public final class AppModel: ObservableObject {
   }
 
   private func updateAgentConfigOptions(_ value: JSONValue?) {
-    let values = value?.arrayValue
+    let values =
+      value?.arrayValue
       ?? value?["configOptions"]?.arrayValue
       ?? value?["config_options"]?.arrayValue
     guard let values else {
@@ -2323,11 +2790,13 @@ public final class AppModel: ObservableObject {
 
   private func runtimeToolKey(_ context: AgentToolContext) -> String? {
     let candidates = [context.title, context.name].compactMap { $0 }
-    guard candidates.contains(where: {
-      let value = $0.lowercased()
-      return value.contains("ios_development_runtime")
-        || value.contains("ios development runtime")
-    }) else { return nil }
+    guard
+      candidates.contains(where: {
+        let value = $0.lowercased()
+        return value.contains("ios_development_runtime")
+          || value.contains("ios development runtime")
+      })
+    else { return nil }
     let combined = candidates.joined(separator: " ").lowercased()
     return Self.runtimeToolTitles.keys.first { combined.contains($0.lowercased()) }
   }
@@ -2349,9 +2818,42 @@ public final class AppModel: ObservableObject {
 
   private func conciseToolFailure(_ value: JSONValue?) -> String? {
     guard let value else { return nil }
-    let text = value.stringValue ?? renderJSON(value)
+    let text = toolFailureMessage(in: value) ?? renderJSON(value)
     let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
     return line.count > 120 ? String(line.prefix(117)) + "…" : line
+  }
+
+  private func toolFailureMessage(in value: JSONValue, depth: Int = 0) -> String? {
+    guard depth < 6 else { return nil }
+    switch value {
+    case .string(let text):
+      if let data = text.data(using: .utf8),
+        let nested = try? JSONDecoder().decode(JSONValue.self, from: data)
+      {
+        return toolFailureMessage(in: nested, depth: depth + 1)
+      }
+      let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    case .object(let object):
+      for key in ["message", "detail", "error_description", "text"] {
+        if let nested = object[key], let message = toolFailureMessage(in: nested, depth: depth + 1)
+        {
+          return message
+        }
+      }
+      for key in ["error", "structuredContent", "content", "result"] {
+        guard let nested = object[key], nested != .null else { continue }
+        if let message = toolFailureMessage(in: nested, depth: depth + 1) { return message }
+      }
+      return nil
+    case .array(let values):
+      for value in values {
+        if let message = toolFailureMessage(in: value, depth: depth + 1) { return message }
+      }
+      return nil
+    case .number, .bool, .null:
+      return nil
+    }
   }
 
   private func renderJSON(_ value: JSONValue) -> String {
@@ -2362,14 +2864,19 @@ public final class AppModel: ObservableObject {
   }
 
   private static func looksLikeMachineToolName(_ value: String) -> Bool {
-    value.hasPrefix("mcp.") || value.contains("_Runtime.") || value.contains("tool_call")
+    value.hasPrefix("mcp.") || value.hasPrefix("mcp__") || value.contains("_Runtime.")
+      || value.contains("__Runtime__") || value.contains("tool_call")
   }
 
   private static let runtimeToolTitles: [String: String] = [
     "workspace.describe": "Inspecting the task workspace",
-    "journey.run": "Running the app journey",
-    "journey.status": "Checking the app journey",
-    "journey.cancel": "Cancelling the app journey",
+    "app.describe": "Mapping the current app",
+    "flow.list": "Finding declared app flows",
+    "flow.run": "Running the app flow",
+    "flow.step": "Interacting with the app",
+    "flow.finish": "Validating the completed flow",
+    "flow.status": "Checking the app flow",
+    "flow.stop": "Stopping the app flow",
     "build.run": "Building the app",
     "build.cancel": "Stopping the build",
     "test.list": "Finding tests",
@@ -2384,6 +2891,7 @@ public final class AppModel: ObservableObject {
     "app.terminate": "Stopping the app",
     "app.reset_data": "Resetting app data",
     "ui.snapshot": "Inspecting the app",
+    "ui.actions": "Reading available app actions",
     "ui.find": "Finding an interface element",
     "ui.perform": "Interacting with the app",
     "ui.wait": "Waiting for the app",
@@ -2391,14 +2899,13 @@ public final class AppModel: ObservableObject {
     "ui.navigate": "Navigating the app",
     "screenshot.capture": "Capturing a screenshot",
     "logs.query": "Checking app logs",
-    "verification.status": "Checking verification",
-    "verification.submit": "Submitting verification",
+    "evidence.summary": "Summarizing test evidence",
   ]
 
   private static let routineTestingTools: Set<String> = [
-    "workspace.describe", "journey.run", "journey.status", "journey.cancel", "build.run",
-    "test.list", "test.run", "ui.snapshot", "ui.find", "ui.perform", "ui.wait", "ui.assert", "ui.navigate",
-    "screenshot.capture", "logs.query", "verification.status", "verification.submit",
+    "workspace.describe", "app.describe", "flow.list", "flow.run", "flow.step", "flow.finish",
+    "flow.status", "flow.stop", "build.run", "test.list", "test.run", "screenshot.capture",
+    "logs.query", "evidence.summary",
   ]
 
   private func startRuntime(workspace: URL) async throws {
@@ -2476,7 +2983,7 @@ public final class AppModel: ObservableObject {
       await refreshEvidence()
     case .journeyStarted, .journeyReady, .journeyStepStarted, .journeyStepFinished,
       .journeyFinished:
-      if let value = try? await runtime.request(method: "journey.status"),
+      if let value = try? await runtime.request(method: "flow.status"),
         let record: JourneyRecord = try? decodeRuntimeValue(value)
       {
         activeJourney = record
@@ -2491,7 +2998,13 @@ public final class AppModel: ObservableObject {
       appOperation = .idle
       await refreshEvidence()
     case .warning:
-      notice = event.message
+      status = "Testing needs another step"
+      if timeline.last?.detail != event.message {
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Host testing note", detail: event.message,
+            state: .warning))
+      }
     case .sessionConfigured, .uiAction:
       break
     }
@@ -2525,7 +3038,7 @@ public final class AppModel: ObservableObject {
       container.pathExtension == "xcworkspace" ? "-workspace" : "-project", container.path,
       "-scheme", selectedScheme, "-configuration", "Debug", "-destination",
       "platform=iOS Simulator,id=\(destination.udid)", "-derivedDataPath",
-      taskWorkspace?.appending(path: ".iosdev/cache/DerivedData").path ?? "<derived-data>",
+      taskWorkspace?.appending(path: ".lys/cache/DerivedData").path ?? "<derived-data>",
       "build",
     ]
     let terminalID = beginTerminal(
@@ -2616,7 +3129,6 @@ public final class AppModel: ObservableObject {
         .init(
           time: Self.now(), title: "Application launched",
           detail: "\(target.bundleID) on \(destination.name)", state: .complete))
-      if openLiveSimulatorOnRun { openSimulator() }
       warmPreviewInteraction(destination: destination, target: target)
       beginLiveSimulatorSession(destination: destination)
       status = "Waiting for app to settle"
@@ -2691,7 +3203,7 @@ public final class AppModel: ObservableObject {
         evidence.reversed().first(where: {
           $0.kind == .screenshot && $0.status == .passed && $0.taskGeneration == generation
         }).flatMap { $0.artifactPaths.first.map(URL.init(fileURLWithPath:)) })
-      verificationReport = try await runtime.request(
+      var report: VerificationReport = try await runtime.request(
         VerificationReport.self, method: "verification.status",
         params: .object([
           "codeChanged": .bool(
@@ -2699,6 +3211,13 @@ public final class AppModel: ObservableObject {
           "uiChanged": .bool(requiresUIVerification),
           "testsChanged": .bool(false),
         ]))
+      if activeTaskIntent?.kind == .verifyCurrentApp, activeJourney?.status != .passed {
+        report.status = activeJourney?.status == .failed ? .failed : .partiallyVerified
+        if !report.missing.contains("A declared Lys flow reaching its terminal state") {
+          report.missing.append("A declared Lys flow reaching its terminal state")
+        }
+      }
+      verificationReport = report
     } catch {
       verificationReport = nil
     }
@@ -2727,27 +3246,27 @@ public final class AppModel: ObservableObject {
   private func runtimeExecutable() throws -> URL {
     let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent()
     let candidates = [
-      executableDirectory?.appending(path: "iosdevd"),
-      Bundle.main.resourceURL?.appending(path: "bin/iosdevd"),
+      executableDirectory?.appending(path: "lysd"),
+      Bundle.main.resourceURL?.appending(path: "bin/lysd"),
     ].compactMap { $0 }
     if let match = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }
     ) {
       return match
     }
-    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "iosdevd")
+    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "lysd")
   }
 
   private func mcpExecutable() throws -> URL {
     let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent()
     let candidates = [
-      executableDirectory?.appending(path: "iosdev-mcp"),
-      Bundle.main.resourceURL?.appending(path: "bin/iosdev-mcp"),
+      executableDirectory?.appending(path: "lys-mcp"),
+      Bundle.main.resourceURL?.appending(path: "bin/lys-mcp"),
     ].compactMap { $0 }
     if let match = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }
     ) {
       return match
     }
-    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "iosdev-mcp")
+    throw RuntimeControllerError.executableMissing(candidates.first?.path ?? "lys-mcp")
   }
 
   private func npmExecutable() -> URL? {
@@ -2791,6 +3310,11 @@ public final class AppModel: ObservableObject {
           "CocoaPods is required for this project but `pod` was not found. Install CocoaPods, then Run again."
       )
     }
+
+    let workspace = taskWorkspace ?? repository ?? requirement.projectDirectory
+    let coordinator = WorkspaceOperationCoordinator(workspace: workspace)
+    let lease = try await coordinator.acquire(.cocoaPodsInstall)
+    defer { lease.release() }
 
     status = "Installing CocoaPods dependencies"
     appOperation = .preparing
@@ -3290,14 +3814,16 @@ public final class AppModel: ObservableObject {
       options.append(
         .init(
           id: "local-model", name: "Model", category: "model",
-          currentValue: .string(model), options: modelValues.isEmpty
+          currentValue: .string(model),
+          options: modelValues.isEmpty
             ? [.init(value: model, name: model)] : modelValues))
     }
     if let reasoning {
       options.append(
         .init(
           id: "local-reasoning", name: "Reasoning effort", category: "thought_level",
-          currentValue: .string(reasoning), options: reasoningValues.isEmpty
+          currentValue: .string(reasoning),
+          options: reasoningValues.isEmpty
             ? [.init(value: reasoning, name: reasoning.capitalized)] : reasoningValues))
     }
     return options
@@ -3354,7 +3880,8 @@ public final class AppModel: ObservableObject {
     if let object = value as? [String: Any] {
       for (key, child) in object {
         let normalized = key.lowercased().replacingOccurrences(of: "-", with: "_")
-        if model == nil && ["model", "model_id", "model_name", "default_model"].contains(normalized),
+        if model == nil
+          && ["model", "model_id", "model_name", "default_model"].contains(normalized),
           let string = child as? String, !string.isEmpty
         {
           model = string
@@ -3388,9 +3915,10 @@ public final class AppModel: ObservableObject {
     var values: [ACPConfigOptionValue] = []
     for model in models {
       guard let slug = model["slug"] as? String, !slug.isEmpty else { continue }
-      let name = (model["display_name"] as? String).flatMap {
-        $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
-      } ?? slug
+      let name =
+        (model["display_name"] as? String).flatMap {
+          $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        } ?? slug
       values.append(
         .init(value: slug, name: name, description: model["description"] as? String))
     }

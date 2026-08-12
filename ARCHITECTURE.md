@@ -8,8 +8,8 @@ flowchart LR
     WM --> WT["Detached task worktree"]
     UI --> ACP["ACP v1 client"]
     ACP --> AG["User-authenticated agent"]
-    AG --> MCP["iosdev-mcp"]
-    MCP -->|"token + JSON-RPC"| RT["iosdevd"]
+    AG --> MCP["lys-mcp"]
+    MCP -->|"token + JSON-RPC"| RT["lysd"]
     RT --> XB["xcodebuild / simctl"]
     RT --> EV["Evidence ledger / SQLite"]
     EV --> UI
@@ -18,7 +18,59 @@ flowchart LR
     REVIEW -->|"mismatch"| CONFLICT["Manual conflict resolution"]
 ```
 
-`IOSDevCore` contains contracts and actors. `IOSDevApp` is the macOS client. `iosdevd` owns local Apple-tool execution and evidence. `iosdev-mcp` translates MCP tool calls into authenticated runtime RPC.
+`IOSDevCore` contains contracts and actors. `IOSDevApp` is the internal macOS target for the Lys product. `lysd` owns local Apple-tool execution and evidence. `lys-mcp` translates MCP tool calls into authenticated runtime RPC.
+
+## Universal interaction architecture
+
+```mermaid
+flowchart LR
+    APP["Running iOS app"] --> OBS["Accessibility + visual state observer"]
+    SDK["Lys Swift / Expo SDK"] --> BP["Generated .lys contract"]
+    BP --> MERGE["Interaction state broker"]
+    OBS --> MERGE
+    MERGE --> GRAPH["Routes + capabilities + observed transitions"]
+    GRAPH --> EXEC["Host flow executor"]
+    EXEC --> ADAPTER["Semantic / screen-bound action adapters"]
+    ADAPTER --> APP
+    EXEC --> ASSERT["Predicates + bounded loops + acceptance"]
+    ASSERT --> EV["Generation-scoped evidence"]
+    AGENT["Any ACP model"] -->|"app.describe / flow.* only"| EXEC
+    KEYCHAIN["Local Keychain"] -->|"secret values never cross tool boundary"| EXEC
+```
+
+The live app is the source of truth. Lys observes a new stable state after each interaction and
+issues screen-bound capability IDs. SDK declarations generate human-stable screen and action IDs,
+transition edges, protected authenticated-session setup, UI-authentication flows, parameters,
+bounded loops, and terminal criteria; they cannot make an absent control actionable. Declared
+`screen → resultsIn` edges form a safe graph that the host, not the model, plans across.
+Schema-version-2 flows declare guaranteed coverage roots and a start route. SDK export and host
+loading derive every additional declared route with a safe path to that start. The host executes
+the path from the observed current screen before running the flow body, so a restored app does not
+fail merely because a manually maintained entry whitelist omitted its current route.
+SDK and host validation also symbolically track the route after every declared step, rejecting
+wrong-screen actions before a model or Simulator is involved.
+The contract also declares guaranteed app-level bootstrap/restoration roots. Flows without a
+normalizing auth/setup context must cover those roots. Expo semantic helpers require shared
+declaration objects so UI
+instrumentation and contract export cannot silently maintain different action lists.
+
+The MCP surface intentionally excludes Simulator lifecycle, raw hierarchy queries, selectors,
+coordinates, and direct WDA calls. A declared flow is one `flow.run` call. Zero-integration testing
+uses `flow.run`, bounded `flow.step` calls with exact host IDs, then `flow.finish`. This keeps speed
+and correctness in the host and makes model choice an orchestration detail rather than a testing
+capability decision.
+
+## Workspace operation ownership
+
+The macOS host and `lysd` share one advisory lock at `.lys/cache/workspace-operation.lock`.
+Expo prebuild, CocoaPods installation, project/test/target discovery, build, and test all acquire it
+before touching generated native state. Duplicate in-flight builds with the same generation and
+destination share one task and one result instead of queueing a second `xcodebuild`. After acquiring
+the lock, Lys rechecks that the selected container still exists.
+
+A successful target is persisted in `.lys/cache/last-successful-build.json` and reused while its app
+product still exists. An external `build.db` lock conflict is reported as host orchestration and
+does not create failed app evidence or discard the last successful artifact.
 
 ## Invariants
 
@@ -31,6 +83,11 @@ flowchart LR
 7. Coordinate actions are exploratory, nondeterministic, and are not verification artifacts; semantic selectors and assertions remain machine-verifiable.
 8. App Graph edges are observed, confidence-scored, build-scoped, deterministic, and invalidated on mismatch.
 9. Credential ownership remains with the selected agent. Diagnostics are explicitly exported and redacted.
+10. Lys contracts contain logical secret references only. Values resolve locally from Keychain and never enter prompts, tool results, or evidence.
+11. Destructive and external Lys actions require explicit host approval; agent arguments cannot self-authorize risk.
+12. A flow cannot complete without non-empty deterministic acceptance criteria and fresh host evidence.
+13. Every acceptance criterion must pass; an agent response ending or an exploratory run can never produce trusted verification.
+14. Only one generated-workspace operation may run at a time; duplicate builds coalesce and host orchestration failures never count as app failures.
 
 ## Persistence
 

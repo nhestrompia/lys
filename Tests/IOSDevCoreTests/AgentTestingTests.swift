@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import IOSDevCore
@@ -47,18 +48,53 @@ import Testing
   #expect(JourneySelector(label: "Start Quiz").elementSelector == nil)
 }
 
-@Test func goldenQuizTraceUsesOneHostOwnedJourneyWithoutLifecycleThrash() {
+@Test func tappedNavigationControlIsNotReassertedAfterItDisappears() {
+  let navigation = JourneyStep(
+    id: "open-quiz", title: "Open Practice Quiz", actionID: "action_start",
+    action: "tap", assertVisible: true)
+  #expect(!navigation.assertsCurrentActionVisibility)
+  #expect(navigation.requiresScreenChange)
+
+  let currentAssertion = JourneyStep(
+    id: "quiz-visible", title: "Quiz is visible", actionID: "action_answer_a",
+    assertVisible: true)
+  #expect(currentAssertion.assertsCurrentActionVisibility)
+  #expect(!currentAssertion.requiresScreenChange)
+}
+
+@Test func sparseAgentJourneyStepDoesNotRequireLegacyAssertionFlag() throws {
+  let payload = JSONValue.array([
+    .object([
+      "id": .string("start"),
+      "title": .string("Start quiz"),
+      "actionID": .string("action_start"),
+      "action": .string("tap"),
+      "expectScreenChanged": .bool(true),
+    ])
+  ])
+  let data = try JSONEncoder().encode(payload)
+  let steps = try JSONDecoder().decode([JourneyStep].self, from: data)
+
+  let step = try #require(steps.first)
+  #expect(step.id == "start")
+  #expect(step.actionID == "action_start")
+  #expect(step.action == "tap")
+  #expect(step.expectScreenChanged == true)
+  #expect(!step.assertVisible)
+}
+
+@Test func goldenDeclaredFlowTraceUsesOneHostOwnedCallWithoutLifecycleThrash() {
   let intent = AgentTaskIntentRouter.classify("Test the quiz and verify its score")
   let trace = [
     AgentToolTraceEntry("workspace.describe"),
+    AgentToolTraceEntry("app.describe"),
+    AgentToolTraceEntry("flow.list"),
     AgentToolTraceEntry(
-      "journey.run", arguments: .object(["goal": .string("Verify quiz scoring")])),
-    AgentToolTraceEntry(
-      "journey.run",
+      "flow.run",
       arguments: .object([
-        "goal": .string("Verify quiz scoring"), "journeyID": .string("journey-1"),
-        "steps": .array([]), "complete": .bool(true),
+        "goal": .string("Verify quiz scoring"), "flowID": .string("quiz.complete"),
       ])),
+    AgentToolTraceEntry("evidence.summary"),
   ]
   let report = AgentToolTraceValidator.validate(intent: intent, trace: trace)
   #expect(report.passed)
@@ -70,12 +106,12 @@ import Testing
   let intent = AgentTaskIntentRouter.classify("Test the quiz")
   let trace = [
     AgentToolTraceEntry("devserver.stop"), AgentToolTraceEntry("build.run"),
-    AgentToolTraceEntry("ui.perform"),
+    AgentToolTraceEntry("flow.step"),
   ]
   let report = AgentToolTraceValidator.validate(intent: intent, trace: trace)
   #expect(!report.passed)
   #expect(report.violations.contains { $0.contains("devserver.stop") })
   #expect(report.violations.contains { $0.contains("build.run") })
-  #expect(report.violations.contains { $0.contains("journey.run") })
+  #expect(report.violations.contains { $0.contains("flow.run") })
   #expect(report.violations.contains { $0.contains("evidence") })
 }

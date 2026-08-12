@@ -24,6 +24,13 @@ import Testing
     ).arguments == [
       "launch", "DEVICE", "com.example.app", "-RCT_jsLocation", "127.0.0.1:8081",
     ])
+  let authenticated = AppleCommandBuilder.authenticatedLaunch(
+    simctl: simctl, udid: "DEVICE", bundleID: "com.example.app",
+    developerDirectory: "/Applications/Xcode.app/Contents/Developer",
+    values: ["LYS_TEST_SESSION_TOKEN": "protected-value"])
+  #expect(authenticated.arguments == ["launch", "DEVICE", "com.example.app", "-LysTesting"])
+  #expect(!authenticated.arguments.contains("protected-value"))
+  #expect(authenticated.environment["SIMCTL_CHILD_LYS_TEST_SESSION_TOKEN"] == "protected-value")
   #expect(
     AppleCommandBuilder.statusBar(simctl: simctl, udid: "DEVICE", overrides: ["time": "09:41"])
       .arguments == ["status_bar", "DEVICE", "override", "--time", "09:41"])
@@ -46,6 +53,25 @@ import Testing
       "spawn", "DEVICE", "defaults", "write", "com.example.app", "RCT_enableDev", "-bool",
       "YES",
     ])
+
+  let axe = URL(fileURLWithPath: "/opt/homebrew/bin/axe")
+  #expect(
+    AppleCommandBuilder.axeKeyboard(
+      axe: axe, udid: "DEVICE", macKeyCode: 0, characters: "a",
+      charactersIgnoringModifiers: "a", modifiers: []
+    )?.arguments == ["type", "a", "--udid", "DEVICE"])
+  #expect(
+    AppleCommandBuilder.axeKeyboard(
+      axe: axe, udid: "DEVICE", macKeyCode: 0, characters: "a",
+      charactersIgnoringModifiers: "a", modifiers: [.command]
+    )?.arguments == [
+      "key-combo", "--modifiers", "227", "--key", "4", "--udid", "DEVICE",
+    ])
+  #expect(
+    AppleCommandBuilder.axeKeyboard(
+      axe: axe, udid: "DEVICE", macKeyCode: 51, characters: nil,
+      charactersIgnoringModifiers: nil, modifiers: []
+    )?.arguments == ["key", "42", "--udid", "DEVICE"])
 }
 
 @Test func processOutputIsBoundedAndMarked() async throws {

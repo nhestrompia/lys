@@ -149,22 +149,70 @@ public struct JourneyStep: Codable, Identifiable, Hashable, Sendable {
   public var id: String
   public var title: String
   public var criterionID: String?
+  /// Opaque, screen-bound capability ID returned by the host app description.
+  public var actionID: String?
   public var selector: JourneySelector?
   public var action: String?
   public var text: String?
+  /// Optional post-action assertion. Unlike the legacy assertVisible flag, this does not re-assert
+  /// the control that was just tapped and may have disappeared during navigation.
+  public var expectVisible: JourneySelector?
+  public var expectScreenChanged: Bool?
   public var assertVisible: Bool
 
   public init(
-    id: String, title: String, criterionID: String? = nil, selector: JourneySelector? = nil,
-    action: String? = nil, text: String? = nil, assertVisible: Bool = false
+    id: String, title: String, criterionID: String? = nil, actionID: String? = nil,
+    selector: JourneySelector? = nil, action: String? = nil, text: String? = nil,
+    expectVisible: JourneySelector? = nil, expectScreenChanged: Bool? = nil,
+    assertVisible: Bool = false
   ) {
     self.id = id
     self.title = title
     self.criterionID = criterionID
+    self.actionID = actionID
     self.selector = selector
     self.action = action
     self.text = text
+    self.expectVisible = expectVisible
+    self.expectScreenChanged = expectScreenChanged
     self.assertVisible = assertVisible
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case title
+    case criterionID
+    case actionID
+    case selector
+    case action
+    case text
+    case expectVisible
+    case expectScreenChanged
+    case assertVisible
+  }
+
+  /// Agent tool calls intentionally use sparse JSON. Keep newly added, optional journey behavior
+  /// backward compatible so a model never has to send legacy flags just to perform an action.
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(String.self, forKey: .id)
+    title = try values.decode(String.self, forKey: .title)
+    criterionID = try values.decodeIfPresent(String.self, forKey: .criterionID)
+    actionID = try values.decodeIfPresent(String.self, forKey: .actionID)
+    selector = try values.decodeIfPresent(JourneySelector.self, forKey: .selector)
+    action = try values.decodeIfPresent(String.self, forKey: .action)
+    text = try values.decodeIfPresent(String.self, forKey: .text)
+    expectVisible = try values.decodeIfPresent(JourneySelector.self, forKey: .expectVisible)
+    expectScreenChanged = try values.decodeIfPresent(Bool.self, forKey: .expectScreenChanged)
+    assertVisible = try values.decodeIfPresent(Bool.self, forKey: .assertVisible) ?? false
+  }
+
+  public var assertsCurrentActionVisibility: Bool {
+    action == nil && assertVisible && expectVisible == nil
+  }
+
+  public var requiresScreenChange: Bool {
+    expectScreenChanged == true || (action != nil && assertVisible && expectVisible == nil)
   }
 }
 
@@ -175,6 +223,11 @@ public enum JourneyStatus: String, Codable, Equatable, Sendable {
   case passed
   case failed
   case cancelled
+}
+
+public enum JourneyMode: String, Codable, Equatable, Sendable {
+  case declared
+  case exploratory
 }
 
 public enum JourneyStepStatus: String, Codable, Equatable, Sendable {
@@ -205,15 +258,20 @@ public struct JourneyStepResult: Codable, Identifiable, Sendable {
 public struct JourneyRecord: Codable, Identifiable, Sendable {
   public var id: UUID
   public var goal: String
+  public var mode: JourneyMode
   public var status: JourneyStatus
   public var steps: [JourneyStepResult]
   public var currentFingerprint: ScreenFingerprint?
   public var startedAt: Date
   public var updatedAt: Date
 
-  public init(id: UUID = UUID(), goal: String, status: JourneyStatus = .preparing) {
+  public init(
+    id: UUID = UUID(), goal: String, mode: JourneyMode = .exploratory,
+    status: JourneyStatus = .preparing
+  ) {
     self.id = id
     self.goal = goal
+    self.mode = mode
     self.status = status
     self.steps = []
     self.startedAt = Date()
@@ -305,24 +363,40 @@ public enum AgentToolTraceValidator {
       violations.append("\(entry.name) is outside the host tool policy")
     }
 
-    let journeyIndex = trace.firstIndex { $0.name == "journey.run" }
-    if intent.requiresRunningApp, journeyIndex == nil {
-      violations.append("journey.run was not used")
+    let flowIndex = trace.firstIndex { $0.name == "flow.run" }
+    if intent.requiresRunningApp, flowIndex == nil {
+      violations.append("flow.run was not used")
     }
-    if let firstDirectUI = trace.firstIndex(where: { ["ui.perform", "ui.navigate"].contains($0.name) }) {
-      if journeyIndex.map({ firstDirectUI < $0 }) ?? true {
-        violations.append("UI interaction occurred before the host-owned journey")
+    if let firstStep = trace.firstIndex(where: { $0.name == "flow.step" }) {
+      if flowIndex.map({ firstStep < $0 }) ?? true {
+        violations.append("flow.step occurred before the host-owned flow")
       }
     }
 
-    let submittedCompletion = trace.contains {
-      $0.name == "journey.run" && $0.arguments["complete"]?.boolValue == true
+    let declaredFlow = trace.contains {
+      $0.name == "flow.run" && $0.arguments["flowID"]?.stringValue != nil
+    }
+    let submittedCompletion = declaredFlow || trace.contains { $0.name == "flow.finish" }
+    let discoverySteps = trace.filter { $0.name == "flow.step" }
+    for entry in discoverySteps where entry.arguments["capabilityID"]?.stringValue == nil {
+      violations.append("a flow step did not use a host-issued capabilityID")
+    }
+    if submittedCompletion, intent.requiresRunningApp, !declaredFlow {
+      if discoverySteps.isEmpty {
+        violations.append("the completed discovered flow did not exercise an app capability")
+      }
+      if !discoverySteps.contains(where: {
+        $0.arguments["expectScreenChanged"]?.boolValue == true
+      }) {
+        violations.append(
+          "the completed discovered flow did not record a deterministic postcondition")
+      }
     }
     if requiresCompletion, intent.requiresRunningApp, !submittedCompletion {
-      violations.append("the journey was not completed with host-validated evidence")
+      violations.append("the flow was not completed with host-validated evidence")
     }
     return .init(
-      violations: violations, usedCompositeJourney: journeyIndex != nil,
+      violations: violations, usedCompositeJourney: flowIndex != nil,
       submittedCompletion: submittedCompletion)
   }
 }

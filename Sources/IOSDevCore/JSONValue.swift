@@ -56,6 +56,10 @@ public enum JSONValue: Codable, Hashable, Sendable {
     guard case .array(let value) = self else { return nil }
     return value
   }
+  public var objectValue: [String: JSONValue]? {
+    guard case .object(let value) = self else { return nil }
+    return value
+  }
   public var numberValue: Double? {
     if case .number(let value) = self { return value }
     return nil
