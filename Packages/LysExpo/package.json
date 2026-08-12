@@ -2,7 +2,7 @@
   "name": "@lys/testkit",
   "version": "0.3.0",
   "description": "Small semantic test contract for Lys and Expo/React Native apps",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "src/index.ts",
   "exports": {

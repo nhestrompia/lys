@@ -1,6 +1,7 @@
 {
   "name": "lys-monorepo",
   "private": true,
+  "license": "MIT",
   "workspaces": ["Packages/LysExpo"],
   "devDependencies": {
     "ajv": "^8.17.1"
