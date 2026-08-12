@@ -10,6 +10,9 @@
     "test:swift-sdk": "swift test --package-path Packages/LysSwift",
     "build:expo-sdk": "tsc --project Packages/LysExpo/tsconfig.json",
     "check:expo-sdk": "node Packages/LysExpo/scripts/check.mjs && node Packages/LysExpo/scripts/test.mjs",
-    "check:contract": "node Scripts/validate-contract.mjs"
+    "check:contract": "node Scripts/validate-contract.mjs",
+    "release:check": "node Scripts/validate-release.mjs",
+    "release:prepare": "./Scripts/prepare-release.sh",
+    "package:macos": "./Scripts/package-macos.sh"
   }
 }

@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-sdk="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
-swiftc="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+sdk="${LYS_MACOS_SDK:-$(xcrun --sdk macosx --show-sdk-path)}"
+swiftc="${LYS_SWIFTC:-$(xcrun --find swiftc)}"
 frameworks="/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
 testing_lib="/Library/Developer/CommandLineTools/Library/Developer/usr/lib"
 

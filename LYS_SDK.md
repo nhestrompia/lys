@@ -7,7 +7,8 @@ physical input, bounded flow execution, evidence, cancellation, and verification
 
 ## Monorepo packages
 
-- `Packages/LysSwift`: standalone Swift package, product `Lys`.
+- `Packages/LysSwift`: standalone Swift package, product `Lys`; stable releases mirror this subtree
+  to the `lys-swift` repository so the SDK retains its iOS 15 and macOS 13 deployment targets.
 - `Packages/LysExpo`: Expo module and TypeScript helpers, package `@lys/testkit`.
 - `Schemas/lys-test-contract.schema.json`: shared versioned wire contract.
 - `Examples/lys-contract.json`: authenticated-session and UI-auth flow example.

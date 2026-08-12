@@ -17,7 +17,7 @@ public enum LysBrand {
   }
 
   private static func loadImage(named name: String) -> NSImage? {
-    guard let url = Bundle.module.url(forResource: name, withExtension: "png") else {
+    guard let url = LysResourceBundle.ui.url(forResource: name, withExtension: "png") else {
       return nil
     }
     return NSImage(contentsOf: url)

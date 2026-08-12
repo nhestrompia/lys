@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  expo-sdk:
+    name: Expo / React Native SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build:expo-sdk
+      - run: npm run check:expo-sdk
+      - run: npm run check:contract
+      - name: Inspect the public npm payload
+        run: npm pack --workspace @lys/testkit --dry-run
+
+  swift:
+    name: macOS app and Swift SDK
+    runs-on: macos-26
+    env:
+      CLANG_MODULE_CACHE_PATH: ${{ runner.temp }}/lys-clang-module-cache
+      SWIFTPM_MODULECACHE_OVERRIDE: ${{ runner.temp }}/lys-swiftpm-module-cache
+    steps:
+      - uses: actions/checkout@v6
+      - name: Show toolchain
+        run: |
+          uname -m
+          swift --version
+          xcodebuild -version
+      - name: Test desktop app
+        run: swift test --disable-sandbox
+      - name: Test standalone Swift SDK package
+        run: swift test --package-path Packages/LysSwift --disable-sandbox
+      - name: Type-check the SDK for an iOS simulator
+        run: |
+          ios_sdk=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          swiftc=$(xcrun --find swiftc)
+          "$swiftc" \
+            -typecheck -module-name Lys \
+            -target arm64-apple-ios15.0-simulator \
+            -sdk "$ios_sdk" \
+            -module-cache-path "$RUNNER_TEMP/lys-ios-module-cache" \
+            Packages/LysSwift/Sources/Lys/*.swift
+      - name: Smoke-test helper executables
+        run: ./Scripts/smoke-binaries.sh
+      - name: Exercise a real SwiftPM consumer
+        run: |
+          swift run --package-path IntegrationTests/LysSwiftConsumer --disable-sandbox \
+            LysSwiftConsumer "$RUNNER_TEMP/lys-consumer-contract.json"
+          node -e 'const fs=require("node:fs"); const p=process.argv[1]; const v=JSON.parse(fs.readFileSync(p,"utf8")); if(v.flows[0].id!=="flow.finish") process.exit(1)' \
+            "$RUNNER_TEMP/lys-consumer-contract.json"

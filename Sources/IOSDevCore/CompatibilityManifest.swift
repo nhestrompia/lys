@@ -23,7 +23,15 @@ public struct WDACompatibilityManifest: Codable, Sendable {
     return value
   }
   public static func bundled() throws -> Self {
-    guard let url = Bundle.module.url(forResource: "wda-compatibility", withExtension: "json")
+    let resourceBundle: Bundle
+    if let resources = Bundle.main.resourceURL,
+      let packaged = Bundle(url: resources.appending(path: "Lys_IOSDevCore.bundle"))
+    {
+      resourceBundle = packaged
+    } else {
+      resourceBundle = Bundle.module
+    }
+    guard let url = resourceBundle.url(forResource: "wda-compatibility", withExtension: "json")
     else { throw RPCError(code: -32070, message: "Bundled WDA compatibility manifest is missing") }
     return try load(from: url)
   }

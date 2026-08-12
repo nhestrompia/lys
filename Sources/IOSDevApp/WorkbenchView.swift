@@ -3934,9 +3934,9 @@ private struct AgentMark: View {
   let id: String
   var size: CGFloat = 22
   var body: some View {
-    if let url = Bundle.module.url(
+    if let url = LysResourceBundle.ui.url(
       forResource: id, withExtension: "svg", subdirectory: "AgentIcons")
-      ?? Bundle.module.url(forResource: id, withExtension: "svg"),
+      ?? LysResourceBundle.ui.url(forResource: id, withExtension: "svg"),
       let image = NSImage(contentsOf: url)
     {
       Image(nsImage: image)

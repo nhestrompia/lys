@@ -4,6 +4,7 @@ node_modules/
 .DS_Store
 *.xcresult
 DerivedData/
+dist/
 .lys/cache/
 .lys/artifacts/
 .lys-baseline.json
