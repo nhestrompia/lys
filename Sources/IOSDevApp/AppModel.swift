@@ -255,6 +255,28 @@ public final class AppModel: ObservableObject {
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
   @Published var recoverableWorkspaces: [RecoverableWorkspace] = []
   @Published var testSecretIDs: [String] = BlueprintSecretStore.accounts()
+  @Published var appStoreConnection: AppStoreConnection?
+  @Published var appStoreApps: [AppStoreApp] = []
+  @Published var appStoreConnectionPhase: AppStoreConnectionPhase = .disconnected
+  @Published var appStoreConnectionError: String?
+  @Published var appStoreLastSyncedAt: Date?
+  @Published var appStoreDistributionTarget: AppTarget?
+  @Published var appStoreSelectedAppID: String?
+  @Published var appStoreVersions: [AppStoreVersion] = []
+  @Published var appStoreBuilds: [AppStoreBuild] = []
+  @Published var appStoreBetaGroups: [AppStoreBetaGroup] = []
+  @Published var appStoreLocalizations: [AppStoreVersionLocalization] = []
+  @Published var appStoreScreenshotSets: [AppStoreScreenshotSet] = []
+  @Published var appStoreFeedback: [AppStoreFeedback] = []
+  @Published var appStoreSelectedVersionID: String?
+  @Published var appStoreSelectedBuildID: String?
+  @Published var appStoreSectionErrors: [AppStoreDataSection: String] = [:]
+  @Published var appStoreDeploymentPhase: AppStoreDeploymentPhase = .idle
+  @Published var appStoreDeploymentError: String?
+  @Published var appStoreDeploymentLastSyncedAt: Date?
+  @Published var appStoreSelectionWarning: String?
+  @Published var appStoreMutationError: String?
+  @Published var isAppStoreMutationInProgress = false
   @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
@@ -266,6 +288,21 @@ public final class AppModel: ObservableObject {
 
   var selectedDestination: Destination? {
     destinations.first { $0.udid == selectedDestinationID }
+  }
+  var selectedAppStoreApp: AppStoreApp? {
+    if let appStoreSelectedAppID {
+      return appStoreApps.first { $0.id == appStoreSelectedAppID }
+    }
+    guard let bundleID = appStoreDistributionTarget?.bundleID ?? selectedTarget?.bundleID else {
+      return nil
+    }
+    return appStoreApps.first { $0.bundleID == bundleID }
+  }
+  var selectedAppStoreVersion: AppStoreVersion? {
+    appStoreVersions.first { $0.id == appStoreSelectedVersionID }
+  }
+  var selectedAppStoreBuild: AppStoreBuild? {
+    appStoreBuilds.first { $0.id == appStoreSelectedBuildID }
   }
   var taskWorkspace: URL? { activeWorktree ?? repository }
   var canBuild: Bool {
@@ -377,12 +414,14 @@ public final class AppModel: ObservableObject {
   private var baseline: BaselineManifest?
   private let workspaceManager = WorkspaceManager()
   private let runtime = RuntimeController()
+  let appStoreCredentialSession = AppStoreCredentialSession()
   private let runner = ProcessRunner()
   private let metroRunner = ProcessRunner()
   private let taskRoot: URL
   private let runtimeRoot: URL
   private let adapterRoot: URL
   private let wdaRoot: URL
+  let appStoreMetadataStore: SQLiteStore?
   private let wdaInstaller = WDAInstaller()
   private var activeACPClient: ACPClient?
   private var activeACPSessionID: String?
@@ -431,6 +470,8 @@ public final class AppModel: ObservableObject {
     runtimeRoot = root.appending(path: "Runtime", directoryHint: .isDirectory)
     adapterRoot = root.appending(path: "Adapters", directoryHint: .isDirectory)
     wdaRoot = root.appending(path: "WebDriverAgent", directoryHint: .isDirectory)
+    appStoreMetadataStore = try? SQLiteStore(
+      url: root.appending(path: "Deployments/metadata.sqlite3"))
     adapters = AdapterManager.detect(managedRoot: adapterRoot)
     selectedAdapterID = adapters.first(where: { $0.executable != nil })?.id ?? ""
     localAgentConfigOptions = Self.readLocalAgentConfigOptions(
@@ -458,6 +499,7 @@ public final class AppModel: ObservableObject {
     Task {
       await refreshToolchain()
       await refreshRecovery()
+      await loadAppStoreConnection()
     }
   }
 
@@ -557,6 +599,7 @@ public final class AppModel: ObservableObject {
     appOperation = .idle
     containers = ToolchainDiscovery.projectContainers(in: openedRepository)
     selectedContainer = containers.first
+    prepareAppStoreForProjectIdentityChange()
     files = Self.children(of: openedRepository, depth: 0)
     selectedFile = nil
     source = ""
@@ -584,6 +627,7 @@ public final class AppModel: ObservableObject {
   func selectContainer(_ url: URL) {
     resetPreviewInteraction()
     selectedContainer = url
+    prepareAppStoreForProjectIdentityChange()
     selectedTarget = nil
     selectedElement = nil
     hierarchyElements = []
@@ -594,6 +638,7 @@ public final class AppModel: ObservableObject {
   func selectScheme(_ scheme: String) {
     resetPreviewInteraction()
     selectedScheme = scheme
+    prepareAppStoreForProjectIdentityChange()
     selectedTarget = nil
     selectedElement = nil
     hierarchyElements = []
@@ -3231,6 +3276,29 @@ public final class AppModel: ObservableObject {
     guard let activeWorktree, let baseline else { return }
     proposedChanges = try await workspaceManager.proposedChanges(
       worktree: activeWorktree, baseline: baseline)
+  }
+
+  func discoverAppStoreDistributionTarget() async throws -> AppTarget {
+    guard let container = taskContainer(), !selectedScheme.isEmpty else {
+      throw RPCError(
+        code: -32056,
+        message: "Select an Xcode project or workspace and a shared app scheme first.")
+    }
+    let targets: [AppTarget] = try await runtime.request(
+      [AppTarget].self, method: "target.discover",
+      params: .object([
+        "container": .string(container.path), "scheme": .string(selectedScheme),
+        "configuration": .string("Release"),
+        "destination": .string("generic/platform=iOS"),
+      ]))
+    guard let target = targets.first else {
+      throw RPCError(
+        code: -32056,
+        message:
+          "The \(selectedScheme) scheme does not expose an iOS app target for the Release configuration."
+      )
+    }
+    return target
   }
 
   private func taskContainer() -> URL? {

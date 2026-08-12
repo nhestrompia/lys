@@ -1,6 +1,7 @@
 import AppKit
 import IOSDevCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum Studio {
   static let backdrop = Color(red: 0.965, green: 0.968, blue: 0.974)
@@ -14,6 +15,13 @@ private enum Studio {
   static let success = Color(red: 0.32, green: 0.70, blue: 0.38)
   static let warning = Color.orange
   static let panelRadius: CGFloat = 14
+}
+
+private extension String {
+  var nonempty: String? {
+    let value = trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
 }
 
 public struct WorkbenchView: View {
@@ -2900,6 +2908,9 @@ private struct DeployWorkspace: View {
   @EnvironmentObject var model: AppModel
   @State private var listTab: DeployListTab = .releases
   @State private var detailTab: DeployDetailTab = .overview
+  @State private var showsAppStoreConnection = false
+  @State private var testerEditorGroupID: String?
+  @State private var screenshotRemoval: ScreenshotRemoval?
 
   var body: some View {
     GeometryReader { geometry in
@@ -2935,6 +2946,50 @@ private struct DeployWorkspace: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .background(Studio.backdrop)
+    .sheet(isPresented: $showsAppStoreConnection) {
+      AppStoreConnectionSheet()
+        .environmentObject(model)
+    }
+    .sheet(
+      isPresented: Binding(
+        get: { testerEditorGroupID != nil },
+        set: { if !$0 { testerEditorGroupID = nil } })
+    ) {
+      if let testerEditorGroupID {
+        AppStoreTesterEditorSheet(groupID: testerEditorGroupID)
+          .environmentObject(model)
+      }
+    }
+    .alert(
+      "App does not match this repository",
+      isPresented: Binding(
+        get: { model.appStoreSelectionWarning != nil },
+        set: { if !$0 { model.appStoreSelectionWarning = nil } })
+    ) {
+      Button("OK") { model.appStoreSelectionWarning = nil }
+    } message: {
+      Text(model.appStoreSelectionWarning ?? "The project-matched app remains selected.")
+    }
+    .alert(item: $screenshotRemoval) { removal in
+      Alert(
+        title: Text("Remove screenshot?"),
+        message: Text("\(removal.fileName) will be deleted from App Store Connect. This cannot be undone."),
+        primaryButton: .destructive(Text("Remove")) {
+          Task { await model.removeAppStoreScreenshot(removal.id) }
+        },
+        secondaryButton: .cancel())
+    }
+    .task(id: deploymentContextKey) {
+      guard model.appStoreConnectionPhase == .connected else { return }
+      await model.refreshAppStoreDeploymentData()
+    }
+  }
+
+  private var deploymentContextKey: String {
+    [
+      model.appStoreConnection?.id.uuidString ?? "disconnected",
+      model.selectedContainer?.path ?? "no-container", model.selectedScheme,
+    ].joined(separator: "|")
   }
 
   private var releaseColumn: some View {
@@ -2945,6 +3000,42 @@ private struct DeployWorkspace: View {
         .font(.system(size: 11))
         .foregroundStyle(Studio.secondary)
         .padding(.top, 7)
+
+      if model.appStoreConnectionPhase != .connected {
+        Button {
+          showsAppStoreConnection = true
+        } label: {
+        HStack(spacing: 8) {
+          connectionIndicator
+          VStack(alignment: .leading, spacing: 2) {
+            Text(model.appStoreConnection?.label ?? "App Store Connect")
+              .font(.system(size: 10.5, weight: .semibold))
+              .foregroundStyle(Color.primary)
+            Text(connectionSubtitle)
+              .font(.system(size: 9.5))
+              .foregroundStyle(Studio.secondary)
+              .lineLimit(1)
+          }
+          Spacer(minLength: 6)
+          Image(systemName: model.appStoreConnection == nil ? "plus" : "ellipsis")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Studio.accent)
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 44)
+        .background(Studio.raised)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+      }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Connect App Store Connect")
+        .padding(.top, 16)
+      }
+
+      if model.appStoreConnectionPhase == .connected {
+        AppStoreAppPicker()
+          .environmentObject(model)
+          .padding(.top, 16)
+      }
 
       HStack(spacing: 2) {
         ForEach(DeployListTab.allCases) { tab in
@@ -2968,58 +3059,283 @@ private struct DeployWorkspace: View {
       .padding(2)
       .background(Studio.raised)
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .padding(.top, 22)
+      .padding(.top, model.selectedAppStoreApp == nil ? 22 : 12)
 
-      DeploySurface {
-        DeployEmptyState(
-          symbol: listTab == .releases ? "shippingbox" : "hammer",
-          title: listTab == .releases ? "No releases yet" : "No deployment builds yet",
-          detail: listTab == .releases
-            ? "Release history will appear here when TestFlight data is connected."
-            : "Builds prepared for distribution will appear here."
-        )
-      }
+      DeploySurface { deployListContent }
       .frame(maxHeight: .infinity)
       .padding(.top, 14)
+    }
+  }
+
+  @ViewBuilder private var deployListContent: some View {
+    switch model.appStoreConnectionPhase {
+    case .disconnected:
+      DeployEmptyState(
+        symbol: "lock.shield", title: "Connect to Apple",
+        detail: "Import a team API key to load real apps and TestFlight data.",
+        actionTitle: "Connect", action: { showsAppStoreConnection = true })
+    case .connecting, .refreshing:
+      VStack(spacing: 10) {
+        ProgressView().controlSize(.small)
+        Text(model.appStoreConnectionPhase == .connecting ? "Connecting…" : "Syncing apps…")
+          .font(.system(size: 11, weight: .semibold))
+        Text("Lys is authenticating directly with App Store Connect.")
+          .font(.system(size: 10))
+          .foregroundStyle(Studio.secondary)
+          .multilineTextAlignment(.center)
+      }
+      .padding(22)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    case .failed:
+      DeployEmptyState(
+        symbol: "exclamationmark.triangle", title: "Connection needs attention",
+        detail: model.appStoreConnectionError ?? "App Store Connect could not be reached.",
+        actionTitle: model.appStoreConnection == nil ? "Reconnect" : "Manage",
+        action: { showsAppStoreConnection = true })
+    case .connected:
+      if (model.appStoreDeploymentPhase == .discoveringTarget
+        || model.appStoreDeploymentPhase == .loading) && model.selectedAppStoreApp == nil
+      {
+        VStack(spacing: 10) {
+          ProgressView().controlSize(.small)
+          Text(model.appStoreDeploymentPhase == .discoveringTarget
+            ? "Matching Release target…" : "Loading Apple data…")
+            .font(.system(size: 11, weight: .semibold))
+          Text("Reading the Release bundle ID and matching it to an accessible app.")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+            .multilineTextAlignment(.center)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if model.selectedAppStoreApp == nil {
+        appStoreAppSelection
+      } else if listTab == .builds {
+        appStoreBuildList
+      } else {
+        appStoreReleaseList
+      }
+    }
+  }
+
+  private var appStoreAppSelection: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      VStack(alignment: .leading, spacing: 5) {
+        Text("Choose an app")
+          .font(.system(size: 11.5, weight: .semibold))
+        Text(model.appStoreDeploymentError ?? "Select the App Store record for this project.")
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      .padding(14)
+      Divider().overlay(Studio.separator)
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(model.appStoreApps) { app in
+            Button { model.selectAppStoreApp(app.id) } label: {
+              HStack(spacing: 9) {
+                Image(systemName: "app")
+                  .font(.system(size: 12))
+                  .foregroundStyle(Studio.accent)
+                  .frame(width: 26, height: 26)
+                  .background(Studio.accentSoft)
+                  .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                  Text(app.name).font(.system(size: 10.5, weight: .semibold)).lineLimit(1)
+                  Text(app.bundleID)
+                    .font(.system(size: 8.5).monospaced())
+                    .foregroundStyle(Studio.secondary)
+                    .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                  .font(.system(size: 8, weight: .semibold))
+                  .foregroundStyle(Studio.tertiary)
+              }
+              .padding(.horizontal, 12)
+              .frame(minHeight: 46)
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if app.id != model.appStoreApps.last?.id { Divider().overlay(Studio.separator) }
+          }
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+  }
+
+  @ViewBuilder private var appStoreReleaseList: some View {
+    if let error = model.appStoreSectionErrors[.versions] {
+      DeployEmptyState(
+        symbol: "exclamationmark.triangle", title: "Releases unavailable", detail: error,
+        actionTitle: "Retry", action: {
+          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+        })
+    } else if model.appStoreVersions.isEmpty && model.appStoreDeploymentPhase == .loading {
+      ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else if model.appStoreVersions.isEmpty {
+      DeployEmptyState(
+        symbol: "shippingbox", title: "No App Store versions",
+        detail: "Apple returned no iOS App Store versions for this app.")
+    } else {
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(model.appStoreVersions) { version in
+            Button { model.selectAppStoreVersion(version.id) } label: {
+              deployListRow(
+                title: "Version \(version.versionString)",
+                detail: friendlyAppStoreState(version.state),
+                selected: model.appStoreSelectedVersionID == version.id,
+                symbol: version.state == "READY_FOR_DISTRIBUTION" ? "checkmark.seal.fill" : "shippingbox")
+            }
+            .buttonStyle(.plain)
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder private var appStoreBuildList: some View {
+    if let error = model.appStoreSectionErrors[.builds] {
+      DeployEmptyState(
+        symbol: "exclamationmark.triangle", title: "Builds unavailable", detail: error,
+        actionTitle: "Retry", action: {
+          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+        })
+    } else if model.appStoreBuilds.isEmpty && model.appStoreDeploymentPhase == .loading {
+      ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else if model.appStoreBuilds.isEmpty {
+      DeployEmptyState(
+        symbol: "hammer", title: "No uploaded builds",
+        detail: "Apple returned no TestFlight builds for this app.")
+    } else {
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(model.appStoreBuilds) { build in
+            Button { model.selectAppStoreBuild(build.id) } label: {
+              deployListRow(
+                title: build.marketingVersion.map { "\($0) (\(build.version))" }
+                  ?? "Build \(build.version)",
+                detail: friendlyBuildState(build.processingState),
+                selected: model.appStoreSelectedBuildID == build.id,
+                symbol: build.processingState == "VALID" ? "checkmark.circle.fill" : "hammer")
+            }
+            .buttonStyle(.plain)
+          }
+        }
+      }
+    }
+  }
+
+  private func deployListRow(
+    title: String, detail: String, selected: Bool, symbol: String
+  ) -> some View {
+    HStack(spacing: 9) {
+      Image(systemName: symbol)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(selected ? Studio.accent : Studio.secondary)
+        .frame(width: 24, height: 24)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title).font(.system(size: 10.5, weight: .semibold)).lineLimit(1)
+        Text(detail).font(.system(size: 9)).foregroundStyle(Studio.secondary).lineLimit(1)
+      }
+      Spacer(minLength: 4)
+    }
+    .padding(.horizontal, 12)
+    .frame(minHeight: 48)
+    .background(selected ? Studio.accentSoft.opacity(0.75) : Color.clear)
+    .contentShape(Rectangle())
+  }
+
+  @ViewBuilder private var connectionIndicator: some View {
+    switch model.appStoreConnectionPhase {
+    case .connecting, .refreshing:
+      ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+    case .connected:
+      Image(systemName: "checkmark.circle.fill")
+        .font(.system(size: 12))
+        .foregroundStyle(Studio.success)
+    case .failed:
+      Image(systemName: "exclamationmark.triangle.fill")
+        .font(.system(size: 11))
+        .foregroundStyle(Studio.warning)
+    case .disconnected:
+      Image(systemName: "link")
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(Studio.accent)
+    }
+  }
+
+  private var connectionSubtitle: String {
+    switch model.appStoreConnectionPhase {
+    case .disconnected: "Not connected"
+    case .connecting: "Testing credentials"
+    case .refreshing: "Refreshing live data"
+    case .connected:
+      "Connected · \(model.appStoreApps.count) app\(model.appStoreApps.count == 1 ? "" : "s")"
+    case .failed: "Connection failed"
     }
   }
 
   private var detailColumn: some View {
     DeploySurface {
       VStack(alignment: .leading, spacing: 0) {
-        VStack(alignment: .leading, spacing: 5) {
-          Text("No release selected")
-            .font(.system(size: 20, weight: .bold))
-          Text("Choose a release after deployment data is connected.")
-            .font(.system(size: 10.5))
-            .foregroundStyle(Studio.secondary)
+        HStack(alignment: .top, spacing: 12) {
+          VStack(alignment: .leading, spacing: 5) {
+            Text(deployDetailTitle)
+              .font(.system(size: 20, weight: .bold))
+            Text(deployDetailSubtitle)
+              .font(.system(size: 10.5))
+              .foregroundStyle(Studio.secondary)
+          }
+          Spacer(minLength: 8)
+          if model.selectedAppStoreApp != nil {
+            Button {
+              Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+            } label: {
+              if model.appStoreDeploymentPhase == .loading {
+                ProgressView().controlSize(.mini)
+              } else {
+                Label("Sync", systemImage: "arrow.clockwise")
+              }
+            }
+            .controlSize(.small)
+            .disabled(model.appStoreDeploymentPhase == .loading)
+          }
         }
         .padding(.horizontal, 22)
         .padding(.top, 22)
 
         ScrollView(.horizontal) {
-          HStack(spacing: 25) {
+          HStack(spacing: 8) {
             ForEach(DeployDetailTab.allCases) { tab in
               Button {
                 detailTab = tab
               } label: {
-                VStack(spacing: 9) {
+                VStack(spacing: 0) {
                   Text(tab.rawValue)
                     .font(.system(size: 10.5, weight: detailTab == tab ? .semibold : .medium))
                     .foregroundStyle(detailTab == tab ? Color.primary : Studio.secondary)
+                    .frame(maxHeight: .infinity)
                   Rectangle()
                     .fill(detailTab == tab ? Color.primary : .clear)
                     .frame(height: 1)
                 }
+                .padding(.horizontal, 10)
+                .frame(minHeight: 42)
+                .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
+              .contentShape(Rectangle())
               .accessibilityLabel("Show deploy \(tab.rawValue.lowercased())")
             }
           }
           .padding(.horizontal, 22)
         }
         .scrollIndicators(.hidden)
-        .padding(.top, 24)
+        .padding(.top, 13)
 
         Divider().overlay(Studio.separator)
         detailContent
@@ -3028,17 +3344,53 @@ private struct DeployWorkspace: View {
     }
   }
 
+  private var deployDetailTitle: String {
+    if let version = model.selectedAppStoreVersion {
+      return "\(model.selectedAppStoreApp?.name ?? "App") \(version.versionString)"
+    }
+    if let app = model.selectedAppStoreApp { return app.name }
+    if model.appStoreConnectionPhase == .disconnected { return "Connect App Store Connect" }
+    if model.appStoreConnectionPhase == .failed { return "Connection needs attention" }
+    return "No release selected"
+  }
+
+  private var deployDetailSubtitle: String {
+    if let version = model.selectedAppStoreVersion {
+      return "iOS · \(friendlyAppStoreState(version.state))"
+    }
+    if let app = model.selectedAppStoreApp {
+      return "\(app.bundleID) · No App Store version selected"
+    }
+    if model.appStoreConnectionPhase == .disconnected {
+      return "Connect a Team API key to load apps, releases, builds, testers, and feedback."
+    }
+    if model.appStoreConnectionPhase == .failed {
+      return model.appStoreConnectionError ?? "App Store Connect could not be reached."
+    }
+    return model.appStoreDeploymentError ?? "Choose an accessible app to load deployment data."
+  }
+
   @ViewBuilder private var detailContent: some View {
     switch detailTab {
     case .overview:
-      ScrollView {
+      if model.appStoreConnectionPhase == .disconnected {
+        DeployEmptyState(
+          symbol: "lock.shield", title: "Connect to Apple",
+          detail: "Import a Team API key to request live deployment data.",
+          actionTitle: "Connect", action: { showsAppStoreConnection = true })
+      } else if model.selectedAppStoreApp == nil {
+        DeployEmptyState(
+          symbol: "app.badge", title: "Choose an app",
+          detail: "Select the App Store app for this project to load live deployment data.")
+      } else {
+        ScrollView {
         VStack(alignment: .leading, spacing: 0) {
           HStack(alignment: .top, spacing: 14) {
             deploySection(title: "App Preview") {
               appPreview
             }
-            deploySection(title: "Build Information") {
-              buildInformation
+            deploySection(title: "Release Information") {
+              releaseInformation
             }
             .frame(width: 250)
           }
@@ -3047,44 +3399,278 @@ private struct DeployWorkspace: View {
           Divider().overlay(Studio.separator)
           deployTextSection(
             title: "Processing",
-            detail: "Processing information will appear when a deployment build is active.")
+            detail: selectedBuildSummary)
           Divider().overlay(Studio.separator)
           deployTextSection(
             title: "What's New",
-            detail: "Release notes will appear here when they are available.")
+            detail: primaryWhatsNew ?? "Apple returned no release notes for this version.")
           Divider().overlay(Studio.separator)
           screenshotSection
         }
       }
+      }
     case .whatsNew:
+      appStoreWhatsNewContent
+    case .screenshots:
+      appStoreScreenshotsContent
+    case .testers:
+      appStoreTestersContent
+    case .feedback:
+      appStoreFeedbackContent
+    case .buildDetails:
+      appStoreBuildDetailsContent
+    }
+  }
+
+  @ViewBuilder private var appStoreWhatsNewContent: some View {
+    if model.selectedAppStoreVersion == nil {
+      DeployEmptyState(
+        symbol: "text.alignleft", title: "Choose a release",
+        detail: "Select an App Store version to load its localized release notes.")
+    } else if model.appStoreLocalizations.isEmpty {
       DeployEmptyState(
         symbol: "text.alignleft", title: "No release notes",
-        detail: "Release notes will appear when a release is selected.")
-    case .screenshots:
-      if let image = model.currentScreenshotImage {
-        Image(nsImage: image)
-          .resizable()
-          .scaledToFit()
-          .padding(24)
-      } else {
-        DeployEmptyState(
-          symbol: "photo.on.rectangle", title: "No release screenshots",
-          detail: "Screenshots attached to the selected release will appear here.")
+        detail: model.appStoreSectionErrors[.screenshots]
+          ?? "Apple returned no localized What's New text for this version.")
+    } else {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 0) {
+          ForEach(model.appStoreLocalizations) { localization in
+            VStack(alignment: .leading, spacing: 8) {
+              HStack {
+                Text(localization.locale)
+                  .font(.system(size: 11, weight: .semibold).monospaced())
+                Spacer()
+                if localization.locale == model.selectedAppStoreApp?.primaryLocale {
+                  Text("Primary")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(Studio.accent)
+                }
+              }
+              Text(localization.whatsNew?.nonempty ?? "No What's New text")
+                .font(.system(size: 10.5))
+                .foregroundStyle(localization.whatsNew?.nonempty == nil ? Studio.secondary : Color.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(20)
+            Divider().overlay(Studio.separator)
+          }
+        }
       }
-    case .testers:
+    }
+  }
+
+  @ViewBuilder private var appStoreScreenshotsContent: some View {
+    if model.selectedAppStoreVersion == nil {
       DeployEmptyState(
-        symbol: "person.2", title: "No tester data",
-        detail: "Tester access will appear when TestFlight data is connected.")
-    case .feedback:
+        symbol: "photo.on.rectangle", title: "Choose a release",
+        detail: "Select an App Store version to load its remote screenshot sets.")
+    } else if let error = model.appStoreSectionErrors[.screenshots],
+      model.appStoreScreenshotSets.isEmpty
+    {
       DeployEmptyState(
-        symbol: "bubble.left.and.bubble.right", title: "No feedback",
-        detail: "Tester feedback for the selected release will appear here.")
-    case .buildDetails:
-      VStack(alignment: .leading, spacing: 0) {
-        buildInformation
-          .padding(24)
-        Spacer(minLength: 0)
+        symbol: "exclamationmark.triangle", title: "Screenshots unavailable", detail: error,
+        actionTitle: "Retry", action: { Task { await model.loadSelectedAppStoreVersionDetails() } })
+    } else if model.appStoreScreenshotSets.isEmpty {
+      DeployEmptyState(
+        symbol: "photo.on.rectangle", title: "No remote screenshots",
+        detail: "Apple returned no screenshot sets for this App Store version.")
+    } else {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 22) {
+          if let error = model.appStoreMutationError {
+            Label(error, systemImage: "exclamationmark.triangle")
+              .font(.system(size: 9.5))
+              .foregroundStyle(Studio.warning)
+          }
+          ForEach(model.appStoreScreenshotSets) { set in
+            VStack(alignment: .leading, spacing: 10) {
+              HStack {
+                Text(set.locale).font(.system(size: 11, weight: .semibold).monospaced())
+                Text(friendlyScreenshotType(set.displayType))
+                  .font(.system(size: 9.5))
+                  .foregroundStyle(Studio.secondary)
+                Spacer()
+                Text("\(set.screenshots.count)")
+                  .font(.system(size: 9.5).monospacedDigit())
+                  .foregroundStyle(Studio.secondary)
+                Button {
+                  chooseScreenshot { url in
+                    Task { await model.addAppStoreScreenshot(fileURL: url, toSet: set.id) }
+                  }
+                } label: {
+                  Label("Add", systemImage: "plus")
+                }
+                .controlSize(.small)
+                .disabled(model.isAppStoreMutationInProgress)
+              }
+              LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 132, maximum: 180), spacing: 12)],
+                spacing: 12
+              ) {
+                ForEach(set.screenshots) { screenshot in
+                  VStack(alignment: .leading, spacing: 6) {
+                    AsyncImage(url: screenshot.downloadURL) { phase in
+                      switch phase {
+                      case .success(let image):
+                        image.resizable().scaledToFit()
+                      case .failure:
+                        Image(systemName: "photo.badge.exclamationmark")
+                          .font(.system(size: 22, weight: .light))
+                          .foregroundStyle(Studio.tertiary)
+                      default:
+                        ProgressView().controlSize(.small)
+                      }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 180, maxHeight: 260)
+                    .background(Studio.raised)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Text(screenshot.fileName)
+                      .font(.system(size: 9))
+                      .foregroundStyle(Studio.secondary)
+                      .lineLimit(1)
+                      .truncationMode(.middle)
+                    HStack(spacing: 6) {
+                      Button("Replace…") {
+                        chooseScreenshot { url in
+                          Task {
+                            await model.replaceAppStoreScreenshot(
+                              screenshot.id, with: url, inSet: set.id)
+                          }
+                        }
+                      }
+                      .controlSize(.mini)
+                      Button(role: .destructive) {
+                        screenshotRemoval = .init(id: screenshot.id, fileName: screenshot.fileName)
+                      } label: {
+                        Image(systemName: "trash")
+                      }
+                      .controlSize(.mini)
+                      .help("Remove from App Store Connect")
+                    }
+                    .disabled(model.isAppStoreMutationInProgress)
+                  }
+                }
+              }
+            }
+          }
+        }
+        .padding(20)
       }
+    }
+  }
+
+  @ViewBuilder private var appStoreTestersContent: some View {
+    if let error = model.appStoreSectionErrors[.testers] {
+      DeployEmptyState(
+        symbol: "exclamationmark.triangle", title: "Tester access unavailable", detail: error,
+        actionTitle: "Retry", action: {
+          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+        })
+    } else if model.appStoreBetaGroups.isEmpty {
+      DeployEmptyState(
+        symbol: "person.2", title: "No tester groups",
+        detail: "Apple returned no internal or external TestFlight groups for this app.")
+    } else {
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(model.appStoreBetaGroups) { group in
+            VStack(spacing: 0) {
+              HStack(spacing: 0) {
+                betaGroupRow(group)
+                Button("Manage…") { testerEditorGroupID = group.id }
+                  .controlSize(.small)
+                  .padding(.trailing, 20)
+              }
+              if group.testers.isEmpty {
+                Text("No individual testers in this group")
+                  .font(.system(size: 9.5))
+                  .foregroundStyle(Studio.secondary)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .padding(.leading, 58)
+                  .padding(.bottom, 14)
+              } else {
+                ForEach(group.testers) { tester in
+                  HStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle")
+                      .foregroundStyle(Studio.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                      Text(tester.email)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .textSelection(.enabled)
+                      if let name = tester.name {
+                        Text(name).font(.system(size: 9)).foregroundStyle(Studio.secondary)
+                      }
+                    }
+                    Spacer()
+                    Text(friendlyValue(tester.state))
+                      .font(.system(size: 8.5, weight: .medium))
+                      .foregroundStyle(Studio.secondary)
+                  }
+                  .padding(.leading, 58)
+                  .padding(.trailing, 20)
+                  .frame(minHeight: 42)
+                }
+              }
+            }
+            Divider().overlay(Studio.separator)
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder private var appStoreFeedbackContent: some View {
+    if let error = model.appStoreSectionErrors[.feedback], model.appStoreFeedback.isEmpty {
+      DeployEmptyState(
+        symbol: "exclamationmark.triangle", title: "Feedback unavailable", detail: error,
+        actionTitle: "Retry", action: {
+          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+        })
+    } else if model.appStoreFeedback.isEmpty {
+      DeployEmptyState(
+        symbol: "bubble.left.and.bubble.right", title: "No TestFlight feedback",
+        detail: "Apple returned no screenshot or crash feedback for this app.")
+    } else {
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(model.appStoreFeedback) { feedback in
+            feedbackRow(feedback)
+            Divider().overlay(Studio.separator)
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder private var appStoreBuildDetailsContent: some View {
+    if let build = model.selectedAppStoreBuild {
+      ScrollView {
+        VStack(spacing: 0) {
+          DeployInfoRow(label: "Version", value: build.marketingVersion ?? "Not reported")
+          DeployInfoRow(label: "Build", value: build.version)
+          DeployInfoRow(label: "Processing", value: friendlyBuildState(build.processingState))
+          DeployInfoRow(label: "Audience", value: friendlyValue(build.audienceType))
+          DeployInfoRow(label: "Minimum OS", value: build.minimumOSVersion ?? "Not reported")
+          DeployInfoRow(
+            label: "Uploaded",
+            value: build.uploadedDate?.formatted(date: .abbreviated, time: .shortened)
+              ?? "Not reported")
+          DeployInfoRow(
+            label: "Expires",
+            value: build.expirationDate?.formatted(date: .abbreviated, time: .shortened)
+              ?? "Not reported")
+          DeployInfoRow(
+            label: "Encryption",
+            value: build.usesNonExemptEncryption.map { $0 ? "Non-exempt" : "Exempt" }
+              ?? "Not reported")
+        }
+        .padding(24)
+      }
+    } else {
+      DeployEmptyState(
+        symbol: "hammer", title: "Choose a build",
+        detail: "Select a TestFlight build from the Builds list to inspect it.")
     }
   }
 
@@ -3095,13 +3681,31 @@ private struct DeployWorkspace: View {
           HStack {
             Text("Testers").font(.system(size: 12, weight: .semibold))
             Spacer()
+            if !model.appStoreBetaGroups.isEmpty {
+              Text("\(model.appStoreBetaGroups.count) groups")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.secondary)
+            }
           }
           .padding(.horizontal, 20)
           .frame(height: 54)
           Divider().overlay(Studio.separator)
-          DeployEmptyState(
-            symbol: "person.2", title: "No testers",
-            detail: "Tester groups and access will appear here.")
+          if model.appStoreBetaGroups.isEmpty {
+            DeployEmptyState(
+              symbol: "person.2", title: "No testers",
+              detail: model.appStoreConnectionPhase == .disconnected
+                ? "Connect App Store Connect to load TestFlight groups."
+                : (model.appStoreSectionErrors[.testers]
+                  ?? "Apple returned no TestFlight groups."))
+          } else {
+            ScrollView {
+              LazyVStack(spacing: 0) {
+                ForEach(Array(model.appStoreBetaGroups.prefix(6))) { group in
+                  betaGroupRow(group, compact: true)
+                }
+              }
+            }
+          }
         }
       }
       .frame(maxHeight: .infinity)
@@ -3113,9 +3717,22 @@ private struct DeployWorkspace: View {
             .padding(.horizontal, 20)
             .frame(height: 54)
           Divider().overlay(Studio.separator)
-          DeployEmptyState(
-            symbol: "bubble.left", title: "No feedback yet",
-            detail: "Feedback from connected tester groups will appear here.")
+          if model.appStoreFeedback.isEmpty {
+            DeployEmptyState(
+              symbol: "bubble.left", title: "No feedback yet",
+              detail: model.appStoreConnectionPhase == .disconnected
+                ? "Connect App Store Connect to load tester feedback."
+                : (model.appStoreSectionErrors[.feedback]
+                  ?? "Apple returned no TestFlight feedback."))
+          } else {
+            ScrollView {
+              LazyVStack(spacing: 0) {
+                ForEach(Array(model.appStoreFeedback.prefix(5))) { feedback in
+                  feedbackRow(feedback, compact: true)
+                }
+              }
+            }
+          }
         }
       }
       .frame(maxHeight: .infinity)
@@ -3124,30 +3741,42 @@ private struct DeployWorkspace: View {
 
   private var appPreview: some View {
     HStack(spacing: 15) {
-      Group {
-        if let image = model.currentScreenshotImage {
-          Image(nsImage: image).resizable().scaledToFill()
-        } else {
-          Image(systemName: "app.dashed")
-            .font(.system(size: 27, weight: .light))
-            .foregroundStyle(Studio.tertiary)
-        }
-      }
+      Image(systemName: model.selectedAppStoreApp == nil ? "app.dashed" : "app.badge.checkmark")
+        .font(.system(size: 27, weight: .light))
+        .foregroundStyle(model.selectedAppStoreApp == nil ? Studio.tertiary : Studio.accent)
       .frame(width: 82, height: 82)
       .background(Studio.raised)
       .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
       VStack(alignment: .leading, spacing: 5) {
-        Text(model.selectedScheme.isEmpty ? "No app selected" : model.selectedScheme)
+        Text(model.selectedAppStoreApp?.name ?? "No app selected")
           .font(.system(size: 16, weight: .bold))
           .lineLimit(1)
-        Text(model.selectedTarget == nil ? "Run a project to create an app preview." : "Current local app preview")
+        Text(model.selectedAppStoreApp?.bundleID ?? "Choose an accessible App Store app.")
           .font(.system(size: 10.5))
           .foregroundStyle(Studio.secondary)
+          .monospaced(model.selectedAppStoreApp != nil)
           .fixedSize(horizontal: false, vertical: true)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private var releaseInformation: some View {
+    VStack(spacing: 0) {
+      DeployInfoRow(
+        label: "Version", value: model.selectedAppStoreVersion?.versionString ?? "Not selected")
+      DeployInfoRow(
+        label: "Status",
+        value: model.selectedAppStoreVersion.map { friendlyAppStoreState($0.state) }
+          ?? "Not available")
+      DeployInfoRow(
+        label: "Release",
+        value: friendlyValue(model.selectedAppStoreVersion?.releaseType))
+      DeployInfoRow(
+        label: "Build",
+        value: buildForSelectedVersion?.version ?? model.selectedAppStoreBuild?.version ?? "Not attached")
+    }
   }
 
   private var buildInformation: some View {
@@ -3162,17 +3791,9 @@ private struct DeployWorkspace: View {
   private var screenshotSection: some View {
     VStack(alignment: .leading, spacing: 12) {
       Text("Screenshots").font(.system(size: 11.5, weight: .semibold))
-      if let image = model.currentScreenshotImage {
-        Image(nsImage: image)
-          .resizable()
-          .scaledToFill()
-          .frame(width: 104, height: 142)
-          .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-      } else {
-        Text("No release screenshots are available.")
-          .font(.system(size: 10.5))
-          .foregroundStyle(Studio.secondary)
-      }
+      Text(screenshotSummary)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
     }
     .padding(18)
   }
@@ -3201,6 +3822,361 @@ private struct DeployWorkspace: View {
     .padding(18)
     .frame(maxWidth: .infinity, alignment: .leading)
   }
+
+  private var primaryWhatsNew: String? {
+    let primaryLocale = model.selectedAppStoreApp?.primaryLocale
+    return model.appStoreLocalizations.first {
+      $0.locale.caseInsensitiveCompare(primaryLocale ?? "") == .orderedSame
+        && $0.whatsNew?.nonempty != nil
+    }?.whatsNew?.nonempty
+      ?? model.appStoreLocalizations.first { $0.whatsNew?.nonempty != nil }?.whatsNew?.nonempty
+  }
+
+  private var buildForSelectedVersion: AppStoreBuild? {
+    guard let buildID = model.selectedAppStoreVersion?.buildID else { return nil }
+    return model.appStoreBuilds.first { $0.id == buildID }
+  }
+
+  private var selectedBuildSummary: String {
+    guard let build = buildForSelectedVersion ?? model.selectedAppStoreBuild else {
+      return "No build is attached to the selected App Store version."
+    }
+    let version = build.marketingVersion.map { "\($0) (\(build.version))" } ?? build.version
+    return "Build \(version) · \(friendlyBuildState(build.processingState))"
+  }
+
+  private var screenshotSummary: String {
+    if let error = model.appStoreSectionErrors[.screenshots] { return error }
+    let count = model.appStoreScreenshotSets.reduce(0) { $0 + $1.screenshots.count }
+    guard count > 0 else { return "Apple returned no screenshots for the selected version." }
+    return "\(count) remote screenshot\(count == 1 ? "" : "s") across \(model.appStoreScreenshotSets.count) localized set\(model.appStoreScreenshotSets.count == 1 ? "" : "s")."
+  }
+
+  private func betaGroupRow(_ group: AppStoreBetaGroup, compact: Bool = false) -> some View {
+    HStack(spacing: 10) {
+      Image(systemName: group.isInternal ? "person.2.fill" : "globe")
+        .font(.system(size: compact ? 10 : 12, weight: .medium))
+        .foregroundStyle(group.isInternal ? Studio.accent : Studio.secondary)
+        .frame(width: compact ? 22 : 28, height: compact ? 22 : 28)
+        .background(group.isInternal ? Studio.accentSoft : Studio.raised)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+      VStack(alignment: .leading, spacing: 3) {
+        Text(group.name)
+          .font(.system(size: compact ? 9.5 : 11, weight: .semibold))
+          .lineLimit(1)
+        HStack(spacing: 5) {
+          Text(group.isInternal ? "Internal" : "External")
+          if let count = group.testerCount { Text("· \(count) tester\(count == 1 ? "" : "s")") }
+        }
+        .font(.system(size: compact ? 8.5 : 9.5))
+        .foregroundStyle(Studio.secondary)
+      }
+      Spacer(minLength: 4)
+      if group.hasAccessToAllBuilds {
+        Image(systemName: "infinity")
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+          .help("Access to all builds")
+      }
+    }
+    .padding(.horizontal, compact ? 12 : 20)
+    .frame(minHeight: compact ? 42 : 56)
+  }
+
+  private func feedbackRow(_ feedback: AppStoreFeedback, compact: Bool = false) -> some View {
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: feedback.kind == .crash ? "exclamationmark.triangle" : "bubble.left")
+        .font(.system(size: compact ? 10 : 12, weight: .medium))
+        .foregroundStyle(feedback.kind == .crash ? Studio.warning : Studio.accent)
+        .frame(width: compact ? 22 : 28, height: compact ? 22 : 28)
+        .background(feedback.kind == .crash ? Studio.raised : Studio.accentSoft)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+      VStack(alignment: .leading, spacing: 4) {
+        Text(feedback.comment?.nonempty ?? (feedback.kind == .crash ? "Crash report" : "Screenshot feedback"))
+          .font(.system(size: compact ? 9.5 : 10.5, weight: .semibold))
+          .lineLimit(compact ? 2 : 4)
+        HStack(spacing: 4) {
+          if let device = feedback.deviceModel { Text(device) }
+          if let os = feedback.osVersion { Text("· \(os)") }
+          if let date = feedback.createdDate {
+            Text("· \(date.formatted(date: .abbreviated, time: .omitted))")
+          }
+        }
+        .font(.system(size: compact ? 8.5 : 9.5))
+        .foregroundStyle(Studio.secondary)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, compact ? 12 : 20)
+    .padding(.vertical, compact ? 9 : 14)
+  }
+
+  private func friendlyAppStoreState(_ value: String) -> String {
+    switch value {
+    case "READY_FOR_DISTRIBUTION", "READY_FOR_SALE": "Ready for Distribution"
+    case "PREPARE_FOR_SUBMISSION": "Prepare for Submission"
+    case "WAITING_FOR_REVIEW": "Waiting for Review"
+    case "IN_REVIEW": "In Review"
+    case "PENDING_DEVELOPER_RELEASE": "Pending Developer Release"
+    case "PROCESSING_FOR_DISTRIBUTION", "PROCESSING_FOR_APP_STORE": "Processing"
+    default: friendlyValue(value)
+    }
+  }
+
+  private func friendlyBuildState(_ value: String) -> String {
+    switch value {
+    case "VALID": "Ready"
+    case "PROCESSING": "Processing"
+    case "FAILED": "Processing Failed"
+    case "INVALID": "Invalid"
+    default: friendlyValue(value)
+    }
+  }
+
+  private func friendlyScreenshotType(_ value: String) -> String {
+    value.replacingOccurrences(of: "APP_", with: "")
+      .replacingOccurrences(of: "_", with: " ")
+      .capitalized
+  }
+
+  private func friendlyValue(_ value: String?) -> String {
+    guard let value = value?.nonempty else { return "Not reported" }
+    return value.replacingOccurrences(of: "_", with: " ").capitalized
+  }
+
+  private func chooseScreenshot(_ completion: (URL) -> Void) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [.png, .jpeg]
+    panel.prompt = "Choose Screenshot"
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    completion(url)
+  }
+}
+
+private struct ScreenshotRemoval: Identifiable {
+  var id: String
+  var fileName: String
+}
+
+private struct AppStoreAppPicker: View {
+  @EnvironmentObject var model: AppModel
+  @State private var isPresented = false
+  @State private var search = ""
+
+  private var filteredApps: [AppStoreApp] {
+    guard let query = search.nonempty?.lowercased() else { return model.appStoreApps }
+    return model.appStoreApps.filter {
+      $0.name.lowercased().contains(query) || $0.bundleID.lowercased().contains(query)
+    }
+  }
+
+  var body: some View {
+    Button { isPresented.toggle() } label: {
+      HStack(spacing: 9) {
+        Image(systemName: model.selectedAppStoreApp == nil ? "app.dashed" : "app.badge.checkmark")
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(Studio.accent)
+          .frame(width: 28, height: 28)
+          .background(Studio.accentSoft)
+          .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        VStack(alignment: .leading, spacing: 2) {
+          Text(model.selectedAppStoreApp?.name ?? "Choose an app")
+            .font(.system(size: 10.5, weight: .semibold))
+            .lineLimit(1)
+          Text(model.selectedAppStoreApp?.bundleID ?? "Search accessible apps")
+            .font(.system(size: 8.5).monospaced())
+            .foregroundStyle(Studio.secondary)
+            .lineLimit(1)
+        }
+        Spacer(minLength: 5)
+        Image(systemName: "chevron.up.chevron.down")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(Studio.tertiary)
+      }
+      .padding(.horizontal, 9)
+      .frame(height: 44)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .background(Studio.surface)
+    .overlay {
+      RoundedRectangle(cornerRadius: 9, style: .continuous)
+        .stroke(Studio.separator, lineWidth: 1)
+    }
+    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    .popover(isPresented: $isPresented, arrowEdge: .trailing) {
+      VStack(spacing: 0) {
+        HStack(spacing: 9) {
+          Image(systemName: "magnifyingglass").foregroundStyle(Studio.secondary)
+          TextField("Search apps…", text: $search)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12))
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 48)
+        Divider().overlay(Studio.separator)
+        ScrollView {
+          LazyVStack(spacing: 4) {
+            ForEach(filteredApps) { app in
+              let matchesProject = model.appStoreDistributionTarget.map {
+                $0.bundleID == app.bundleID
+              }
+              Button {
+                _ = model.selectAppStoreApp(app.id)
+                isPresented = false
+              } label: {
+                HStack(spacing: 12) {
+                  Image(systemName: "app")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Studio.secondary)
+                    .frame(width: 28, height: 28)
+                  VStack(alignment: .leading, spacing: 3) {
+                    Text(app.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    Text(app.bundleID)
+                      .font(.system(size: 9.5).monospaced())
+                      .foregroundStyle(Studio.secondary)
+                      .lineLimit(1)
+                  }
+                  Spacer()
+                  if matchesProject == true {
+                    Text("Project")
+                      .font(.system(size: 8.5, weight: .semibold))
+                      .foregroundStyle(Studio.accent)
+                  } else if matchesProject == false {
+                    Image(systemName: "exclamationmark.triangle")
+                      .font(.system(size: 10))
+                      .foregroundStyle(Studio.warning)
+                  }
+                  if model.selectedAppStoreApp?.id == app.id {
+                    Image(systemName: "checkmark")
+                      .font(.system(size: 11, weight: .bold))
+                      .foregroundStyle(Studio.accent)
+                  }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 54)
+                .background(model.selectedAppStoreApp?.id == app.id ? Studio.accentSoft : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+            }
+          }
+          .padding(10)
+        }
+        if let target = model.appStoreDistributionTarget {
+          Divider().overlay(Studio.separator)
+          Label("Locked to Release bundle ID \(target.bundleID)", systemImage: "lock.shield")
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.secondary)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+        }
+      }
+      .frame(width: 370, height: 360)
+    }
+  }
+}
+
+private struct AppStoreTesterEditorSheet: View {
+  @EnvironmentObject var model: AppModel
+  @Environment(\.dismiss) private var dismiss
+  let groupID: String
+  @State private var email = ""
+  @State private var firstName = ""
+  @State private var lastName = ""
+  @State private var pendingRemoval: AppStoreBetaTester?
+
+  private var group: AppStoreBetaGroup? {
+    model.appStoreBetaGroups.first { $0.id == groupID }
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        VStack(alignment: .leading, spacing: 3) {
+          Text(group?.name ?? "TestFlight Testers").font(.system(size: 17, weight: .bold))
+          Text("Email identities are fixed by Apple. Add or remove group membership here.")
+            .font(.system(size: 10)).foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+      }
+      .padding(20)
+      Divider().overlay(Studio.separator)
+
+      VStack(alignment: .leading, spacing: 10) {
+        Text("Add tester").font(.system(size: 11, weight: .semibold))
+        TextField("Email", text: $email).textFieldStyle(.roundedBorder)
+        HStack {
+          TextField("First name (optional)", text: $firstName).textFieldStyle(.roundedBorder)
+          TextField("Last name (optional)", text: $lastName).textFieldStyle(.roundedBorder)
+          Button("Add") {
+            Task {
+              if await model.addAppStoreBetaTester(
+                email: email, firstName: firstName, lastName: lastName, groupID: groupID)
+              {
+                email = ""
+                firstName = ""
+                lastName = ""
+              }
+            }
+          }
+          .disabled(email.nonempty == nil || model.isAppStoreMutationInProgress)
+        }
+        if let error = model.appStoreMutationError {
+          Label(error, systemImage: "exclamationmark.triangle")
+            .font(.system(size: 9.5)).foregroundStyle(Studio.warning)
+        }
+      }
+      .padding(20)
+      Divider().overlay(Studio.separator)
+
+      if group?.testers.isEmpty != false {
+        DeployEmptyState(
+          symbol: "person.badge.plus", title: "No individual testers",
+          detail: "Add an email above to enroll a tester in this group.")
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 0) {
+            ForEach(group?.testers ?? []) { tester in
+              HStack(spacing: 12) {
+                Image(systemName: "person.crop.circle").foregroundStyle(Studio.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                  Text(tester.email).font(.system(size: 11, weight: .medium)).textSelection(.enabled)
+                  Text(tester.name ?? "No name provided")
+                    .font(.system(size: 9.5)).foregroundStyle(Studio.secondary)
+                }
+                Spacer()
+                Button(role: .destructive) { pendingRemoval = tester } label: {
+                  Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Remove from this group")
+              }
+              .padding(.horizontal, 20)
+              .frame(minHeight: 52)
+              Divider().overlay(Studio.separator)
+            }
+          }
+        }
+      }
+    }
+    .frame(width: 560, height: 560)
+    .background(Studio.backdrop)
+    .alert(item: $pendingRemoval) { tester in
+      Alert(
+        title: Text("Remove tester from group?"),
+        message: Text("\(tester.email) will lose access through \(group?.name ?? "this group")."),
+        primaryButton: .destructive(Text("Remove")) {
+          Task { await model.removeAppStoreBetaTester(tester.id, fromGroup: groupID) }
+        },
+        secondaryButton: .cancel())
+    }
+  }
 }
 
 private struct DeploySurface<Content: View>: View {
@@ -3218,10 +4194,313 @@ private struct DeploySurface<Content: View>: View {
   }
 }
 
+private struct AppStoreConnectionSheet: View {
+  @EnvironmentObject var model: AppModel
+  @Environment(\.dismiss) private var dismiss
+  @State private var label = "App Store Connect"
+  @State private var keyID = ""
+  @State private var issuerID = ""
+  @State private var privateKeyURL: URL?
+  @State private var showsReplacementForm = false
+
+  private var isWorking: Bool {
+    model.appStoreConnectionPhase == .connecting
+      || model.appStoreConnectionPhase == .refreshing
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 11) {
+        Image(systemName: "lock.shield.fill")
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundStyle(Studio.accent)
+          .frame(width: 32, height: 32)
+          .background(Studio.accentSoft)
+          .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        VStack(alignment: .leading, spacing: 3) {
+          Text("App Store Connect")
+            .font(.system(size: 15, weight: .semibold))
+          Text("Secure access for app data, signing, and deployment.")
+            .font(.system(size: 10.5))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        Button { dismiss() } label: {
+          Image(systemName: "xmark.circle.fill")
+            .font(.system(size: 16))
+            .symbolRenderingMode(.hierarchical)
+            .foregroundStyle(Studio.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Close")
+        .accessibilityLabel("Close")
+          .keyboardShortcut(.cancelAction)
+          .disabled(isWorking)
+      }
+      .padding(.horizontal, 18)
+      .padding(.vertical, 16)
+
+      Divider().overlay(Studio.separator)
+
+      if let connection = model.appStoreConnection, !showsReplacementForm {
+        currentConnection(connection)
+      } else {
+        connectionForm
+      }
+    }
+    .frame(width: 456)
+    .background(Studio.surface)
+    .interactiveDismissDisabled(isWorking)
+  }
+
+  private func currentConnection(_ connection: AppStoreConnection) -> some View {
+    VStack(alignment: .leading, spacing: 16) {
+      HStack(alignment: .center, spacing: 11) {
+        Image(systemName: model.appStoreConnectionPhase == .connected
+          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+          .font(.system(size: 17))
+          .foregroundStyle(
+            model.appStoreConnectionPhase == .connected ? Studio.success : Studio.warning)
+        VStack(alignment: .leading, spacing: 4) {
+          Text(model.appStoreConnectionPhase == .connected ? "Connected" : "Connection needs attention")
+            .font(.system(size: 12, weight: .semibold))
+          Text(model.appStoreConnectionPhase == .connected
+            ? "Apple returned \(model.appStoreApps.count) accessible app\(model.appStoreApps.count == 1 ? "" : "s")."
+            : "The saved connection could not be validated.")
+            .font(.system(size: 10.5))
+            .foregroundStyle(Studio.secondary)
+        }
+      }
+
+      VStack(spacing: 0) {
+        connectionValue("Name", connection.label)
+        Divider().overlay(Studio.separator)
+        connectionValue("Key type", "Team API key")
+        Divider().overlay(Studio.separator)
+        connectionValue("Key ID", connection.keyID, monospaced: true)
+        Divider().overlay(Studio.separator)
+        connectionValue("Issuer ID", connection.issuerID ?? "Missing", monospaced: true)
+        if let lastSync = model.appStoreLastSyncedAt {
+          Divider().overlay(Studio.separator)
+          connectionValue(
+            "Last synced",
+            lastSync.formatted(date: .abbreviated, time: .shortened))
+        }
+      }
+      .background(Studio.raised)
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+      errorMessage
+
+      HStack {
+        Button("Disconnect", role: .destructive) {
+          Task {
+            await model.disconnectAppStore()
+            if model.appStoreConnection == nil { dismiss() }
+          }
+        }
+        .disabled(isWorking)
+        Spacer()
+        Button("Replace Key…") { showsReplacementForm = true }
+          .disabled(isWorking)
+        Button {
+          Task { await model.refreshAppStoreConnection() }
+        } label: {
+          if model.appStoreConnectionPhase == .refreshing {
+            ProgressView().controlSize(.small)
+          } else {
+            Text("Sync Now")
+          }
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(isWorking)
+      }
+    }
+    .padding(18)
+  }
+
+  private var connectionForm: some View {
+    VStack(alignment: .leading, spacing: 15) {
+      VStack(alignment: .leading, spacing: 5) {
+        Text("Team API key").font(.system(size: 12, weight: .semibold))
+        Text("Enter a least-privileged team key from Users and Access → Integrations.")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
+      Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 11) {
+        GridRow {
+          formLabel("Name")
+          TextField("App Store Connect", text: $label)
+            .textFieldStyle(.roundedBorder)
+        }
+        GridRow {
+          formLabel("Key ID")
+          TextField("ABC123DEFG", text: $keyID)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11).monospaced())
+        }
+        GridRow {
+          formLabel("Issuer ID")
+          TextField("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", text: $issuerID)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11).monospaced())
+        }
+        GridRow(alignment: .center) {
+          formLabel("Private key")
+          HStack(spacing: 7) {
+            Image(systemName: privateKeyURL == nil ? "doc.badge.key" : "checkmark.circle.fill")
+              .font(.system(size: 11, weight: .medium))
+              .foregroundStyle(privateKeyURL == nil ? Studio.tertiary : Studio.success)
+            Text(privateKeyURL?.lastPathComponent ?? "No .p8 file selected")
+              .font(.system(size: 10.5, weight: privateKeyURL == nil ? .regular : .medium))
+              .foregroundStyle(privateKeyURL == nil ? Studio.secondary : Color.primary)
+              .lineLimit(1)
+              .truncationMode(.middle)
+            Spacer(minLength: 6)
+            Button("Choose…", action: choosePrivateKey)
+              .controlSize(.small)
+          }
+          .padding(.leading, 8)
+          .padding(.trailing, 4)
+          .frame(height: 30)
+          .background(Color(nsColor: .controlBackgroundColor))
+          .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+          .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+              .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+          }
+        }
+      }
+
+      HStack(spacing: 6) {
+        Image(systemName: "lock.fill")
+          .font(.system(size: 8.5, weight: .semibold))
+        Text("The private key is validated before it is saved to this Mac's Keychain.")
+      }
+      .font(.system(size: 9.5))
+      .foregroundStyle(Studio.secondary)
+      .padding(.leading, 88)
+
+      errorMessage
+
+      HStack {
+        Link(
+          "Create API Key ↗",
+          destination: URL(string: "https://appstoreconnect.apple.com/access/integrations/api")!)
+          .font(.system(size: 10.5))
+        Spacer()
+        Button("Cancel") {
+          if model.appStoreConnection != nil {
+            showsReplacementForm = false
+          } else {
+            dismiss()
+          }
+        }
+        .keyboardShortcut(.cancelAction)
+        .disabled(isWorking)
+        Button {
+          guard let privateKeyURL else { return }
+          Task {
+            if await model.connectAppStore(
+              label: label, keyID: keyID, issuerID: issuerID,
+              privateKeyURL: privateKeyURL)
+            {
+              dismiss()
+            }
+          }
+        } label: {
+          if model.appStoreConnectionPhase == .connecting {
+            ProgressView().controlSize(.small)
+          } else {
+            Text("Connect")
+          }
+        }
+        .buttonStyle(.borderedProminent)
+        .keyboardShortcut(.defaultAction)
+        .disabled(
+          isWorking || label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || keyID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || issuerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || privateKeyURL == nil)
+      }
+      .padding(.top, 2)
+    }
+    .padding(18)
+  }
+
+  private func formLabel(_ title: String) -> some View {
+    Text(title)
+      .font(.system(size: 10.5, weight: .medium))
+      .foregroundStyle(Studio.secondary)
+      .frame(width: 76, alignment: .trailing)
+  }
+
+  @ViewBuilder private var errorMessage: some View {
+    if let error = model.appStoreConnectionError, !error.isEmpty {
+      Label(error, systemImage: "exclamationmark.triangle.fill")
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.warning)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel("App Store Connect error: \(error)")
+    }
+  }
+
+  private func connectionValue(_ label: String, _ value: String, monospaced: Bool = false)
+    -> some View
+  {
+    HStack(spacing: 12) {
+      Text(label)
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.secondary)
+        .frame(width: 74, alignment: .leading)
+      Text(value)
+        .font(monospaced ? .system(size: 10, weight: .medium).monospaced() : .system(size: 10, weight: .medium))
+        .lineLimit(1)
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 12)
+    .frame(minHeight: 38)
+  }
+
+  private func choosePrivateKey() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = true
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [UTType(filenameExtension: "p8") ?? .data]
+    panel.prompt = "Choose Private Key"
+    guard panel.runModal() == .OK else { return }
+    privateKeyURL = panel.url
+  }
+}
+
+public struct AppStoreConnectionSnapshotView: View {
+  public init() {}
+
+  public var body: some View {
+    AppStoreConnectionSheet()
+  }
+}
+
 private struct DeployEmptyState: View {
   let symbol: String
   let title: String
   let detail: String
+  let actionTitle: String?
+  let action: (() -> Void)?
+
+  init(
+    symbol: String, title: String, detail: String, actionTitle: String? = nil,
+    action: (() -> Void)? = nil
+  ) {
+    self.symbol = symbol
+    self.title = title
+    self.detail = detail
+    self.actionTitle = actionTitle
+    self.action = action
+  }
 
   var body: some View {
     VStack(spacing: 9) {
@@ -3235,6 +4514,12 @@ private struct DeployEmptyState: View {
         .foregroundStyle(Studio.secondary)
         .multilineTextAlignment(.center)
         .frame(maxWidth: 230)
+      if let actionTitle, let action {
+        Button(actionTitle, action: action)
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
+          .padding(.top, 3)
+      }
     }
     .padding(22)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3559,6 +4844,7 @@ private struct SettingsWorkspace: View {
   @EnvironmentObject var model: AppModel
   @State private var testSecretID = ""
   @State private var testSecretValue = ""
+  @State private var showsAppStoreConnection = false
 
   var body: some View {
     VStack(spacing: 0) {
@@ -3578,6 +4864,18 @@ private struct SettingsWorkspace: View {
 
       ScrollView {
         VStack(alignment: .leading, spacing: 24) {
+        SettingsGroup(title: "App Store Connect") {
+          SettingRow(
+            symbol: model.appStoreConnectionPhase == .connected
+              ? "checkmark.shield.fill" : "link.badge.plus",
+            title: model.appStoreConnection?.label ?? "Connect Apple account",
+            detail: appStoreConnectionDetail
+          ) {
+            Button(model.appStoreConnection == nil ? "Connect…" : "Manage…") {
+              showsAppStoreConnection = true
+            }
+          }
+        }
         SettingsGroup(title: "Apple toolchain") {
           SettingRow(
             symbol: "hammer",
@@ -3700,6 +4998,22 @@ private struct SettingsWorkspace: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
     .background(Studio.backdrop)
+    .sheet(isPresented: $showsAppStoreConnection) {
+      AppStoreConnectionSheet().environmentObject(model)
+    }
+  }
+  private var appStoreConnectionDetail: String {
+    switch model.appStoreConnectionPhase {
+    case .connected:
+      let sync = model.appStoreLastSyncedAt?.formatted(date: .abbreviated, time: .shortened)
+        ?? "not synced"
+      return "Connected · \(model.appStoreApps.count) accessible app\(model.appStoreApps.count == 1 ? "" : "s") · synced \(sync)"
+    case .connecting: return "Validating the Team API key with Apple."
+    case .refreshing: return "Refreshing accessible apps from Apple."
+    case .failed: return model.appStoreConnectionError ?? "The connection needs attention."
+    case .disconnected:
+      return "Use a Team API key. The private key stays in this Mac's Keychain."
+    }
   }
   private var toolchainDetail: String {
     if let version = model.preflight?.xcodeVersion, let build = model.preflight?.xcodeBuild {
