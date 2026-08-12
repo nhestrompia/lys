@@ -86,3 +86,61 @@ import Testing
   #expect(ruler.ruleThickness >= 38)
   #expect(brightTextPixels > 20)
 }
+
+@MainActor
+@Test func editorSelectionAndScrollerRemainVisibleOnTheDarkSurface() {
+  let selectionBackground = CodeEditorTheme.selectionAttributes[.backgroundColor] as? NSColor
+  let selectionText = CodeEditorTheme.selectionAttributes[.foregroundColor] as? NSColor
+
+  #expect(selectionBackground == CodeEditorTheme.selectionBackground)
+  #expect(selectionText == CodeEditorTheme.selectionText)
+  #expect(contrastRatio(CodeEditorTheme.selectionText, CodeEditorTheme.selectionBackground) >= 4.5)
+  #expect(contrastRatio(CodeEditorScroller.knobColor, CodeEditorTheme.background) >= 3)
+
+  let scroller = CodeEditorScroller(frame: NSRect(x: 0, y: 0, width: 14, height: 180))
+  scroller.knobProportion = 0.25
+  scroller.doubleValue = 0.4
+  let image = NSImage(size: scroller.bounds.size)
+  image.lockFocus()
+  NSColor.clear.setFill()
+  scroller.bounds.fill(using: .copy)
+  scroller.drawKnob()
+  image.unlockFocus()
+
+  let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
+  var visibleKnobPixels = 0
+  for x in 0..<bitmap.pixelsWide {
+    for y in 0..<bitmap.pixelsHigh {
+      guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+      if color.alphaComponent > 0.5 { visibleKnobPixels += 1 }
+    }
+  }
+  #expect(visibleKnobPixels > 40)
+
+  let scrollView = NSScrollView()
+  CodeEditorScrollConfiguration.apply(to: scrollView)
+  #expect(scrollView.scrollerStyle == .legacy)
+  #expect(!scrollView.autohidesScrollers)
+  #expect(scrollView.hasVerticalScroller)
+  #expect(scrollView.hasHorizontalScroller)
+  #expect(scrollView.verticalScroller is CodeEditorScroller)
+  #expect(scrollView.horizontalScroller is CodeEditorScroller)
+}
+
+private func contrastRatio(_ first: NSColor, _ second: NSColor) -> Double {
+  let lighter = max(relativeLuminance(first), relativeLuminance(second))
+  let darker = min(relativeLuminance(first), relativeLuminance(second))
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+private func relativeLuminance(_ color: NSColor) -> Double {
+  guard let color = color.usingColorSpace(.sRGB) else { return 0 }
+  func linear(_ component: CGFloat) -> Double {
+    let component = Double(component)
+    return component <= 0.04045
+      ? component / 12.92
+      : pow((component + 0.055) / 1.055, 2.4)
+  }
+  return 0.2126 * linear(color.redComponent) + 0.7152 * linear(color.greenComponent)
+    + 0.0722 * linear(color.blueComponent)
+}

@@ -11,9 +11,7 @@ import SwiftUI
   }
   func makeNSView(context: Context) -> NSScrollView {
     let scroll = NSScrollView()
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = true
-    scroll.autohidesScrollers = true
+    CodeEditorScrollConfiguration.apply(to: scroll)
     let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     editor.delegate = context.coordinator
     editor.isEditable = !readOnly
@@ -30,6 +28,7 @@ import SwiftUI
     editor.font = CodeEditorTheme.baseFont
     editor.textColor = CodeEditorTheme.baseText
     editor.backgroundColor = CodeEditorTheme.background
+    editor.selectedTextAttributes = CodeEditorTheme.selectionAttributes
     editor.insertionPointColor = NSColor.white
     editor.isAutomaticQuoteSubstitutionEnabled = false
     editor.isAutomaticDashSubstitutionEnabled = false
@@ -146,14 +145,34 @@ import SwiftUI
   }
 }
 
-@MainActor private enum CodeEditorTheme {
+@MainActor enum CodeEditorScrollConfiguration {
+  static func apply(to scroll: NSScrollView) {
+    // Overlay scrollers follow the system's auto-hide preference. The editor needs a stable,
+    // discoverable position indicator, so reserve a narrow persistent gutter instead.
+    scroll.scrollerStyle = .legacy
+    scroll.autohidesScrollers = false
+    scroll.hasVerticalScroller = true
+    scroll.hasHorizontalScroller = true
+    scroll.verticalScroller = CodeEditorScroller()
+    scroll.horizontalScroller = CodeEditorScroller()
+  }
+}
+
+@MainActor enum CodeEditorTheme {
   static let background = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
   static let baseText = NSColor(white: 0.86, alpha: 1)
   static let baseFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
   static let headingFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .semibold)
+  static let selectionBackground = NSColor(
+    red: 0.23, green: 0.26, blue: 0.30, alpha: 1)
+  static let selectionText = NSColor(white: 0.96, alpha: 1)
   static let baseAttributes: [NSAttributedString.Key: Any] = [
     .foregroundColor: baseText,
     .font: baseFont,
+  ]
+  static let selectionAttributes: [NSAttributedString.Key: Any] = [
+    .backgroundColor: selectionBackground,
+    .foregroundColor: selectionText,
   ]
 
   static func attributes(for kind: SyntaxTokenKind) -> [NSAttributedString.Key: Any] {
@@ -192,6 +211,43 @@ import SwiftUI
       font = baseFont
     }
     return [.foregroundColor: color, .font: font]
+  }
+}
+
+@MainActor final class CodeEditorScroller: NSScroller {
+  static let knobColor = NSColor(red: 0.38, green: 0.41, blue: 0.45, alpha: 0.96)
+  static let trackColor = NSColor(red: 0.12, green: 0.14, blue: 0.16, alpha: 1)
+
+  override class var isCompatibleWithOverlayScrollers: Bool { true }
+
+  override func draw(_ dirtyRect: NSRect) {
+    Self.trackColor.setFill()
+    bounds.fill()
+    drawKnob()
+  }
+
+  override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {
+    Self.trackColor.setFill()
+    slotRect.fill()
+  }
+
+  override func drawKnob() {
+    var knob = rect(for: .knob)
+    guard !knob.isEmpty else { return }
+
+    if bounds.height >= bounds.width {
+      knob = knob.insetBy(dx: 3, dy: 1)
+    } else {
+      knob = knob.insetBy(dx: 1, dy: 3)
+    }
+    guard knob.width > 0, knob.height > 0 else { return }
+
+    Self.knobColor.setFill()
+    NSBezierPath(
+      roundedRect: knob,
+      xRadius: min(knob.width, knob.height) / 2,
+      yRadius: min(knob.width, knob.height) / 2
+    ).fill()
   }
 }
 
