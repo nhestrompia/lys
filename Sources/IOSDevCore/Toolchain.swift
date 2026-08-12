@@ -189,6 +189,71 @@ public enum ToolchainDiscovery {
     }
   }
 
+  public static func distributionTarget(
+    container: URL, scheme: String, xcodebuild: URL, developerDirectory: URL,
+    derivedData: URL
+  ) async throws -> LocalDistributionTarget {
+    let flag = container.pathExtension == "xcworkspace" ? "-workspace" : "-project"
+    let outcome = try await ProcessRunner().run(
+      executable: xcodebuild,
+      arguments: [
+        flag, container.path, "-scheme", scheme, "-configuration", "Release",
+        "-destination", "generic/platform=iOS", "-derivedDataPath", derivedData.path,
+        "-showBuildSettings", "-json",
+      ], workingDirectory: container.deletingLastPathComponent(),
+      environment: ["DEVELOPER_DIR": developerDirectory.path])
+    guard outcome.succeeded else {
+      throw AppStoreDistributionError.commandFailed(
+        stage: "Release build-settings discovery",
+        detail: outcome.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    struct Entry: Decodable {
+      var target: String
+      var buildSettings: [String: JSONValue]
+    }
+    let entries = try JSONDecoder().decode([Entry].self, from: Data(outcome.stdout.utf8))
+    guard let entry = entries.first(where: {
+      $0.buildSettings["WRAPPER_EXTENSION"]?.stringValue == "app"
+        && $0.buildSettings["PRODUCT_BUNDLE_IDENTIFIER"]?.stringValue != nil
+    }) else {
+      throw AppStoreDistributionError.missingBuildSetting("iOS application target")
+    }
+    func required(_ key: String) throws -> String {
+      guard let value = entry.buildSettings[key]?.stringValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty
+      else { throw AppStoreDistributionError.missingBuildSetting(key) }
+      return value
+    }
+    func optional(_ key: String) -> String? {
+      let value = entry.buildSettings[key]?.stringValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      return value.flatMap { $0.isEmpty ? nil : $0 }
+    }
+    return try .init(
+      container: container, scheme: scheme, target: entry.target,
+      bundleID: required("PRODUCT_BUNDLE_IDENTIFIER"),
+      productName: required("PRODUCT_NAME"), marketingVersion: required("MARKETING_VERSION"),
+      buildNumber: required("CURRENT_PROJECT_VERSION"),
+      developmentTeam: optional("DEVELOPMENT_TEAM"), codeSignStyle: optional("CODE_SIGN_STYLE"),
+      codeSignIdentity: optional("CODE_SIGN_IDENTITY"),
+      provisioningProfileSpecifier: optional("PROVISIONING_PROFILE_SPECIFIER"),
+      entitlementsPath: optional("CODE_SIGN_ENTITLEMENTS"))
+  }
+
+  public static func signingIdentities(
+    security: URL = URL(fileURLWithPath: "/usr/bin/security")
+  ) async throws -> [DistributionSigningIdentity] {
+    let outcome = try await ProcessRunner().run(
+      executable: security, arguments: ["find-identity", "-v", "-p", "codesigning"],
+      maximumOutputBytes: 1_000_000)
+    guard outcome.succeeded else {
+      throw AppStoreDistributionError.commandFailed(
+        stage: "Signing identity discovery",
+        detail: outcome.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    return AppStoreDistributionSupport.parseSigningIdentities(outcome.stdout)
+  }
+
   public static func appTargets(
     container: URL, scheme: String, configuration: String, destination: String,
     xcodebuild: URL, developerDirectory: URL, derivedData: URL

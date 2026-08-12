@@ -128,16 +128,37 @@ import Testing
         {"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Internal QA","isInternalGroup":true,"hasAccessToAllBuilds":true,"publicLinkEnabled":false,"feedbackEnabled":true},"relationships":{"betaTesters":{"meta":{"paging":{"total":7,"limit":1}},"data":[]}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/betaGroups"}}
         """)
     case "/v1/betaGroups/group-1/betaTesters":
+      let queryNames = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+        .queryItems?.map(\.name) ?? []
+      #expect(!queryNames.contains("sort"))
+      let testerFields = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+        .queryItems?.first { $0.name == "fields[betaTesters]" }?.value
+      #expect(testerFields?.contains("appDevices") == true)
       return fixtureResponse(
         request,
         """
-        {"data":[{"type":"betaTesters","id":"tester-1","attributes":{"firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","inviteType":"EMAIL","state":"ACCEPTED"}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/betaGroups/group-1/betaTesters"}}
+        {"data":[{"type":"betaTesters","id":"tester-1","attributes":{"firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","inviteType":"EMAIL","state":"ACCEPTED","appDevices":[{"model":"iPhone14,5","platform":"IOS","osVersion":"18.7.8","appBuildVersion":"42"}]}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/betaGroups/group-1/betaTesters"}}
+        """)
+    case "/v1/apps/app-1/metrics/betaTesterUsages":
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      #expect(query.first { $0.name == "groupBy" }?.value == "betaTesters")
+      #expect(query.first { $0.name == "period" }?.value == "P365D")
+      return fixtureResponse(
+        request,
+        """
+        {"data":[{"type":"appsBetaTesterUsages","dataPoints":[{"start":"2025-08-12","end":"2026-08-12","values":{"crashCount":3,"sessionCount":311,"feedbackCount":2}}],"dimensions":{"betaTesters":{"data":{"type":"betaTesters","id":"tester-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/apps/app-1/metrics/betaTesterUsages"},"meta":{"paging":{"total":1,"limit":200}}}
+        """)
+    case "/v1/builds/build-1/icons":
+      return fixtureResponse(
+        request,
+        """
+        {"data":[{"type":"buildIcons","id":"icon-1","attributes":{"name":"App Icon","iconType":"APP_STORE","masked":false,"iconAsset":{"templateUrl":"https://example.invalid/icon/{w}x{h}.{f}","width":1024,"height":1024}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/builds/build-1/icons"}}
         """)
     case "/v1/apps/app-1/betaFeedbackScreenshotSubmissions":
       return fixtureResponse(
         request,
         """
-        {"data":[{"type":"betaFeedbackScreenshotSubmissions","id":"feedback-1","attributes":{"createdDate":"2026-08-11T09:15:00Z","comment":"Spacing is clipped","deviceModel":"iPhone 17 Pro","osVersion":"26.0","buildBundleId":"com.example.app","screenshots":[{"url":"https://example.invalid/feedback.png","width":1200,"height":2600}]},"relationships":{"build":{"data":{"type":"builds","id":"build-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/apps/app-1/betaFeedbackScreenshotSubmissions"}}
+        {"data":[{"type":"betaFeedbackScreenshotSubmissions","id":"feedback-1","attributes":{"createdDate":"2026-08-11T09:15:00Z","comment":"Spacing is clipped","deviceModel":"iPhone 17 Pro","osVersion":"26.0","buildBundleId":"com.example.app","screenshots":[{"url":"https://example.invalid/feedback-1.png","width":1200,"height":2600},{"url":"https://example.invalid/feedback-2.png","width":1200,"height":2600}]},"relationships":{"build":{"data":{"type":"builds","id":"build-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/apps/app-1/betaFeedbackScreenshotSubmissions"}}
         """)
     case "/v1/apps/app-1/betaFeedbackCrashSubmissions":
       return fixtureResponse(
@@ -210,6 +231,8 @@ import Testing
   let versions = try await client.listAppStoreVersions(appID: "app-1")
   let builds = try await client.listBuilds(appID: "app-1")
   let groups = try await client.listBetaGroups(appID: "app-1")
+  let testerUsages = try await client.listBetaTesterUsages(appID: "app-1", period: .oneYear)
+  let icons = try await client.listBuildIcons(buildID: "build-1")
   let screenshotFeedback = try await client.listScreenshotFeedback(appID: "app-1")
   let crashFeedback = try await client.listCrashFeedback(appID: "app-1")
   let localizations = try await client.listVersionLocalizations(versionID: "version-1")
@@ -228,7 +251,14 @@ import Testing
   #expect(builds.first?.marketingVersion == "2.4")
   #expect(groups.first?.testerCount == 1)
   #expect(groups.first?.testers.first?.email == "ada@example.com")
+  #expect(groups.first?.testers.first?.devices.first?.model == "iPhone14,5")
+  #expect(testerUsages["tester-1"]?.sessionCount == 311)
+  #expect(testerUsages["tester-1"]?.crashCount == 3)
+  #expect(testerUsages["tester-1"]?.feedbackCount == 2)
+  #expect(icons.first?.iconType == "APP_STORE")
+  #expect(icons.first?.downloadURL?.absoluteString == "https://example.invalid/icon/256x256.png")
   #expect(screenshotFeedback.first?.comment == "Spacing is clipped")
+  #expect(screenshotFeedback.first?.imageURLs.count == 2)
   #expect(crashFeedback.first?.kind == .crash)
   #expect(localizations.first?.whatsNew == "Faster launch.")
   #expect(screenshots.first?.screenshots.first?.fileName == "home.png")

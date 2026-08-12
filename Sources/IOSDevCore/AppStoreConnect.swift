@@ -108,6 +108,41 @@ public struct AppStoreBuild: Codable, Identifiable, Hashable, Sendable {
   }
 }
 
+public struct AppStoreBuildIcon: Codable, Identifiable, Hashable, Sendable {
+  public var id: String
+  public var name: String?
+  public var iconType: String?
+  public var masked: Bool
+  public var templateURL: String?
+  public var width: Int?
+  public var height: Int?
+
+  public init(
+    id: String, name: String? = nil, iconType: String? = nil, masked: Bool = false,
+    templateURL: String? = nil, width: Int? = nil, height: Int? = nil
+  ) {
+    self.id = id
+    self.name = name
+    self.iconType = iconType
+    self.masked = masked
+    self.templateURL = templateURL
+    self.width = width
+    self.height = height
+  }
+
+  public var downloadURL: URL? {
+    guard var value = templateURL else { return nil }
+    let side = min(min(width ?? 256, height ?? 256), 256)
+    value = value.replacingOccurrences(of: "{w}", with: String(side))
+    value = value.replacingOccurrences(of: "{h}", with: String(side))
+    value = value.replacingOccurrences(of: "{f}", with: "png")
+    value = value.replacingOccurrences(of: "{+dpr}", with: "")
+    value = value.replacingOccurrences(of: "{dpr}", with: "1")
+    value = value.replacingOccurrences(of: "{c}", with: "")
+    return URL(string: value)
+  }
+}
+
 public struct AppStoreBetaGroup: Codable, Identifiable, Hashable, Sendable {
   public var id: String
   public var name: String
@@ -141,10 +176,12 @@ public struct AppStoreBetaTester: Codable, Identifiable, Hashable, Sendable {
   public var email: String
   public var inviteType: String?
   public var state: String?
+  public var devices: [AppStoreTesterDevice]
 
   public init(
     id: String, firstName: String? = nil, lastName: String? = nil, email: String,
-    inviteType: String? = nil, state: String? = nil
+    inviteType: String? = nil, state: String? = nil,
+    devices: [AppStoreTesterDevice] = []
   ) {
     self.id = id
     self.firstName = firstName
@@ -152,11 +189,52 @@ public struct AppStoreBetaTester: Codable, Identifiable, Hashable, Sendable {
     self.email = email
     self.inviteType = inviteType
     self.state = state
+    self.devices = devices
   }
 
   public var name: String? {
     [firstName, lastName].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { !$0.isEmpty }.joined(separator: " ").nilIfEmpty
+  }
+}
+
+public struct AppStoreTesterDevice: Codable, Hashable, Sendable {
+  public var model: String?
+  public var platform: String?
+  public var osVersion: String?
+  public var appBuildVersion: String?
+
+  public init(
+    model: String? = nil, platform: String? = nil, osVersion: String? = nil,
+    appBuildVersion: String? = nil
+  ) {
+    self.model = model
+    self.platform = platform
+    self.osVersion = osVersion
+    self.appBuildVersion = appBuildVersion
+  }
+}
+
+public enum AppStoreTesterUsagePeriod: String, Codable, CaseIterable, Hashable, Sendable {
+  case sevenDays = "P7D"
+  case thirtyDays = "P30D"
+  case ninetyDays = "P90D"
+  case oneYear = "P365D"
+}
+
+public struct AppStoreTesterUsage: Codable, Hashable, Sendable {
+  public var testerID: String
+  public var sessionCount: Int
+  public var crashCount: Int
+  public var feedbackCount: Int
+
+  public init(
+    testerID: String, sessionCount: Int, crashCount: Int, feedbackCount: Int
+  ) {
+    self.testerID = testerID
+    self.sessionCount = sessionCount
+    self.crashCount = crashCount
+    self.feedbackCount = feedbackCount
   }
 }
 
@@ -237,13 +315,14 @@ public struct AppStoreFeedback: Codable, Identifiable, Hashable, Sendable {
   public var deviceModel: String?
   public var osVersion: String?
   public var buildBundleID: String?
-  public var imageURL: URL?
+  public var imageURLs: [URL]
   public var buildID: String?
 
   public init(
     id: String, kind: AppStoreFeedbackKind, createdDate: Date? = nil,
     comment: String? = nil, deviceModel: String? = nil, osVersion: String? = nil,
-    buildBundleID: String? = nil, imageURL: URL? = nil, buildID: String? = nil
+    buildBundleID: String? = nil, imageURLs: [URL] = [], imageURL: URL? = nil,
+    buildID: String? = nil
   ) {
     self.id = id
     self.kind = kind
@@ -252,9 +331,11 @@ public struct AppStoreFeedback: Codable, Identifiable, Hashable, Sendable {
     self.deviceModel = deviceModel
     self.osVersion = osVersion
     self.buildBundleID = buildBundleID
-    self.imageURL = imageURL
+    self.imageURLs = imageURLs.isEmpty ? [imageURL].compactMap { $0 } : imageURLs
     self.buildID = buildID
   }
+
+  public var imageURL: URL? { imageURLs.first }
 }
 
 public enum AppStoreConnectionPhase: String, Codable, Sendable {
@@ -591,12 +672,75 @@ public actor AppStoreConnectClient {
     let url = try endpoint(
       "v1/betaGroups/\(safeResourceID(groupID))/betaTesters",
       query: [
-        .init(name: "fields[betaTesters]", value: "firstName,lastName,email,inviteType,state"),
+        .init(
+          name: "fields[betaTesters]",
+          value: "firstName,lastName,email,inviteType,state,appDevices"),
         .init(name: "limit", value: "200"),
-        .init(name: "sort", value: "email"),
       ])
     let resources: [BetaTesterResource] = try await getAll(url)
-    return resources.map(\.tester)
+    return resources.map(\.tester).sorted {
+      $0.email.localizedCaseInsensitiveCompare($1.email) == .orderedAscending
+    }
+  }
+
+  public func listBetaTesterUsages(
+    appID: String, period: AppStoreTesterUsagePeriod
+  ) async throws -> [String: AppStoreTesterUsage] {
+    let url = try endpoint(
+      "v1/apps/\(safeResourceID(appID))/metrics/betaTesterUsages",
+      query: [
+        .init(name: "groupBy", value: "betaTesters"),
+        .init(name: "period", value: period.rawValue),
+        .init(name: "limit", value: "200"),
+      ])
+    var nextURL: URL? = url
+    var result: [String: AppStoreTesterUsage] = [:]
+    var pageCount = 0
+    while let pageURL = nextURL {
+      guard pageURL.scheme == "https", pageURL.host == baseURL.host else {
+        throw AppStoreConnectError.unsafeRedirect(pageURL.host ?? "unknown")
+      }
+      let document: BetaTesterUsageMetricDocument = try await get(pageURL)
+      for metric in document.data {
+        guard let testerID = metric.dimensions?.betaTesters?.testerID else { continue }
+        let totals = (metric.dataPoints ?? []).reduce(
+          into: (sessions: 0, crashes: 0, feedback: 0)
+        ) { totals, point in
+          totals.sessions += point.values?.sessionCount ?? 0
+          totals.crashes += point.values?.crashCount ?? 0
+          totals.feedback += point.values?.feedbackCount ?? 0
+        }
+        let existing = result[testerID]
+        result[testerID] = .init(
+          testerID: testerID,
+          sessionCount: (existing?.sessionCount ?? 0) + totals.sessions,
+          crashCount: (existing?.crashCount ?? 0) + totals.crashes,
+          feedbackCount: (existing?.feedbackCount ?? 0) + totals.feedback)
+      }
+      nextURL = document.links?.next
+      pageCount += 1
+      guard pageCount < 100 || nextURL == nil else {
+        throw AppStoreConnectError.invalidConnection(
+          "App Store Connect returned more tester metric pages than Lys can safely load in one "
+            + "refresh.")
+      }
+    }
+    return result
+  }
+
+  public func listBuildIcons(buildID: String) async throws -> [AppStoreBuildIcon] {
+    let url = try endpoint(
+      "v1/builds/\(safeResourceID(buildID))/icons",
+      query: [
+        .init(name: "fields[buildIcons]", value: "iconAsset,iconType,masked,name"),
+        .init(name: "limit", value: "200"),
+      ])
+    let resources: [BuildIconResource] = try await getAll(url)
+    return resources.map(\.icon).sorted {
+      if $0.iconType == "APP_STORE", $1.iconType != "APP_STORE" { return true }
+      if $1.iconType == "APP_STORE", $0.iconType != "APP_STORE" { return false }
+      return ($0.name ?? "") < ($1.name ?? "")
+    }
   }
 
   @discardableResult
@@ -948,6 +1092,42 @@ private struct PagedDocument<Resource: Decodable>: Decodable {
   var links: Links?
 }
 
+private struct BetaTesterUsageMetricDocument: Decodable {
+  struct Links: Decodable { var next: URL? }
+  struct Metric: Decodable {
+    struct DataPoint: Decodable {
+      struct Values: Decodable {
+        var crashCount: Int?
+        var sessionCount: Int?
+        var feedbackCount: Int?
+      }
+      var values: Values?
+    }
+    struct Dimensions: Decodable {
+      struct BetaTesters: Decodable {
+        private struct Identifier: Decodable { var id: String }
+        var testerID: String?
+
+        private enum CodingKeys: String, CodingKey { case data }
+
+        init(from decoder: Decoder) throws {
+          let container = try decoder.container(keyedBy: CodingKeys.self)
+          if let value = try? container.decode(String.self, forKey: .data) {
+            testerID = value
+          } else {
+            testerID = try? container.decode(Identifier.self, forKey: .data).id
+          }
+        }
+      }
+      var betaTesters: BetaTesters?
+    }
+    var dataPoints: [DataPoint]?
+    var dimensions: Dimensions?
+  }
+  var data: [Metric]
+  var links: Links?
+}
+
 private struct BetaTesterDocument: Decodable { var data: BetaTesterResource }
 private struct ScreenshotDocument: Decodable { var data: ScreenshotResource }
 
@@ -1030,6 +1210,29 @@ private struct PreReleaseVersionResource: Decodable {
   var attributes: Attributes?
 }
 
+private struct BuildIconResource: Decodable {
+  struct Attributes: Decodable {
+    struct ImageAsset: Decodable {
+      var templateUrl: String?
+      var width: Int?
+      var height: Int?
+    }
+    var iconAsset: ImageAsset?
+    var iconType: String?
+    var masked: Bool?
+    var name: String?
+  }
+  var id: String
+  var attributes: Attributes?
+
+  var icon: AppStoreBuildIcon {
+    .init(
+      id: id, name: attributes?.name, iconType: attributes?.iconType,
+      masked: attributes?.masked ?? false, templateURL: attributes?.iconAsset?.templateUrl,
+      width: attributes?.iconAsset?.width, height: attributes?.iconAsset?.height)
+  }
+}
+
 private struct BetaGroupResource: Decodable {
   struct Attributes: Decodable {
     var name: String?
@@ -1056,11 +1259,18 @@ private struct BetaGroupResource: Decodable {
 
 private struct BetaTesterResource: Decodable {
   struct Attributes: Decodable {
+    struct AppDevice: Decodable {
+      var model: String?
+      var platform: String?
+      var osVersion: String?
+      var appBuildVersion: String?
+    }
     var firstName: String?
     var lastName: String?
     var email: String?
     var inviteType: String?
     var state: String?
+    var appDevices: [AppDevice]?
   }
   var id: String
   var attributes: Attributes?
@@ -1069,7 +1279,12 @@ private struct BetaTesterResource: Decodable {
     .init(
       id: id, firstName: attributes?.firstName, lastName: attributes?.lastName,
       email: attributes?.email ?? "Unknown email", inviteType: attributes?.inviteType,
-      state: attributes?.state)
+      state: attributes?.state,
+      devices: attributes?.appDevices?.map {
+        .init(
+          model: $0.model, platform: $0.platform, osVersion: $0.osVersion,
+          appBuildVersion: $0.appBuildVersion)
+      } ?? [])
   }
 }
 
@@ -1146,7 +1361,7 @@ private struct ScreenshotFeedbackResource: Decodable {
       createdDate: AppStoreDateParser.date(attributes?.createdDate),
       comment: attributes?.comment, deviceModel: attributes?.deviceModel,
       osVersion: attributes?.osVersion, buildBundleID: attributes?.buildBundleId,
-      imageURL: attributes?.screenshots?.first?.url.flatMap(URL.init(string:)),
+      imageURLs: attributes?.screenshots?.compactMap { $0.url.flatMap(URL.init(string:)) } ?? [],
       buildID: relationships?.build?.data?.id)
   }
 }

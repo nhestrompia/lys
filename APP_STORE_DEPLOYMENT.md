@@ -48,12 +48,15 @@ is unavailable.
 
 ### 2. Local distribution discovery
 
-- [ ] Add a `LocalDistributionTarget` separate from the Simulator-oriented `AppTarget`.
+- [x] Add a `LocalDistributionTarget` separate from the Simulator-oriented `AppTarget`.
 - [x] Run build-settings discovery with the Release configuration and
   `generic/platform=iOS`.
-- [ ] Read bundle ID, product name, marketing version, build number, development team, signing
-  style, deployment target, device families, entitlements, Info.plist, app icon, symbol settings,
-  and export-compliance declaration.
+- [x] Run deployment identity discovery directly through the selected Xcode toolchain so Deploy
+  does not depend on an active task runtime or agent session.
+- [x] Read the Release bundle ID, product name, marketing version, build number, development team,
+  signing style and identity, provisioning-profile specifier, and entitlements path.
+- [ ] Read the deployment target, device families, resolved Info.plist, local app icon, symbol
+  settings, and export-compliance declaration.
 - [ ] Discover extensions, App Clips, watch companions, and their bundle IDs.
 - [ ] Detect whether the selected scheme has an Archive action and is shared.
 - [ ] Let the user explicitly choose the deployment source: original checkout, applied branch, or
@@ -66,18 +69,22 @@ is unavailable.
   project, or scheme change and rematch the Release bundle ID.
 - [x] Prevent an app with a different bundle ID from replacing the project-matched app, and explain
   the mismatch at the attempted selection boundary.
+- [x] Permit an explicit app selection when automatic local identity verification is temporarily
+  unavailable; only a successfully discovered, different bundle ID is treated as a mismatch.
 - [ ] Persist the repository/scheme/bundle-ID to App Store app-ID binding.
 
 ### 3. Signing readiness
 
-- [ ] Detect valid local Apple Distribution identities without exposing key material.
-- [ ] Detect automatic versus manual signing and the selected team.
+- [x] Detect valid local Apple Distribution identities without exposing key material.
+- [x] Detect automatic versus manual signing and the selected team from Release build settings.
 - [ ] Detect locally available provisioning profiles and their expiration.
 - [ ] Probe cloud-managed signing/provisioning permission when a team key is connected.
 - [ ] Compare local entitlements with the selected provisioning path.
 - [ ] Report missing agreements or developer-account actions as external prerequisites rather than
   claiming a false machine-verified result.
 - [ ] Present a single ordered signing-readiness checklist with direct recovery actions.
+- [x] Present a protected archive/upload review with the exact source, scheme, bundle ID,
+  version/build, team, signing style, local distribution identity, and actionable warnings.
 
 ### 4. Live Deploy data
 
@@ -87,15 +94,22 @@ is unavailable.
 - [ ] Load build-upload records and processing diagnostics.
 - [x] Load processed build number, marketing version, upload/expiration dates, minimum OS,
   processing state, audience, and encryption state.
-- [ ] Load processed build icons and richer processing diagnostics.
+- [x] Load the processed build's App Store icon when Apple exposes one and render it in Overview.
+- [ ] Load richer build processing diagnostics.
 - [ ] Load build bundles and file-size variants.
 - [ ] Load beta build details and localized What to Test text.
 - [x] Load internal and external beta groups.
 - [x] Load tester counts for beta groups.
 - [x] Load and display individual TestFlight tester names, email addresses, invite state, and group
   membership.
-- [ ] Load tester usage metrics for apps, groups, and builds.
+- [x] Load per-tester TestFlight sessions, crashes, and feedback for selectable 7-day, 30-day,
+  90-day, and 1-year periods; keep analytics permission/errors independent from tester membership.
+- [x] Load each tester's Apple-reported app devices, OS versions, and tested build versions and
+  show them beside usage metrics without inventing device-name mappings.
+- [ ] Load aggregate tester usage metrics grouped by beta group and build.
 - [x] Load TestFlight screenshot feedback.
+- [x] Preserve every image attached to TestFlight screenshot feedback, show a list thumbnail, and
+  provide a full-size viewer with Copy and Save actions.
 - [x] Load TestFlight crash-feedback metadata.
 - [ ] Load and symbolize TestFlight crash logs.
 - [ ] Add pagination, sparse-field requests, cancellation, and background refresh.
@@ -106,22 +120,29 @@ is unavailable.
 
 - [ ] Add the persistent deployment-job state machine:
   `preflight -> archiving -> inspecting -> uploading -> processing -> ready`.
-- [ ] Archive with `xcodebuild`, Release, a generic iOS destination, and an explicit archive path.
-- [ ] Pass `-allowProvisioningUpdates` only after user approval.
-- [ ] Materialize the API key to a mode-0600 temporary file only for the Xcode operation and remove
+- [x] Add the in-memory deployment state machine:
+  `preflight -> archiving -> inspecting -> uploading -> processing -> ready`, with explicit
+  failure, cancellation, accepted-but-processing, and retry states.
+- [x] Archive with `xcodebuild`, Release, a generic iOS destination, and a unique explicit archive
+  path under Application Support/Lys/Deployments.
+- [x] Pass `-allowProvisioningUpdates` only after user approval.
+- [x] Materialize the API key to a mode-0600 temporary file only for the Xcode operation and remove
   it immediately afterward.
-- [ ] Inspect the `.xcarchive` for its actual bundle ID, versions, signing authorities,
-  entitlements, provisioning profiles, architectures, and dSYMs.
-- [ ] Reject local/remote identity mismatches before upload.
-- [ ] Upload with `xcodebuild -exportArchive`, `method=app-store-connect`, and
+- [x] Inspect the `.xcarchive` for its actual bundle ID, marketing version, build number, signing
+  identity, team, application path, and architectures.
+- [ ] Inspect and compare archived entitlements, embedded provisioning profiles, and dSYMs.
+- [x] Reject local/archive/remote bundle, version, build, and signing-team mismatches before upload.
+- [x] Upload with `xcodebuild -exportArchive`, `method=app-store-connect`, and
   `destination=upload`.
-- [ ] Keep `manageAppVersionAndBuildNumber` disabled so the reviewed identity remains exact.
-- [ ] Support the explicit TestFlight Internal Only option.
-- [ ] Stream bounded, redacted distribution output into the terminal surface.
+- [x] Keep `manageAppVersionAndBuildNumber` disabled so the reviewed identity remains exact.
+- [x] Support the explicit TestFlight Internal Only option and explain its permanent restriction.
+- [x] Stream bounded distribution output into the terminal surface while redacting the temporary
+  authentication-key path.
 - [ ] Persist Xcode distribution logs and structured diagnostics.
-- [ ] Poll App Store Connect build uploads and processed builds until completion or failure.
+- [x] Poll processed builds by exact marketing version/build number until ready, failed, cancelled,
+  or the bounded foreground wait expires.
 - [ ] Recover an in-progress processing job after Lys restarts.
-- [ ] Provide explicit cancellation and retry behavior for safe stages.
+- [x] Provide explicit cancellation, stop-waiting, and retry behavior.
 
 ### 6. TestFlight distribution
 
@@ -171,8 +192,8 @@ is unavailable.
 
 - [x] JWT header, claims, lifetime, and signature-shape tests.
 - [x] App Store Connect request and decoding fixtures for versions, builds, groups, individual
-  testers, screenshots, feedback, tester membership mutations, and screenshot reserve/upload/
-  commit/delete mutations.
+  testers, tester usage analytics/devices, screenshots, feedback, tester membership mutations, and
+  screenshot reserve/upload/commit/delete mutations.
 - [ ] App Store Connect pagination and error fixtures.
 - [ ] 401, 403, 409, 422, and 429 behavior.
 - [ ] Keychain save/load/delete lifecycle without secret logging.
@@ -182,7 +203,11 @@ is unavailable.
 - [ ] Local build-settings normalization.
 - [ ] Archive inspection and bundle/version mismatch rejection.
 - [ ] Command construction with metacharacter-containing paths.
-- [ ] Temporary-key permissions and cleanup on success, failure, and cancellation.
+- [x] Temporary-key owner-only directory/file permissions and idempotent cleanup behavior.
+- [x] Command construction preserves paths and schemes containing spaces and shell metacharacters.
+- [x] Export-options fixtures verify upload destination, App Store Connect method, fixed build
+  number, symbols, team, and internal-only restriction.
+- [x] Archive inspection fixtures verify the identity extracted from the actual `.xcarchive`.
 - [ ] Deployment state-machine restart and retry behavior.
 - [ ] UI snapshots for disconnected, connecting, connected, forbidden, no matching app, processing,
   failed, and ready states.

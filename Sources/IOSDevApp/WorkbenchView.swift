@@ -2911,6 +2911,8 @@ private struct DeployWorkspace: View {
   @State private var showsAppStoreConnection = false
   @State private var testerEditorGroupID: String?
   @State private var screenshotRemoval: ScreenshotRemoval?
+  @State private var feedbackScreenshot: AppStoreFeedback?
+  @State private var showsBuildUpload = false
 
   var body: some View {
     GeometryReader { geometry in
@@ -2959,6 +2961,13 @@ private struct DeployWorkspace: View {
         AppStoreTesterEditorSheet(groupID: testerEditorGroupID)
           .environmentObject(model)
       }
+    }
+    .sheet(item: $feedbackScreenshot) { feedback in
+      FeedbackScreenshotViewer(feedback: feedback)
+    }
+    .sheet(isPresented: $showsBuildUpload) {
+      AppStoreUploadSheet()
+        .environmentObject(model)
     }
     .alert(
       "App does not match this repository",
@@ -3035,6 +3044,7 @@ private struct DeployWorkspace: View {
         AppStoreAppPicker()
           .environmentObject(model)
           .padding(.top, 16)
+          .disabled(model.appStoreUploadPhase.isRunning)
       }
 
       HStack(spacing: 2) {
@@ -3286,12 +3296,32 @@ private struct DeployWorkspace: View {
           VStack(alignment: .leading, spacing: 5) {
             Text(deployDetailTitle)
               .font(.system(size: 20, weight: .bold))
+              .lineLimit(1)
+              .truncationMode(.tail)
             Text(deployDetailSubtitle)
               .font(.system(size: 10.5))
               .foregroundStyle(Studio.secondary)
           }
           Spacer(minLength: 8)
           if model.selectedAppStoreApp != nil {
+            Button {
+              showsBuildUpload = true
+              if !model.appStoreUploadPhase.isRunning {
+                Task { await model.prepareAppStoreUpload() }
+              }
+            } label: {
+              if model.appStoreUploadPhase.isRunning {
+                HStack(spacing: 6) {
+                  ProgressView().controlSize(.mini)
+                  Text(uploadButtonTitle)
+                }
+              } else {
+                Label("Upload Build", systemImage: "arrow.up.circle.fill")
+              }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(model.appStoreDeploymentPhase == .loading)
             Button {
               Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
             } label: {
@@ -3302,7 +3332,8 @@ private struct DeployWorkspace: View {
               }
             }
             .controlSize(.small)
-            .disabled(model.appStoreDeploymentPhase == .loading)
+            .disabled(
+              model.appStoreDeploymentPhase == .loading || model.appStoreUploadPhase.isRunning)
           }
         }
         .padding(.horizontal, 22)
@@ -3314,18 +3345,17 @@ private struct DeployWorkspace: View {
               Button {
                 detailTab = tab
               } label: {
-                VStack(spacing: 0) {
-                  Text(tab.rawValue)
-                    .font(.system(size: 10.5, weight: detailTab == tab ? .semibold : .medium))
-                    .foregroundStyle(detailTab == tab ? Color.primary : Studio.secondary)
-                    .frame(maxHeight: .infinity)
-                  Rectangle()
-                    .fill(detailTab == tab ? Color.primary : .clear)
-                    .frame(height: 1)
-                }
-                .padding(.horizontal, 10)
-                .frame(minHeight: 42)
-                .contentShape(Rectangle())
+                Text(tab.rawValue)
+                  .font(.system(size: 10.5, weight: detailTab == tab ? .semibold : .medium))
+                  .foregroundStyle(detailTab == tab ? Color.primary : Studio.secondary)
+                  .padding(.horizontal, 10)
+                  .frame(height: 42)
+                  .overlay(alignment: .bottom) {
+                    Rectangle()
+                      .fill(detailTab == tab ? Color.primary : .clear)
+                      .frame(height: 1)
+                  }
+                  .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
               .contentShape(Rectangle())
@@ -3341,6 +3371,17 @@ private struct DeployWorkspace: View {
         detailContent
           .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
+    }
+  }
+
+  private var uploadButtonTitle: String {
+    switch model.appStoreUploadPhase {
+    case .preflighting: "Checking…"
+    case .archiving: "Archiving…"
+    case .inspecting: "Verifying…"
+    case .uploading: "Uploading…"
+    case .processing: "Processing…"
+    default: "Upload Build"
     }
   }
 
@@ -3530,24 +3571,31 @@ private struct DeployWorkspace: View {
                       .foregroundStyle(Studio.secondary)
                       .lineLimit(1)
                       .truncationMode(.middle)
-                    HStack(spacing: 6) {
-                      Button("Replace…") {
+                    HStack(spacing: 8) {
+                      Button {
                         chooseScreenshot { url in
                           Task {
                             await model.replaceAppStoreScreenshot(
                               screenshot.id, with: url, inSet: set.id)
                           }
                         }
+                      } label: {
+                        Image(systemName: "pencil")
+                          .frame(width: 24, height: 20)
                       }
                       .controlSize(.mini)
+                      .help("Replace screenshot")
+                      .accessibilityLabel("Replace \(screenshot.fileName)")
                       Button(role: .destructive) {
                         screenshotRemoval = .init(id: screenshot.id, fileName: screenshot.fileName)
                       } label: {
                         Image(systemName: "trash")
+                          .frame(width: 24, height: 20)
                       }
                       .controlSize(.mini)
                       .help("Remove from App Store Connect")
                     }
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .disabled(model.isAppStoreMutationInProgress)
                   }
                 }
@@ -3572,51 +3620,256 @@ private struct DeployWorkspace: View {
         symbol: "person.2", title: "No tester groups",
         detail: "Apple returned no internal or external TestFlight groups for this app.")
     } else {
-      ScrollView {
-        LazyVStack(spacing: 0) {
-          ForEach(model.appStoreBetaGroups) { group in
-            VStack(spacing: 0) {
-              HStack(spacing: 0) {
-                betaGroupRow(group)
-                Button("Manage…") { testerEditorGroupID = group.id }
-                  .controlSize(.small)
-                  .padding(.trailing, 20)
-              }
-              if group.testers.isEmpty {
-                Text("No individual testers in this group")
-                  .font(.system(size: 9.5))
-                  .foregroundStyle(Studio.secondary)
-                  .frame(maxWidth: .infinity, alignment: .leading)
-                  .padding(.leading, 58)
-                  .padding(.bottom, 14)
-              } else {
-                ForEach(group.testers) { tester in
-                  HStack(spacing: 10) {
-                    Image(systemName: "person.crop.circle")
-                      .foregroundStyle(Studio.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                      Text(tester.email)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .textSelection(.enabled)
-                      if let name = tester.name {
-                        Text(name).font(.system(size: 9)).foregroundStyle(Studio.secondary)
-                      }
+      VStack(spacing: 0) {
+        testerAnalyticsToolbar
+        Divider().overlay(Studio.separator)
+        if let analyticsError = model.appStoreSectionErrors[.testerAnalytics] {
+          HStack(spacing: 8) {
+            Image(systemName: "chart.bar.xaxis")
+              .foregroundStyle(Studio.warning)
+            Text("Tester analytics unavailable")
+              .font(.system(size: 9.5, weight: .semibold))
+            Text(analyticsError)
+              .font(.system(size: 9))
+              .foregroundStyle(Studio.secondary)
+              .lineLimit(1)
+              .help(analyticsError)
+            Spacer(minLength: 8)
+            Button("Retry") {
+              Task { await model.refreshAppStoreTesterAnalytics() }
+            }
+            .controlSize(.mini)
+          }
+          .padding(.horizontal, 20)
+          .frame(minHeight: 36)
+          .background(Studio.warning.opacity(0.06))
+          Divider().overlay(Studio.separator)
+        }
+        ScrollView([.horizontal, .vertical]) {
+          LazyVStack(spacing: 0) {
+            testerAnalyticsColumnHeader
+            ForEach(model.appStoreBetaGroups) { group in
+              VStack(spacing: 0) {
+                testerGroupHeader(group)
+                if group.testers.isEmpty {
+                  Text("No individual testers in this group")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Studio.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 58)
+                    .padding(.bottom, 14)
+                } else {
+                  ForEach(group.testers) { tester in
+                    testerAnalyticsRow(tester)
+                    if tester.id != group.testers.last?.id {
+                      Divider().overlay(Studio.separator).padding(.leading, 58)
                     }
-                    Spacer()
-                    Text(friendlyValue(tester.state))
-                      .font(.system(size: 8.5, weight: .medium))
-                      .foregroundStyle(Studio.secondary)
                   }
-                  .padding(.leading, 58)
-                  .padding(.trailing, 20)
-                  .frame(minHeight: 42)
                 }
               }
+              Divider().overlay(Studio.separator)
             }
-            Divider().overlay(Studio.separator)
           }
+          .frame(minWidth: 760)
         }
       }
+    }
+  }
+
+  private var testerAnalyticsToolbar: some View {
+    HStack(spacing: 12) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Tester activity")
+          .font(.system(size: 10.5, weight: .semibold))
+        Text("Sessions, crashes, and feedback reported by TestFlight")
+          .font(.system(size: 8.5))
+          .foregroundStyle(Studio.secondary)
+      }
+      Spacer(minLength: 12)
+      if model.isAppStoreTesterAnalyticsLoading {
+        ProgressView().controlSize(.mini)
+          .help("Loading tester analytics")
+      }
+      Picker("Activity period", selection: $model.appStoreTesterUsagePeriod) {
+        Text("7d").tag(AppStoreTesterUsagePeriod.sevenDays)
+        Text("30d").tag(AppStoreTesterUsagePeriod.thirtyDays)
+        Text("90d").tag(AppStoreTesterUsagePeriod.ninetyDays)
+        Text("1y").tag(AppStoreTesterUsagePeriod.oneYear)
+      }
+      .labelsHidden()
+      .pickerStyle(.segmented)
+      .frame(width: 184)
+      .disabled(model.isAppStoreTesterAnalyticsLoading)
+      .onChange(of: model.appStoreTesterUsagePeriod) { _, _ in
+        Task { await model.refreshAppStoreTesterAnalytics() }
+      }
+    }
+    .padding(.horizontal, 20)
+    .frame(minHeight: 54)
+  }
+
+  private var testerAnalyticsColumnHeader: some View {
+    HStack(spacing: 12) {
+      Text("TESTER")
+        .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
+      Text("SESSIONS").frame(width: 68, alignment: .trailing)
+      Text("CRASHES").frame(width: 68, alignment: .trailing)
+      Text("FEEDBACK").frame(width: 68, alignment: .trailing)
+      Text("DEVICE").frame(width: 160, alignment: .leading)
+    }
+    .font(.system(size: 7.5, weight: .semibold))
+    .foregroundStyle(Studio.secondary)
+    .padding(.horizontal, 20)
+    .frame(height: 30)
+    .background(Studio.raised.opacity(0.35))
+  }
+
+  private func testerGroupHeader(_ group: AppStoreBetaGroup) -> some View {
+    HStack(spacing: 10) {
+      Image(systemName: group.isInternal ? "person.2.fill" : "globe")
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(group.isInternal ? Studio.accent : Studio.secondary)
+        .frame(width: 28, height: 28)
+        .background(group.isInternal ? Studio.accentSoft : Studio.raised)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 8) {
+          Text(group.name)
+            .font(.system(size: 11, weight: .semibold))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .layoutPriority(1)
+          Button("Manage…") { testerEditorGroupID = group.id }
+            .buttonStyle(.plain)
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(Studio.accent)
+            .padding(.horizontal, 7)
+            .frame(height: 24)
+            .background(Studio.accentSoft)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .fixedSize()
+            .contentShape(Rectangle())
+            .help("Add or remove testers in \(group.name)")
+            .accessibilityLabel("Manage \(group.name) testers")
+        }
+        HStack(spacing: 5) {
+          Text(group.isInternal ? "Internal" : "External")
+          if let count = group.testerCount {
+            Text("· \(count) tester\(count == 1 ? "" : "s")")
+          }
+        }
+        .font(.system(size: 9.5))
+        .foregroundStyle(Studio.secondary)
+      }
+      Spacer(minLength: 8)
+      if group.hasAccessToAllBuilds {
+        Image(systemName: "infinity")
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+          .help("Access to all builds")
+      }
+    }
+    .padding(.horizontal, 20)
+    .frame(minHeight: 56)
+    .background(Studio.raised.opacity(0.55))
+  }
+
+  private func testerAnalyticsRow(_ tester: AppStoreBetaTester) -> some View {
+    let usage = model.appStoreTesterUsages[tester.id]
+    return HStack(spacing: 12) {
+      HStack(spacing: 10) {
+        Image(systemName: "person.crop.circle")
+          .font(.system(size: 14))
+          .foregroundStyle(Studio.secondary)
+          .frame(width: 26)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(tester.email)
+            .font(.system(size: 10.5, weight: .medium))
+            .lineLimit(1)
+            .textSelection(.enabled)
+          HStack(spacing: 5) {
+            if let name = tester.name { Text(name) }
+            Text(friendlyValue(tester.state))
+          }
+          .font(.system(size: 8.5))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+        }
+      }
+      .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
+      testerMetricCell(usage?.sessionCount, width: 68)
+      testerMetricCell(usage?.crashCount, width: 68, warnsWhenPositive: true)
+      testerMetricCell(usage?.feedbackCount, width: 68)
+      testerDeviceCell(tester.devices)
+        .frame(width: 160, alignment: .leading)
+    }
+    .padding(.horizontal, 20)
+    .frame(minHeight: 54)
+  }
+
+  private func testerMetricCell(
+    _ value: Int?, width: CGFloat, warnsWhenPositive: Bool = false
+  ) -> some View {
+    let foreground: Color =
+      if warnsWhenPositive && (value ?? 0) > 0 {
+        Studio.warning
+      } else if value == nil {
+        Studio.tertiary
+      } else {
+        .primary
+      }
+    return Text(value.map(String.init) ?? "—")
+      .font(.system(size: 10, weight: value == nil ? .regular : .medium))
+      .monospacedDigit()
+      .foregroundStyle(foreground)
+      .frame(width: width, alignment: .trailing)
+      .contentTransition(.numericText())
+  }
+
+  @ViewBuilder private func testerDeviceCell(_ devices: [AppStoreTesterDevice]) -> some View {
+    if let device = devices.first {
+      VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 4) {
+          Text(device.model?.nonempty ?? friendlyTesterPlatform(device.platform))
+            .font(.system(size: 9.5, weight: .medium))
+            .lineLimit(1)
+          if devices.count > 1 {
+            Text("+\(devices.count - 1)")
+              .font(.system(size: 7.5, weight: .semibold))
+              .foregroundStyle(Studio.secondary)
+          }
+        }
+        Text(
+          device.osVersion.map { "\(friendlyTesterPlatform(device.platform)) \($0)" }
+            ?? friendlyTesterPlatform(device.platform)
+        )
+          .font(.system(size: 8.5))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+      }
+      .help(
+        devices.map { device in
+          [
+            device.model?.nonempty,
+            device.osVersion.map { "\(friendlyTesterPlatform(device.platform)) \($0)" },
+            device.appBuildVersion.map { "Build \($0)" },
+          ].compactMap { $0 }.joined(separator: " · ")
+        }.joined(separator: "\n"))
+    } else {
+      Text("—")
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.tertiary)
+    }
+  }
+
+  private func friendlyTesterPlatform(_ value: String?) -> String {
+    switch value?.uppercased() {
+    case "IOS": "iOS"
+    case "MAC_OS": "macOS"
+    case "TV_OS": "tvOS"
+    case "WATCH_OS": "watchOS"
+    case "VISION_OS": "visionOS"
+    default: friendlyValue(value)
     }
   }
 
@@ -3741,9 +3994,19 @@ private struct DeployWorkspace: View {
 
   private var appPreview: some View {
     HStack(spacing: 15) {
-      Image(systemName: model.selectedAppStoreApp == nil ? "app.dashed" : "app.badge.checkmark")
-        .font(.system(size: 27, weight: .light))
-        .foregroundStyle(model.selectedAppStoreApp == nil ? Studio.tertiary : Studio.accent)
+      Group {
+        if let iconURL = model.appStoreBuildIcon?.downloadURL {
+          AsyncImage(url: iconURL) { phase in
+            switch phase {
+            case .success(let image): image.resizable().scaledToFill()
+            case .failure: appPreviewPlaceholder
+            default: ProgressView().controlSize(.small)
+            }
+          }
+        } else {
+          appPreviewPlaceholder
+        }
+      }
       .frame(width: 82, height: 82)
       .background(Studio.raised)
       .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -3760,6 +4023,13 @@ private struct DeployWorkspace: View {
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private var appPreviewPlaceholder: some View {
+    Image(systemName: model.selectedAppStoreApp == nil ? "app.dashed" : "app.badge.checkmark")
+      .font(.system(size: 27, weight: .light))
+      .foregroundStyle(model.selectedAppStoreApp == nil ? Studio.tertiary : Studio.accent)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
   private var releaseInformation: some View {
@@ -3906,6 +4176,39 @@ private struct DeployWorkspace: View {
         .foregroundStyle(Studio.secondary)
       }
       Spacer(minLength: 0)
+      if let imageURL = feedback.imageURL {
+        Button { feedbackScreenshot = feedback } label: {
+          ZStack(alignment: .topTrailing) {
+            AsyncImage(url: imageURL) { phase in
+              switch phase {
+              case .success(let image): image.resizable().scaledToFill()
+              case .failure:
+                Image(systemName: "photo.badge.exclamationmark")
+                  .foregroundStyle(Studio.tertiary)
+              default: ProgressView().controlSize(.mini)
+              }
+            }
+            .frame(width: compact ? 42 : 54, height: compact ? 42 : 64)
+            .background(Studio.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            if feedback.imageURLs.count > 1 {
+              Text("\(feedback.imageURLs.count)")
+                .font(.system(size: 7.5, weight: .bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .frame(minHeight: 14)
+                .background(Color.black.opacity(0.72))
+                .clipShape(Capsule())
+                .padding(3)
+            }
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open feedback screenshot")
+        .accessibilityLabel(
+          "Open \(feedback.imageURLs.count) feedback screenshot\(feedback.imageURLs.count == 1 ? "" : "s")")
+      }
     }
     .padding(.horizontal, compact ? 12 : 20)
     .padding(.vertical, compact ? 9 : 14)
@@ -3959,6 +4262,499 @@ private struct DeployWorkspace: View {
 private struct ScreenshotRemoval: Identifiable {
   var id: String
   var fileName: String
+}
+
+private struct FeedbackScreenshotViewer: View {
+  @Environment(\.dismiss) private var dismiss
+  let feedback: AppStoreFeedback
+  @State private var selectedIndex = 0
+  @State private var image: NSImage?
+  @State private var loadError: String?
+  @State private var status: String?
+
+  private var selectedURL: URL? {
+    guard feedback.imageURLs.indices.contains(selectedIndex) else { return nil }
+    return feedback.imageURLs[selectedIndex]
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .top, spacing: 16) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(feedback.comment?.nonempty ?? "Feedback screenshot")
+            .font(.system(size: 17, weight: .bold))
+            .lineLimit(2)
+          Text(feedbackMetadata)
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        Button("Done") { dismiss() }
+          .keyboardShortcut(.cancelAction)
+      }
+      .padding(20)
+
+      Divider().overlay(Studio.separator)
+
+      Group {
+        if let image {
+          Image(nsImage: image)
+            .resizable()
+            .scaledToFit()
+            .padding(20)
+        } else if let loadError {
+          DeployEmptyState(
+            symbol: "photo.badge.exclamationmark", title: "Screenshot unavailable",
+            detail: loadError, actionTitle: "Retry",
+            action: { Task { await loadSelectedImage() } })
+        } else {
+          ProgressView("Loading screenshot…")
+            .controlSize(.small)
+        }
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Studio.raised)
+
+      if feedback.imageURLs.count > 1 {
+        ScrollView(.horizontal) {
+          HStack(spacing: 8) {
+            ForEach(Array(feedback.imageURLs.enumerated()), id: \.offset) { index, url in
+              Button { selectedIndex = index } label: {
+                AsyncImage(url: url) { phase in
+                  switch phase {
+                  case .success(let thumbnail): thumbnail.resizable().scaledToFill()
+                  case .failure:
+                    Image(systemName: "photo.badge.exclamationmark")
+                      .foregroundStyle(Studio.tertiary)
+                  default: ProgressView().controlSize(.mini)
+                  }
+                }
+                .frame(width: 58, height: 58)
+                .background(Studio.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                  RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(selectedIndex == index ? Studio.accent : .clear, lineWidth: 2)
+                }
+                .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Show feedback screenshot \(index + 1)")
+            }
+          }
+          .padding(.horizontal, 20)
+        }
+        .scrollIndicators(.hidden)
+        .frame(height: 78)
+      }
+
+      Divider().overlay(Studio.separator)
+      HStack(spacing: 10) {
+        if let status {
+          Text(status).font(.system(size: 9.5)).foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        Button("Copy", systemImage: "doc.on.doc", action: copyImage)
+          .disabled(image == nil)
+        Button("Save…", systemImage: "square.and.arrow.down", action: saveImage)
+          .disabled(image == nil)
+      }
+      .padding(.horizontal, 20)
+      .frame(height: 58)
+    }
+    .frame(width: 760, height: 720)
+    .background(Studio.surface)
+    .task(id: selectedURL) { await loadSelectedImage() }
+  }
+
+  private var feedbackMetadata: String {
+    [
+      feedback.deviceModel, feedback.osVersion,
+      feedback.createdDate?.formatted(date: .abbreviated, time: .shortened),
+    ].compactMap { $0 }.joined(separator: " · ")
+  }
+
+  private func loadSelectedImage() async {
+    image = nil
+    loadError = nil
+    status = nil
+    guard let selectedURL else {
+      loadError = "Apple did not provide a valid screenshot URL."
+      return
+    }
+    do {
+      let (data, response) = try await URLSession.shared.data(from: selectedURL)
+      if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+        throw URLError(.badServerResponse)
+      }
+      guard let loaded = NSImage(data: data) else { throw CocoaError(.fileReadCorruptFile) }
+      image = loaded
+    } catch {
+      loadError = "The TestFlight screenshot could not be downloaded: \(error.localizedDescription)"
+    }
+  }
+
+  private func copyImage() {
+    guard let image else { return }
+    NSPasteboard.general.clearContents()
+    if NSPasteboard.general.writeObjects([image]) { status = "Copied to Clipboard" }
+  }
+
+  private func saveImage() {
+    guard let image else { return }
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.png]
+    panel.nameFieldStringValue = "testflight-feedback-\(selectedIndex + 1).png"
+    panel.prompt = "Save"
+    guard panel.runModal() == .OK, let destination = panel.url else { return }
+    do {
+      guard let tiff = image.tiffRepresentation,
+        let bitmap = NSBitmapImageRep(data: tiff),
+        let png = bitmap.representation(using: .png, properties: [:])
+      else { throw CocoaError(.fileWriteUnknown) }
+      try png.write(to: destination, options: .atomic)
+      status = "Saved \(destination.lastPathComponent)"
+    } catch {
+      status = "Save failed: \(error.localizedDescription)"
+    }
+  }
+}
+
+private struct AppStoreUploadSheet: View {
+  @Environment(\.dismiss) private var dismiss
+  @EnvironmentObject var model: AppModel
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .top, spacing: 14) {
+        Image(systemName: "arrow.up.circle.fill")
+          .font(.system(size: 17, weight: .medium))
+          .foregroundStyle(Studio.accent)
+          .frame(width: 38, height: 38)
+          .background(Studio.accentSoft)
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Archive & Upload")
+            .font(.system(size: 17, weight: .bold))
+          Text("Create a signed Release archive and upload it to App Store Connect.")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer(minLength: 12)
+        if !model.appStoreUploadPhase.isRunning {
+          Button("Close") { dismiss() }
+            .keyboardShortcut(.cancelAction)
+        }
+      }
+      .padding(20)
+
+      Divider().overlay(Studio.separator)
+
+      Group {
+        switch model.appStoreUploadPhase {
+        case .idle, .preflighting:
+          uploadLoadingState
+        case .ready:
+          uploadReview
+        case .archiving, .inspecting, .uploading, .processing:
+          uploadProgress
+        case .complete, .uploaded:
+          uploadResult
+        case .failed, .cancelled:
+          uploadFailure
+        }
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    .frame(width: 620, height: 660)
+    .background(Studio.surface)
+    .interactiveDismissDisabled(model.appStoreUploadPhase.isRunning)
+  }
+
+  private var uploadLoadingState: some View {
+    VStack(spacing: 12) {
+      ProgressView().controlSize(.small)
+      Text("Checking the Release target")
+        .font(.system(size: 12, weight: .semibold))
+      Text(model.appStoreUploadStatus.nonempty ?? "Reading version, signing, and source details…")
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+    }
+    .padding(30)
+  }
+
+  @ViewBuilder private var uploadReview: some View {
+    if let preflight = model.appStoreUploadPreflight {
+      VStack(spacing: 0) {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 18) {
+            VStack(spacing: 0) {
+              uploadReviewRow("App", model.selectedAppStoreApp?.name ?? "Not selected")
+              uploadReviewRow("Source", preflight.sourceRoot.path, monospaced: true)
+              uploadReviewRow("Scheme", preflight.target.scheme)
+              uploadReviewRow("Bundle ID", preflight.target.bundleID, monospaced: true)
+              uploadReviewRow(
+                "Version", "\(preflight.target.marketingVersion) (\(preflight.target.buildNumber))")
+              uploadReviewRow("Team", preflight.target.developmentTeam ?? "Not configured")
+              uploadReviewRow("Signing", preflight.target.codeSignStyle ?? "Project default")
+              uploadReviewRow(
+                "Distribution identity",
+                preflight.distributionIdentities.first?.name ?? "Not installed", isLast: true)
+            }
+            .background(Studio.backdrop.opacity(0.7))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            if !preflight.warnings.isEmpty {
+              VStack(alignment: .leading, spacing: 8) {
+                ForEach(preflight.warnings, id: \.self) { warning in
+                  Label {
+                    Text(warning)
+                  } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                      .foregroundStyle(Studio.warning)
+                  }
+                  .font(.system(size: 9.5))
+                  .fixedSize(horizontal: false, vertical: true)
+                }
+              }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+              Toggle(
+                "Allow Xcode to update signing and provisioning",
+                isOn: $model.appStoreUploadOptions.allowProvisioningUpdates)
+              Text(
+                "Uses the connected App Store Connect key only for this operation. Xcode may "
+                  + "create or download eligible signing assets."
+              )
+              .font(.system(size: 9))
+              .foregroundStyle(Studio.secondary)
+              .padding(.leading, 20)
+
+              Toggle(
+                "Restrict this build to internal TestFlight testing",
+                isOn: $model.appStoreUploadOptions.internalTestingOnly)
+              Text(
+                "Permanent for this build: it cannot later be used for external TestFlight or "
+                  + "submitted to the App Store."
+              )
+              .font(.system(size: 9))
+              .foregroundStyle(
+                model.appStoreUploadOptions.internalTestingOnly ? Studio.warning : Studio.secondary)
+              .padding(.leading, 20)
+
+              Toggle("Upload symbols for crash reports", isOn: $model.appStoreUploadOptions.uploadSymbols)
+            }
+            .font(.system(size: 10))
+          }
+          .padding(20)
+        }
+
+        Divider().overlay(Studio.separator)
+        HStack {
+          Text("Nothing is uploaded until you approve this step.")
+            .font(.system(size: 9))
+            .foregroundStyle(Studio.secondary)
+          Spacer()
+          Button("Cancel") { dismiss() }
+          Button("Archive & Upload") { model.startAppStoreUpload() }
+            .buttonStyle(.borderedProminent)
+            .disabled(
+              preflight.distributionIdentities.isEmpty
+                && !model.appStoreUploadOptions.allowProvisioningUpdates)
+        }
+        .padding(16)
+      }
+    } else {
+      uploadFailure
+    }
+  }
+
+  private var uploadProgress: some View {
+    VStack(spacing: 0) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 22) {
+          VStack(alignment: .leading, spacing: 8) {
+            ProgressView()
+              .controlSize(.small)
+            Text(model.appStoreUploadStatus)
+              .font(.system(size: 12, weight: .semibold))
+            Text(progressDetail)
+              .font(.system(size: 9.5))
+              .foregroundStyle(Studio.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+
+          VStack(spacing: 0) {
+            uploadStep("Create signed Release archive", phase: .archiving)
+            uploadStep("Verify bundle, version, build, and team", phase: .inspecting)
+            uploadStep("Upload archive and symbols", phase: .uploading)
+            uploadStep("Wait for App Store processing", phase: .processing, isLast: true)
+          }
+          .background(Studio.backdrop.opacity(0.7))
+          .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+          Button {
+            model.isEvidenceWorkspaceOpen = true
+            model.evidenceWorkspaceTab = .terminal
+          } label: {
+            Label("View live xcodebuild output", systemImage: "terminal")
+          }
+          .buttonStyle(.plain)
+          .font(.system(size: 10, weight: .medium))
+          .foregroundStyle(Studio.accent)
+        }
+        .padding(24)
+      }
+      Divider().overlay(Studio.separator)
+      HStack {
+        Text("The API private key is removed from disk after this operation.")
+          .font(.system(size: 9))
+          .foregroundStyle(Studio.secondary)
+        Spacer()
+        Button(model.appStoreUploadPhase == .processing ? "Stop Waiting" : "Cancel") {
+          model.cancelAppStoreUpload()
+        }
+      }
+      .padding(16)
+    }
+  }
+
+  private var uploadResult: some View {
+    VStack(spacing: 18) {
+      Image(
+        systemName: model.appStoreUploadPhase == .complete
+          ? "checkmark.circle.fill" : "clock.fill"
+      )
+      .font(.system(size: 34, weight: .medium))
+      .foregroundStyle(model.appStoreUploadPhase == .complete ? Studio.success : Studio.accent)
+      Text(model.appStoreUploadPhase == .complete ? "Build ready" : "Upload accepted")
+        .font(.system(size: 16, weight: .bold))
+      Text(model.appStoreUploadStatus)
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+      if let inspection = model.appStoreUploadArchiveInspection {
+        Text("\(inspection.bundleID) · \(inspection.marketingVersion) (\(inspection.buildNumber))")
+          .font(.system(size: 9.5).monospaced())
+          .textSelection(.enabled)
+      }
+      HStack {
+        if let archiveURL = model.appStoreUploadArchiveURL {
+          Button("Reveal Archive") {
+            NSWorkspace.shared.activateFileViewerSelecting([archiveURL])
+          }
+        }
+        Button("Done") { dismiss() }
+          .buttonStyle(.borderedProminent)
+      }
+    }
+    .padding(32)
+  }
+
+  private var uploadFailure: some View {
+    VStack(spacing: 14) {
+      Image(systemName: model.appStoreUploadPhase == .cancelled ? "xmark.circle" : "exclamationmark.triangle")
+        .font(.system(size: 30, weight: .light))
+        .foregroundStyle(model.appStoreUploadPhase == .cancelled ? Studio.secondary : Studio.warning)
+      Text(model.appStoreUploadStatus.nonempty ?? "Upload unavailable")
+        .font(.system(size: 14, weight: .bold))
+      Text(model.appStoreUploadError ?? "The operation was cancelled before upload completed.")
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+        .textSelection(.enabled)
+        .frame(maxWidth: 430)
+      HStack {
+        Button("Close") { dismiss() }
+        Button(model.appStoreUploadPreflight == nil ? "Run Preflight" : "Try Again") {
+          if model.appStoreUploadPreflight == nil {
+            Task { await model.prepareAppStoreUpload() }
+          } else {
+            model.startAppStoreUpload()
+          }
+        }
+        .buttonStyle(.borderedProminent)
+      }
+    }
+    .padding(32)
+  }
+
+  private func uploadReviewRow(
+    _ label: String, _ value: String, monospaced: Bool = false, isLast: Bool = false
+  ) -> some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .firstTextBaseline, spacing: 16) {
+        Text(label)
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.secondary)
+          .frame(width: 132, alignment: .leading)
+        Text(value)
+          .font(monospaced ? .system(size: 9.5).monospaced() : .system(size: 9.5, weight: .medium))
+          .lineLimit(label == "Source" ? 2 : 1)
+          .truncationMode(.middle)
+          .textSelection(.enabled)
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 14)
+      .frame(minHeight: 38)
+      if !isLast { Divider().overlay(Studio.separator).padding(.leading, 14) }
+    }
+  }
+
+  private func uploadStep(
+    _ title: String, phase: AppStoreUploadPhase, isLast: Bool = false
+  ) -> some View {
+    let state = stepState(for: phase)
+    return VStack(spacing: 0) {
+      HStack(spacing: 10) {
+        Group {
+          switch state {
+          case .complete:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(Studio.success)
+          case .active:
+            ProgressView().controlSize(.mini)
+          case .waiting:
+            Image(systemName: "circle").foregroundStyle(Studio.tertiary)
+          }
+        }
+        .frame(width: 18)
+        Text(title)
+          .font(.system(size: 10, weight: state == .active ? .semibold : .regular))
+        Spacer()
+      }
+      .padding(.horizontal, 14)
+      .frame(height: 42)
+      if !isLast { Divider().overlay(Studio.separator).padding(.leading, 42) }
+    }
+  }
+
+  private enum UploadStepState { case waiting, active, complete }
+
+  private func stepState(for step: AppStoreUploadPhase) -> UploadStepState {
+    let order: [AppStoreUploadPhase] = [.archiving, .inspecting, .uploading, .processing]
+    guard let current = order.firstIndex(of: model.appStoreUploadPhase),
+      let target = order.firstIndex(of: step)
+    else { return model.appStoreUploadPhase == .complete ? .complete : .waiting }
+    if target < current { return .complete }
+    if target == current { return .active }
+    return .waiting
+  }
+
+  private var progressDetail: String {
+    switch model.appStoreUploadPhase {
+    case .archiving:
+      "Xcode is resolving the Release build and creating a signed .xcarchive."
+    case .inspecting:
+      "Lys is checking the archive against the app identity you approved."
+    case .uploading:
+      "Xcode is exporting for App Store Connect and transferring the binary to Apple."
+    case .processing:
+      "The upload succeeded. Apple must process it before TestFlight can use it."
+    default: ""
+    }
+  }
 }
 
 private struct AppStoreAppPicker: View {

@@ -264,7 +264,12 @@ public final class AppModel: ObservableObject {
   @Published var appStoreSelectedAppID: String?
   @Published var appStoreVersions: [AppStoreVersion] = []
   @Published var appStoreBuilds: [AppStoreBuild] = []
+  @Published var appStoreBuildIcon: AppStoreBuildIcon?
   @Published var appStoreBetaGroups: [AppStoreBetaGroup] = []
+  @Published var appStoreTesterUsages: [String: AppStoreTesterUsage] = [:]
+  @Published var appStoreTesterUsagePeriod: AppStoreTesterUsagePeriod = .oneYear
+  @Published var isAppStoreTesterAnalyticsLoading = false
+  var appStoreTesterAnalyticsRequestID = UUID()
   @Published var appStoreLocalizations: [AppStoreVersionLocalization] = []
   @Published var appStoreScreenshotSets: [AppStoreScreenshotSet] = []
   @Published var appStoreFeedback: [AppStoreFeedback] = []
@@ -277,6 +282,13 @@ public final class AppModel: ObservableObject {
   @Published var appStoreSelectionWarning: String?
   @Published var appStoreMutationError: String?
   @Published var isAppStoreMutationInProgress = false
+  @Published var appStoreUploadPhase: AppStoreUploadPhase = .idle
+  @Published var appStoreUploadPreflight: AppStoreUploadPreflight?
+  @Published var appStoreUploadOptions = AppStoreUploadOptions()
+  @Published var appStoreUploadStatus = ""
+  @Published var appStoreUploadError: String?
+  @Published var appStoreUploadArchiveInspection: AppStoreArchiveInspection?
+  @Published var appStoreUploadArchiveURL: URL?
   @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
@@ -417,8 +429,10 @@ public final class AppModel: ObservableObject {
   let appStoreCredentialSession = AppStoreCredentialSession()
   private let runner = ProcessRunner()
   private let metroRunner = ProcessRunner()
+  private let appStoreDistributionRunner = ProcessRunner()
   private let taskRoot: URL
   private let runtimeRoot: URL
+  private let deploymentRoot: URL
   private let adapterRoot: URL
   private let wdaRoot: URL
   let appStoreMetadataStore: SQLiteStore?
@@ -457,6 +471,7 @@ public final class AppModel: ObservableObject {
   private var terminalOutputBuffers: [UUID: String] = [:]
   private var terminalFlushTask: Task<Void, Never>?
   private var agentStopRequested = false
+  var appStoreUploadTask: Task<Void, Never>?
   private var simulatorWorkspaceObservers: [NSObjectProtocol] = []
   private var embeddedSimulatorSessionActive = false
 
@@ -468,6 +483,7 @@ public final class AppModel: ObservableObject {
     let root = support.appending(path: "Lys", directoryHint: .isDirectory)
     taskRoot = root.appending(path: "Tasks", directoryHint: .isDirectory)
     runtimeRoot = root.appending(path: "Runtime", directoryHint: .isDirectory)
+    deploymentRoot = root.appending(path: "Deployments", directoryHint: .isDirectory)
     adapterRoot = root.appending(path: "Adapters", directoryHint: .isDirectory)
     wdaRoot = root.appending(path: "WebDriverAgent", directoryHint: .isDirectory)
     appStoreMetadataStore = try? SQLiteStore(
@@ -3284,13 +3300,32 @@ public final class AppModel: ObservableObject {
         code: -32056,
         message: "Select an Xcode project or workspace and a shared app scheme first.")
     }
-    let targets: [AppTarget] = try await runtime.request(
-      [AppTarget].self, method: "target.discover",
-      params: .object([
-        "container": .string(container.path), "scheme": .string(selectedScheme),
-        "configuration": .string("Release"),
-        "destination": .string("generic/platform=iOS"),
-      ]))
+    let resolvedPreflight: ToolchainPreflight
+    if let preflight {
+      resolvedPreflight = preflight
+    } else {
+      resolvedPreflight = await ToolchainDiscovery.preflight(
+        developerDirectory: developerDirectory)
+    }
+    guard let xcodebuildPath = resolvedPreflight.xcodebuildPath,
+      let developerPath = resolvedPreflight.developerDirectory
+    else {
+      throw RPCError(
+        code: -32050,
+        message: "Select a full Xcode installation in Settings to verify the Release bundle ID.")
+    }
+    let workspace = taskWorkspace ?? repository ?? container.deletingLastPathComponent()
+    let coordinator = WorkspaceOperationCoordinator(workspace: workspace)
+    let lease = try await coordinator.acquire(.projectDiscovery)
+    defer { lease.release() }
+    let derivedData = runtimeRoot.appending(
+      path: "DeploymentDiscovery", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(
+      at: derivedData, withIntermediateDirectories: true)
+    let targets = try await ToolchainDiscovery.appTargets(
+      container: container, scheme: selectedScheme, configuration: "Release",
+      destination: "generic/platform=iOS", xcodebuild: URL(fileURLWithPath: xcodebuildPath),
+      developerDirectory: URL(fileURLWithPath: developerPath), derivedData: derivedData)
     guard let target = targets.first else {
       throw RPCError(
         code: -32056,
@@ -3818,6 +3853,54 @@ public final class AppModel: ObservableObject {
     let limit = 1_000_000
     if output.utf8.count > limit {
       output = "[earlier output truncated]\n" + String(output.suffix(limit))
+    }
+  }
+
+  var appStoreDeploymentArtifactsRoot: URL { deploymentRoot }
+
+  func appStoreDeploymentContainer() -> URL? { taskContainer() }
+
+  func runAppStoreDistributionCommand(
+    _ command: CommandSpec, credentialPath: String? = nil
+  ) async throws -> ProcessOutcome {
+    let displayedArguments = redactedDistributionArguments(
+      command.arguments, credentialPath: credentialPath)
+    let terminalID = beginTerminal(
+      executable: command.executable.path, arguments: displayedArguments,
+      workingDirectory: taskWorkspace ?? command.executable.deletingLastPathComponent())
+    do {
+      let outcome = try await appStoreDistributionRunner.run(
+        executable: command.executable, arguments: command.arguments,
+        workingDirectory: taskWorkspace, environment: command.environment,
+        maximumOutputBytes: 16 * 1_024 * 1_024
+      ) { [weak self] event in
+        guard event.stream != .lifecycle else { return }
+        let output = credentialPath.map {
+          event.text.replacingOccurrences(of: $0, with: "[secure temporary key]")
+        } ?? event.text
+        Task { @MainActor [weak self] in
+          self?.appendTerminalOutput(terminalID, text: output)
+        }
+      }
+      finishTerminal(terminalID, succeeded: outcome.succeeded, output: "", append: true)
+      return outcome
+    } catch {
+      finishTerminal(
+        terminalID, succeeded: false, output: "\n\(error.localizedDescription)\n", append: true)
+      throw error
+    }
+  }
+
+  func cancelAppStoreDistributionCommands() async {
+    await appStoreDistributionRunner.cancelAll()
+  }
+
+  private func redactedDistributionArguments(
+    _ arguments: [String], credentialPath: String?
+  ) -> [String] {
+    guard let credentialPath else { return arguments }
+    return arguments.map {
+      $0 == credentialPath ? "[secure temporary key]" : $0
     }
   }
 
