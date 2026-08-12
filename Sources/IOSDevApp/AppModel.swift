@@ -957,7 +957,7 @@ public final class AppModel: ObservableObject {
       : "This is a read-only source session at \(workspace.path). Do not edit files or create a build unless the host-owned journey reports that no compatible app exists."
     let journeyPolicy =
       intent.requiresRunningApp
-      ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host owns authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. If no declared flow matches the requested goal, state that the run is exploratory, then call flow.run without flowID and continue only through host-returned actions. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
+      ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host owns navigation from the current route to the flow start, authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. Do not pre-navigate or require the user to leave the app on a particular screen. If no declared flow matches the requested goal, state that the run is exploratory, then call flow.run without flowID and continue only through host-returned actions. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
     return """
       \(prompt)
@@ -2246,7 +2246,18 @@ public final class AppModel: ObservableObject {
     if stopped {
       done = "Stopped after \(actionCount) completed app interaction(s)."
     } else if let journey = activeJourney {
-      done = "Exercised \(actionCount) interaction(s) for “\(journey.goal)”."
+      switch journey.status {
+      case .passed:
+        done = "Completed “\(journey.goal)” with \(actionCount) app interaction(s)."
+      case .failed:
+        done =
+          "Attempted “\(journey.goal)”; the flow did not complete. \(actionCount) interaction(s) passed before failure."
+      case .cancelled:
+        done = "Cancelled “\(journey.goal)” after \(actionCount) completed interaction(s)."
+      case .preparing, .ready, .running:
+        done =
+          "Started “\(journey.goal)”, but it did not reach a terminal result. \(actionCount) interaction(s) passed."
+      }
     } else {
       done = "Finished the requested task and collected the available evidence."
     }

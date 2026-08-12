@@ -10,30 +10,43 @@ const require = createRequire(import.meta.url);
 const lys = require(resolve(root, "dist/index.js"));
 const lysNode = require(resolve(root, "dist/node.js"));
 
+const home = lys.screen("home", "Home");
+const done = lys.screen("done", "Done", true);
+const finish = lys.action("finish", "Finish", { route: home, resultsIn: done });
 const contract = lys.defineContract({
-  routes: [lys.screen("home", "Home"), lys.screen("done", "Done", true)],
-  capabilities: [lys.action("finish", "Finish", { route: "home", resultsIn: "done" })],
+  app: lys.application({
+    bundleIdentifier: "com.example.app", displayName: "Example", entryRoutes: [home],
+  }),
+  routes: [home, done],
+  capabilities: [finish],
   contexts: [lys.authenticatedContext({
     id: "authenticated.user",
     title: "Authenticated user",
     tokenEnvironmentKey: "LYS_TEST_SESSION_TOKEN",
     tokenSecret: "test.session",
-    readyWhen: [lys.route("home")],
+    readyWhen: [lys.route(home)],
   })],
-  flows: [{
+  flows: [lys.flow({
     id: "flow.finish",
     title: "Finish",
     context: "authenticated.user",
-    startRoute: "home",
-    steps: [{ id: "finish", title: "Finish", kind: "invoke", capability: "finish" }],
-    acceptance: [lys.route("done"), { kind: "noCrash" }],
-  }],
+    startRoute: home,
+    entryRoutes: [home],
+    steps: [lys.invoke("finish", "Finish", finish)],
+    acceptance: [lys.route(done), { kind: "noCrash" }],
+  })],
 });
 
 assert.match(lys.serializeContract(contract), /"flow.finish"/);
-assert.deepEqual(lys.screenProps("home"), {
+assert.deepEqual(lys.screenProps(home), {
   testID: "lys.screen.home", accessible: false, collapsable: false,
 });
+assert.equal(lys.screenProps(contract.routes[0]).testID, "lys.screen.home");
+assert.equal(lys.actionProps(contract.capabilities[0]).testID, "lys.action.finish");
+assert.throws(
+  () => lys.actionProps("copied.id"),
+  /shared declared screen\/action object/,
+);
 assert.throws(
   () => lys.validateContract({ ...contract, flows: [{ ...contract.flows[0], acceptance: [] }] }),
   /requires title, steps, and acceptance/,
@@ -44,6 +57,39 @@ assert.throws(
   ] }),
   /unknown result screen/,
 );
+assert.throws(
+  () => lys.validateContract({
+    ...contract,
+    routes: [...contract.routes, lys.screen("other", "Other")],
+    flows: [{ ...contract.flows[0], entryRoutes: ["other"] }],
+  }),
+  /cannot reach start screen/,
+);
+assert.throws(
+  () => lys.validateContract({
+    ...contract,
+    flows: [{
+      ...contract.flows[0],
+      context: undefined,
+      startRoute: done.id,
+      entryRoutes: [done.id, home.id],
+      acceptance: [lys.route(done)],
+    }],
+  }),
+  /action belongs to home/,
+);
+const onboarding = lys.screen("onboarding", "Onboarding");
+const finishOnboarding = lys.action("onboarding.finish", "Finish onboarding", {
+  route: onboarding, resultsIn: home,
+});
+const recovered = lys.validateContract({
+  ...contract,
+  app: lys.application({ entryRoutes: [onboarding] }),
+  routes: [onboarding, ...contract.routes],
+  capabilities: [finishOnboarding, ...contract.capabilities],
+  flows: [{ ...contract.flows[0], context: undefined, entryRoutes: [onboarding.id] }],
+});
+assert.deepEqual(recovered.flows[0].entryRoutes, [onboarding.id, home.id]);
 
 const exportRoot = await mkdtemp(resolve(tmpdir(), "lys-expo-sdk-"));
 const exportPath = resolve(exportRoot, ".lys/contract.json");

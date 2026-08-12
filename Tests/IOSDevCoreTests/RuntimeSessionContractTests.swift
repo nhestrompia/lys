@@ -10,6 +10,32 @@ private func temporaryRuntimeRoot() throws -> URL {
   return root
 }
 
+@Test func oldContractSchemaFailsClearlyAndDoesNotPartiallyConfigureTheSession() async throws {
+  let root = try temporaryRuntimeRoot()
+  let contractURL = root.appending(path: ".lys/contract.json")
+  try FileManager.default.createDirectory(
+    at: contractURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+  try Data(
+    #"{"schemaVersion":1,"flows":[{"id":"quiz.complete","title":"Quiz","steps":[],"acceptance":[]}]}"#
+      .utf8
+  ).write(to: contractURL)
+
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Test the quiz"), container: nil,
+    scheme: "Demo", destination: nil, target: nil, startDevelopmentServer: false)
+  let configured = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+
+  #expect(configured.error?.code == -32110)
+  #expect(configured.error?.message.contains("Regenerate .lys/contract.json") == true)
+  let status = await service.handle(
+    .init(id: .int(2), method: "session.status"), authenticated: &authenticated)
+  #expect(status.result?["configured"] == .bool(false))
+}
+
 @Test func unmatchedGoalUsesExplorationAlongsidePartialContract() async throws {
   let root = try temporaryRuntimeRoot()
   let contractURL = root.appending(path: ".lys/contract.json")
@@ -17,9 +43,16 @@ private func temporaryRuntimeRoot() throws -> URL {
     at: contractURL.deletingLastPathComponent(), withIntermediateDirectories: true)
   let noCrash = BlueprintPredicate(kind: .noCrash)
   let contract = InteractionBlueprint(
+    app: .init(entryRoutes: ["quiz"]),
+    routes: [
+      .init(
+        id: "quiz", title: "Quiz",
+        match: [.init(kind: .visible, selector: .init(identifier: "lys.screen.quiz"))])
+    ],
     flows: [
       .init(
-        id: "quiz.complete", title: "Complete quiz",
+        id: "quiz.complete", title: "Complete quiz", startRoute: "quiz",
+        entryRoutes: ["quiz"],
         steps: [
           .init(id: "noCrash", title: "App remains healthy", kind: .assert, predicate: noCrash)
         ], acceptance: [noCrash])

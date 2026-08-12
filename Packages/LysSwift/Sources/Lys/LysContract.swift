@@ -10,7 +10,7 @@ public struct LysContract: Codable, Sendable {
   public var flows: [LysFlow]
 
   public init(
-    schemaVersion: Int = 1, app: LysApp? = nil, routes: [LysScreen] = [],
+    schemaVersion: Int = 2, app: LysApp? = nil, routes: [LysScreen] = [],
     capabilities: [LysAction] = [], contexts: [LysContext] = [], flows: [LysFlow] = []
   ) {
     schema = "../Schemas/lys-test-contract.schema.json"
@@ -31,9 +31,32 @@ public struct LysContract: Codable, Sendable {
 public struct LysApp: Codable, Sendable {
   public var bundleIdentifier: String?
   public var displayName: String?
-  public init(bundleIdentifier: String? = nil, displayName: String? = nil) {
+  public var entryRoutes: [String]
+  public init(
+    bundleIdentifier: String? = nil, displayName: String? = nil, entryRoutes: [String]
+  ) {
     self.bundleIdentifier = bundleIdentifier
     self.displayName = displayName
+    self.entryRoutes = entryRoutes
+  }
+
+  public init(
+    bundleIdentifier: String? = nil, displayName: String? = nil, entryRoutes: [LysScreen]
+  ) {
+    self.init(
+      bundleIdentifier: bundleIdentifier, displayName: displayName,
+      entryRoutes: entryRoutes.map(\.id))
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case bundleIdentifier, displayName, entryRoutes
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    bundleIdentifier = try values.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+    displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+    entryRoutes = try values.decodeIfPresent([String].self, forKey: .entryRoutes) ?? []
   }
 }
 
@@ -87,6 +110,7 @@ public struct LysPredicate: Codable, Sendable {
   }
 
   public static func route(_ id: String) -> Self { .init(.route, route: id) }
+  public static func route(_ screen: LysScreen) -> Self { .route(screen.id) }
   public static func visible(_ id: String) -> Self {
     .init(.visible, selector: .init(identifier: id))
   }
@@ -161,6 +185,16 @@ public struct LysAction: Codable, Identifiable, Sendable {
     self.parameters = parameters
     self.risk = risk
   }
+
+  public init(
+    id: String, title: String, route: LysScreen, resultsIn: LysScreen? = nil,
+    action: LysActionKind = .tap, selector: LysSelector? = nil,
+    parameters: [String: LysParameter]? = nil, risk: LysRisk = .reversible
+  ) {
+    self.init(
+      id: id, title: title, route: route.id, resultsIn: resultsIn?.id, action: action,
+      selector: selector, parameters: parameters, risk: risk)
+  }
 }
 
 public enum LysInput: Codable, Sendable {
@@ -209,12 +243,15 @@ public struct LysContext: Codable, Identifiable, Sendable {
   public var title: String
   public var mode: LysContextMode
   public var requiredSecrets: [String]?
+  public var startRoute: String?
+  public var entryRoutes: [String]?
   public var prepare: [LysStep]
   public var readyWhen: [LysPredicate]
   public var session: LysAuthenticatedSession?
 
   public init(
     id: String, title: String, mode: LysContextMode, requiredSecrets: [String] = [],
+    startRoute: String? = nil, entryRoutes: [String]? = nil,
     prepare: [LysStep] = [], readyWhen: [LysPredicate],
     session: LysAuthenticatedSession? = nil
   ) {
@@ -222,6 +259,8 @@ public struct LysContext: Codable, Identifiable, Sendable {
     self.title = title
     self.mode = mode
     self.requiredSecrets = requiredSecrets.isEmpty ? nil : requiredSecrets
+    self.startRoute = startRoute
+    self.entryRoutes = entryRoutes
     self.prepare = prepare
     self.readyWhen = readyWhen
     self.session = session
@@ -242,6 +281,16 @@ public struct LysContext: Codable, Identifiable, Sendable {
     readyWhen: [LysPredicate]
   ) -> Self {
     .init(id: id, title: title, mode: .uiFlow, readyWhen: readyWhen)
+  }
+
+  public static func ui(
+    id: String, title: String, startRoute: LysScreen, entryRoutes: [LysScreen],
+    requiredSecrets: [String] = [], prepare: [LysStep], readyWhen: [LysPredicate]
+  ) -> Self {
+    .init(
+      id: id, title: title, mode: .uiFlow, requiredSecrets: requiredSecrets,
+      startRoute: startRoute.id, entryRoutes: entryRoutes.map(\.id), prepare: prepare,
+      readyWhen: readyWhen)
   }
 }
 
@@ -280,6 +329,19 @@ public struct LysStep: Codable, Identifiable, Sendable {
     self.maximumIterations = maximumIterations
     self.steps = steps
   }
+
+  public static func navigate(id: String, title: String, to screen: LysScreen) -> Self {
+    .init(id: id, title: title, kind: .navigate, route: screen.id)
+  }
+
+  public static func invoke(
+    id: String, title: String, action: LysAction,
+    arguments: [String: LysInput]? = nil, expect: [LysPredicate]? = nil
+  ) -> Self {
+    .init(
+      id: id, title: title, kind: .invoke, capability: action.id,
+      arguments: arguments, expect: expect)
+  }
 }
 
 public struct LysFlow: Codable, Identifiable, Sendable {
@@ -287,7 +349,8 @@ public struct LysFlow: Codable, Identifiable, Sendable {
   public var title: String
   public var description: String?
   public var context: String?
-  public var startRoute: String?
+  public var startRoute: String
+  public var entryRoutes: [String]
   public var parameters: [String: LysParameter]?
   public var requiredSecrets: [String]?
   public var steps: [LysStep]
@@ -295,7 +358,7 @@ public struct LysFlow: Codable, Identifiable, Sendable {
 
   public init(
     id: String, title: String, description: String? = nil, context: String? = nil,
-    startRoute: String? = nil, parameters: [String: LysParameter]? = nil,
+    startRoute: String, entryRoutes: [String], parameters: [String: LysParameter]? = nil,
     requiredSecrets: [String]? = nil, steps: [LysStep], acceptance: [LysPredicate]
   ) {
     self.id = id
@@ -303,9 +366,22 @@ public struct LysFlow: Codable, Identifiable, Sendable {
     self.description = description
     self.context = context
     self.startRoute = startRoute
+    self.entryRoutes = entryRoutes
     self.parameters = parameters
     self.requiredSecrets = requiredSecrets
     self.steps = steps
     self.acceptance = acceptance
+  }
+
+  public init(
+    id: String, title: String, description: String? = nil, context: String? = nil,
+    startRoute: LysScreen, entryRoutes: [LysScreen],
+    parameters: [String: LysParameter]? = nil, requiredSecrets: [String]? = nil,
+    steps: [LysStep], acceptance: [LysPredicate]
+  ) {
+    self.init(
+      id: id, title: title, description: description, context: context,
+      startRoute: startRoute.id, entryRoutes: entryRoutes.map(\.id), parameters: parameters,
+      requiredSecrets: requiredSecrets, steps: steps, acceptance: acceptance)
   }
 }

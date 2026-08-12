@@ -8,20 +8,47 @@ public struct LysContractValidationError: Error, LocalizedError, Equatable, Send
 }
 
 extension LysContract {
+  /// Adds every known screen that can reach a flow start through safe declared actions. Explicit
+  /// entries remain coverage guarantees, while a restored app on another recoverable screen does
+  /// not become unusable merely because the developer did not predict that attachment state.
+  public func expandingRecoverableFlowEntries() -> Self {
+    var copy = self
+    copy.flows = flows.map { flow in
+      var expanded = flow
+      let recoverable = routes.map(\.id).filter {
+        hasNavigationPath(from: $0, to: flow.startRoute)
+      }
+      var seen = Set<String>()
+      expanded.entryRoutes = (flow.entryRoutes + recoverable).filter {
+        seen.insert($0).inserted
+      }
+      return expanded
+    }
+    return copy
+  }
+
   /// Validates cross-references and deterministic execution constraints before a contract is
   /// exported. The desktop runner repeats these checks at load time; catching them in the SDK
   /// keeps malformed flows out of source control.
   public func validate() throws {
-    guard schemaVersion == 1 else { throw invalid("Unsupported schemaVersion \(schemaVersion)") }
+    let validationFlows = expandingRecoverableFlowEntries().flows
+    guard schemaVersion == 2 else { throw invalid("Unsupported schemaVersion \(schemaVersion)") }
     try unique(routes.map(\.id), kind: "screen")
     try unique(capabilities.map(\.id), kind: "action")
     try unique(contexts.map(\.id), kind: "context")
-    try unique(flows.map(\.id), kind: "flow")
-    guard !flows.isEmpty else { throw invalid("A contract requires at least one flow") }
+    try unique(validationFlows.map(\.id), kind: "flow")
+    guard !validationFlows.isEmpty else { throw invalid("A contract requires at least one flow") }
 
     let screenIDs = Set(routes.map(\.id))
     let actionIDs = Set(capabilities.map(\.id))
     let contextIDs = Set(contexts.map(\.id))
+    guard let app, !app.entryRoutes.isEmpty else {
+      throw invalid("Contract app.entryRoutes must declare the real screens where testing can begin")
+    }
+    try unique(app.entryRoutes, kind: "app entry screen")
+    for route in app.entryRoutes where !screenIDs.contains(route) {
+      throw invalid("App entryRoutes references unknown screen \(route)")
+    }
 
     for screen in routes {
       guard !screen.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -80,6 +107,39 @@ extension LysContract {
       }
       try validate(
         context.prepare, owner: "Context \(context.id)", screens: screenIDs, actions: actionIDs)
+      if !context.prepare.isEmpty {
+        guard let startRoute = context.startRoute, screenIDs.contains(startRoute) else {
+          throw invalid("Context \(context.id) preparation requires a valid startRoute")
+        }
+        guard let entryRoutes = context.entryRoutes, !entryRoutes.isEmpty else {
+          throw invalid("Context \(context.id) preparation requires entryRoutes")
+        }
+        try unique(entryRoutes, kind: "entry route in context \(context.id)")
+        for entryRoute in entryRoutes {
+          guard screenIDs.contains(entryRoute) else {
+            throw invalid("Context \(context.id) references unknown entry route \(entryRoute)")
+          }
+          guard hasNavigationPath(from: entryRoute, to: startRoute) else {
+            throw invalid(
+              "Context \(context.id) cannot reach start screen \(startRoute) from entry route \(entryRoute)"
+            )
+          }
+        }
+        if context.mode == .uiFlow {
+          for route in app.entryRoutes where !entryRoutes.contains(route) {
+            throw invalid(
+              "Context \(context.id) must support app entry screen \(route); declare its recovery path before preparation"
+            )
+          }
+        }
+        let finalRoute = try validateRouteExecution(
+          context.prepare, from: startRoute, owner: "Context \(context.id)")
+        for route in context.readyWhen.compactMap({ $0.kind == .route ? $0.route : nil })
+        where route != finalRoute {
+          throw invalid(
+            "Context \(context.id) preparation ends on \(finalRoute), not ready route \(route)")
+        }
+      }
       let undeclaredContextSecrets = secrets(in: context.prepare)
         .subtracting(context.requiredSecrets ?? [])
       if let secret = undeclaredContextSecrets.sorted().first {
@@ -88,15 +148,59 @@ extension LysContract {
       try validate(context.readyWhen, owner: "Context \(context.id)", screens: screenIDs)
     }
 
-    for flow in flows {
+    for flow in validationFlows {
       guard !flow.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw invalid("Flow \(flow.id) requires a title")
       }
       if let context = flow.context, !contextIDs.contains(context) {
         throw invalid("Flow \(flow.id) references unknown context \(context)")
       }
-      if let start = flow.startRoute, !screenIDs.contains(start) {
-        throw invalid("Flow \(flow.id) references unknown start screen \(start)")
+      guard screenIDs.contains(flow.startRoute) else {
+        throw invalid("Flow \(flow.id) references unknown start screen \(flow.startRoute)")
+      }
+      guard !flow.entryRoutes.isEmpty else {
+        throw invalid("Flow \(flow.id) requires at least one supported entry route")
+      }
+      try unique(flow.entryRoutes, kind: "entry route in flow \(flow.id)")
+      for entryRoute in flow.entryRoutes {
+        guard screenIDs.contains(entryRoute) else {
+          throw invalid("Flow \(flow.id) references unknown entry route \(entryRoute)")
+        }
+        guard hasNavigationPath(from: entryRoute, to: flow.startRoute) else {
+          throw invalid(
+            "Flow \(flow.id) cannot reach start screen \(flow.startRoute) from entry route \(entryRoute); declare the missing action resultsIn transition"
+          )
+        }
+      }
+      if let contextID = flow.context,
+        let context = contexts.first(where: { $0.id == contextID })
+      {
+        let readyRoutes = context.readyWhen.compactMap { $0.kind == .route ? $0.route : nil }
+        for route in readyRoutes where !flow.entryRoutes.contains(route) {
+          throw invalid(
+            "Flow \(flow.id) context becomes ready on \(route), but that route is missing from entryRoutes"
+          )
+        }
+      }
+      let context = flow.context.flatMap { contextID in
+        contexts.first(where: { $0.id == contextID })
+      }
+      let requiredEntries: [String]
+      if let context,
+        context.mode == .authenticatedSession || !context.prepare.isEmpty
+      {
+        requiredEntries = context.readyWhen.compactMap { $0.kind == .route ? $0.route : nil }
+        guard !requiredEntries.isEmpty else {
+          throw invalid(
+            "Flow \(flow.id) context must declare a route readyWhen so entry coverage can be proven")
+        }
+      } else {
+        requiredEntries = app.entryRoutes
+      }
+      for route in requiredEntries where !flow.entryRoutes.contains(route) {
+        throw invalid(
+          "Flow \(flow.id) does not support required entry screen \(route); add the real navigation action with route/resultsIn, then include it in entryRoutes"
+        )
       }
       guard !flow.steps.isEmpty else { throw invalid("Flow \(flow.id) requires steps") }
       guard !flow.acceptance.isEmpty else {
@@ -112,7 +216,73 @@ extension LysContract {
       }
       try validate(flow.steps, owner: "Flow \(flow.id)", screens: screenIDs, actions: actionIDs)
       try validate(flow.acceptance, owner: "Flow \(flow.id)", screens: screenIDs)
+      let finalRoute = try validateRouteExecution(
+        flow.steps, from: flow.startRoute, owner: "Flow \(flow.id)")
+      for route in flow.acceptance.compactMap({ $0.kind == .route ? $0.route : nil })
+      where route != finalRoute {
+        throw invalid("Flow \(flow.id) ends on \(finalRoute), not acceptance route \(route)")
+      }
     }
+  }
+
+  private func validateRouteExecution(
+    _ steps: [LysStep], from startRoute: String, owner: String
+  ) throws -> String {
+    var route = startRoute
+    let actionByID = Dictionary(uniqueKeysWithValues: capabilities.map { ($0.id, $0) })
+    for step in steps {
+      switch step.kind {
+      case .navigate:
+        guard let destination = step.route,
+          hasNavigationPath(from: route, to: destination)
+        else {
+          throw invalid(
+            "\(owner) step \(step.id) cannot navigate from \(route) to \(step.route ?? "unknown")")
+        }
+        route = destination
+      case .invoke:
+        guard let id = step.capability, let action = actionByID[id] else { continue }
+        if let expected = action.route, expected != route {
+          throw invalid(
+            "\(owner) step \(step.id) invokes \(id) on \(route), but the action belongs to \(expected)")
+        }
+        if let result = action.resultsIn { route = result }
+        let expectedRoutes = step.expect?.compactMap { $0.kind == .route ? $0.route : nil } ?? []
+        if let expected = expectedRoutes.first {
+          if action.resultsIn != nil, route != expected {
+            throw invalid(
+              "\(owner) step \(step.id) declares result \(route), but expects route \(expected)")
+          }
+          route = expected
+        }
+      case .repeatUntil:
+        route = try validateRouteExecution(
+          step.steps ?? [], from: route, owner: "\(owner) repeat \(step.id)")
+        if step.until?.kind == .route, let terminal = step.until?.route { route = terminal }
+      case .assert:
+        break
+      }
+    }
+    return route
+  }
+
+  private func hasNavigationPath(from source: String, to destination: String) -> Bool {
+    if source == destination { return true }
+    let edges = capabilities.filter {
+      $0.route != nil && $0.resultsIn != nil
+        && $0.risk != .destructive && $0.risk != .external
+    }
+    var queue = [source]
+    var visited: Set<String> = [source]
+    while !queue.isEmpty {
+      let route = queue.removeFirst()
+      for action in edges where action.route == route {
+        guard let next = action.resultsIn, visited.insert(next).inserted else { continue }
+        if next == destination { return true }
+        queue.append(next)
+      }
+    }
+    return false
   }
 
   private func validate(

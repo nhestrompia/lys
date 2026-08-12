@@ -10,7 +10,8 @@ const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"
 
 const required = [
   "authenticatedContext", "signedOutContext", "defineContract", "validateContract",
-  "serializeContract", "actionProps", "screenProps", "stateProps",
+  "serializeContract", "application", "flow", "navigate", "invoke", "uiContext",
+  "actionProps", "screenProps", "stateProps",
 ];
 for (const symbol of required) {
   if (!source.includes(`function ${symbol}`) && !source.includes(`const ${symbol}`)) {

@@ -2,6 +2,12 @@
 import SwiftUI
 
 extension View {
+  public func lysScreen(_ screen: LysScreen) -> some View {
+    Lys.register(screen)
+    return accessibilityElement(children: .contain)
+      .accessibilityIdentifier("lys.screen.\(screen.id)")
+  }
+
   public func lysScreen(_ id: String, title: String, terminal: Bool = false) -> some View {
     let screen = LysScreen(id: id, title: title, terminal: terminal)
     Lys.registry.register(screen)
@@ -19,6 +25,11 @@ extension View {
         id: id, title: title, route: screen, resultsIn: resultsIn, action: kind,
         parameters: parameters, risk: risk))
     return accessibilityIdentifier("lys.action.\(id)")
+  }
+
+  public func lysAction(_ action: LysAction) -> some View {
+    Lys.register(action)
+    return accessibilityIdentifier("lys.action.\(action.id)")
   }
 
   /// Exposes a small, non-sensitive observable value through the native accessibility surface.

@@ -2,12 +2,10 @@
 import UIKit
 
 extension UIView {
-  /// Registers a UIKit screen without turning its container into one accessibility element. Root
-  /// views receive a tiny semantic marker so their buttons remain independently actionable.
   @discardableResult
-  public func lysScreen(_ id: String, title: String, terminal: Bool = false) -> Self {
-    Lys.registry.register(LysScreen(id: id, title: title, terminal: terminal))
-    let identifier = "lys.screen.\(id)"
+  public func lysScreen(_ screen: LysScreen) -> Self {
+    Lys.register(screen)
+    let identifier = "lys.screen.\(screen.id)"
     if self is UIControl || self is UILabel || self is UIImageView {
       isAccessibilityElement = true
       accessibilityIdentifier = identifier
@@ -17,7 +15,7 @@ extension UIView {
       marker.isAccessibilityElement = true
       marker.isUserInteractionEnabled = false
       marker.accessibilityIdentifier = identifier
-      marker.accessibilityLabel = title
+      marker.accessibilityLabel = screen.title
       addSubview(marker)
       NSLayoutConstraint.activate([
         marker.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -27,6 +25,13 @@ extension UIView {
       ])
     }
     return self
+  }
+
+  /// Registers a UIKit screen without turning its container into one accessibility element. Root
+  /// views receive a tiny semantic marker so their buttons remain independently actionable.
+  @discardableResult
+  public func lysScreen(_ id: String, title: String, terminal: Bool = false) -> Self {
+    lysScreen(LysScreen(id: id, title: title, terminal: terminal))
   }
 
   /// Registers and identifies an actionable UIKit control.
@@ -42,6 +47,14 @@ extension UIView {
         parameters: parameters, risk: risk))
     isAccessibilityElement = true
     accessibilityIdentifier = "lys.action.\(id)"
+    return self
+  }
+
+  @discardableResult
+  public func lysAction(_ action: LysAction) -> Self {
+    Lys.register(action)
+    isAccessibilityElement = true
+    accessibilityIdentifier = "lys.action.\(action.id)"
     return self
   }
 

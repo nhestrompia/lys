@@ -75,6 +75,8 @@ export type LysContext = {
   title: string;
   mode: "uiFlow" | "authenticatedSession";
   requiredSecrets?: string[];
+  startRoute?: string;
+  entryRoutes?: string[];
   prepare: LysStep[];
   readyWhen: LysPredicate[];
   session?: {
@@ -88,17 +90,24 @@ export type LysFlow = {
   title: string;
   description?: string;
   context?: string;
-  startRoute?: string;
+  startRoute: string;
+  entryRoutes: string[];
   parameters?: LysAction["parameters"];
   requiredSecrets?: string[];
   steps: LysStep[];
   acceptance: LysPredicate[];
 };
 
+export type LysApplication = {
+  bundleIdentifier?: string;
+  displayName?: string;
+  entryRoutes: string[];
+};
+
 export type LysContract = {
   $schema?: string;
-  schemaVersion: 1;
-  app?: { bundleIdentifier?: string; displayName?: string };
+  schemaVersion: 2;
+  app: LysApplication;
   routes: LysScreen[];
   capabilities: LysAction[];
   contexts: LysContext[];
@@ -210,9 +219,86 @@ function stepSecrets(steps: LysStep[]): Set<string> {
   return result;
 }
 
+function hasNavigationPath(
+  source: string, destination: string, capabilities: LysAction[],
+): boolean {
+  if (source === destination) return true;
+  const edges = capabilities.filter((item) =>
+    item.route && item.resultsIn && item.risk !== "destructive" && item.risk !== "external");
+  const queue = [source];
+  const visited = new Set([source]);
+  while (queue.length) {
+    const route = queue.shift()!;
+    for (const action of edges.filter((item) => item.route === route)) {
+      const next = action.resultsIn!;
+      if (visited.has(next)) continue;
+      if (next === destination) return true;
+      visited.add(next);
+      queue.push(next);
+    }
+  }
+  return false;
+}
+
+/**
+ * Expands developer-declared coverage roots with every known route that can safely reach each
+ * flow's start. This keeps a restored/running app usable without requiring developers to predict
+ * every screen on which a user might leave it.
+ */
+export function expandRecoverableEntries(contract: LysContract): LysContract {
+  return {
+    ...contract,
+    flows: contract.flows.map((item) => {
+      const seen = new Set<string>();
+      const recoverable = contract.routes
+        .map((route) => route.id)
+        .filter((route) => hasNavigationPath(route, item.startRoute, contract.capabilities));
+      return {
+        ...item,
+        entryRoutes: [...item.entryRoutes, ...recoverable]
+          .filter((route) => !seen.has(route) && Boolean(seen.add(route))),
+      };
+    }),
+  };
+}
+
+function validateRouteExecution(
+  steps: LysStep[], startRoute: string, owner: string, capabilities: LysAction[],
+): string {
+  let current = startRoute;
+  const byID = new Map(capabilities.map((item) => [item.id, item]));
+  for (const step of steps) {
+    if (step.kind === "navigate") {
+      if (!step.route || !hasNavigationPath(current, step.route, capabilities)) {
+        fail(`${owner} step ${step.id} cannot navigate from ${current} to ${step.route ?? "unknown"}`);
+      }
+      current = step.route;
+    } else if (step.kind === "invoke") {
+      const action = step.capability ? byID.get(step.capability) : undefined;
+      if (!action) continue;
+      if (action.route && action.route !== current) {
+        fail(`${owner} step ${step.id} invokes ${action.id} on ${current}, but the action belongs to ${action.route}`);
+      }
+      if (action.resultsIn) current = action.resultsIn;
+      const expected = step.expect?.find((item) => item.kind === "route")?.route;
+      if (expected) {
+        if (action.resultsIn && current !== expected) {
+          fail(`${owner} step ${step.id} declares result ${current}, but expects route ${expected}`);
+        }
+        current = expected;
+      }
+    } else if (step.kind === "repeatUntil") {
+      current = validateRouteExecution(step.steps ?? [], current, `${owner} repeat ${step.id}`, capabilities);
+      if (step.until?.kind === "route" && step.until.route) current = step.until.route;
+    }
+  }
+  return current;
+}
+
 /** Validates the same cross-references and bounded-flow rules enforced by the Lys runner. */
 export function validateContract(contract: LysContract): LysContract {
-  if (contract.schemaVersion !== 1) fail(`Unsupported schemaVersion ${contract.schemaVersion}`);
+  contract = expandRecoverableEntries(contract);
+  if (contract.schemaVersion !== 2) fail(`Unsupported schemaVersion ${contract.schemaVersion}`);
   if (!contract.flows.length) fail("A contract requires at least one flow");
   unique(contract.routes.map((item) => item.id), "screen");
   unique(contract.capabilities.map((item) => item.id), "action");
@@ -221,6 +307,13 @@ export function validateContract(contract: LysContract): LysContract {
   const screens = new Set(contract.routes.map((item) => item.id));
   const actions = new Set(contract.capabilities.map((item) => item.id));
   const contexts = new Set(contract.contexts.map((item) => item.id));
+  if (!contract.app?.entryRoutes?.length) {
+    fail("Contract app.entryRoutes must declare the real screens where testing can begin");
+  }
+  unique(contract.app.entryRoutes, "app entry screen");
+  for (const entryRoute of contract.app.entryRoutes) {
+    if (!screens.has(entryRoute)) fail(`App entryRoutes references unknown screen ${entryRoute}`);
+  }
 
   for (const screen of contract.routes) {
     if (!screen.title.trim() || !screen.match.length) fail(`Screen ${screen.id} requires title and match predicates`);
@@ -253,6 +346,34 @@ export function validateContract(contract: LysContract): LysContract {
     }
     unique(context.requiredSecrets ?? [], "secret");
     validateSteps(context.prepare, `Context ${context.id}`, screens, actions);
+    if (context.prepare.length) {
+      if (!context.startRoute || !screens.has(context.startRoute)) {
+        fail(`Context ${context.id} preparation requires a valid startRoute`);
+      }
+      if (!context.entryRoutes?.length) fail(`Context ${context.id} preparation requires entryRoutes`);
+      unique(context.entryRoutes, `entry route in context ${context.id}`);
+      for (const entryRoute of context.entryRoutes) {
+        if (!screens.has(entryRoute)) fail(`Context ${context.id} references unknown entry route ${entryRoute}`);
+        if (!hasNavigationPath(entryRoute, context.startRoute, contract.capabilities)) {
+          fail(`Context ${context.id} cannot reach start screen ${context.startRoute} from entry route ${entryRoute}`);
+        }
+      }
+      if (context.mode === "uiFlow") {
+        for (const appEntry of contract.app.entryRoutes) {
+          if (!context.entryRoutes.includes(appEntry)) {
+            fail(`Context ${context.id} must support app entry screen ${appEntry}; declare its recovery path before preparation`);
+          }
+        }
+      }
+      const finalRoute = validateRouteExecution(
+        context.prepare, context.startRoute, `Context ${context.id}`, contract.capabilities,
+      );
+      for (const readyRoute of context.readyWhen.filter((item) => item.kind === "route")) {
+        if (readyRoute.route !== finalRoute) {
+          fail(`Context ${context.id} preparation ends on ${finalRoute}, not ready route ${readyRoute.route}`);
+        }
+      }
+    }
     for (const secret of stepSecrets(context.prepare)) {
       if (!context.requiredSecrets?.includes(secret)) fail(`Context ${context.id} must declare step secret ${secret}`);
     }
@@ -263,7 +384,39 @@ export function validateContract(contract: LysContract): LysContract {
       fail(`Flow ${flow.id} requires title, steps, and acceptance predicates`);
     }
     if (flow.context && !contexts.has(flow.context)) fail(`Flow ${flow.id} references unknown context ${flow.context}`);
-    if (flow.startRoute && !screens.has(flow.startRoute)) fail(`Flow ${flow.id} references unknown start screen ${flow.startRoute}`);
+    if (!screens.has(flow.startRoute)) fail(`Flow ${flow.id} references unknown start screen ${flow.startRoute}`);
+    if (!flow.entryRoutes?.length) fail(`Flow ${flow.id} requires at least one supported entry route`);
+    unique(flow.entryRoutes, `entry route in flow ${flow.id}`);
+    for (const entryRoute of flow.entryRoutes) {
+      if (!screens.has(entryRoute)) fail(`Flow ${flow.id} references unknown entry route ${entryRoute}`);
+      if (!hasNavigationPath(entryRoute, flow.startRoute, contract.capabilities)) {
+        fail(`Flow ${flow.id} cannot reach start screen ${flow.startRoute} from entry route ${entryRoute}; declare the missing action resultsIn transition`);
+      }
+    }
+    if (flow.context) {
+      const context = contract.contexts.find((item) => item.id === flow.context)!;
+      const readyRoutes = context.readyWhen.filter((item) => item.kind === "route").map((item) => item.route!);
+      for (const route of readyRoutes) {
+        if (!flow.entryRoutes.includes(route)) {
+          fail(`Flow ${flow.id} context becomes ready on ${route}, but that route is missing from entryRoutes`);
+        }
+      }
+    }
+    const context = flow.context
+      ? contract.contexts.find((item) => item.id === flow.context)
+      : undefined;
+    const requiredEntries = context &&
+      (context.mode === "authenticatedSession" || context.prepare.length)
+      ? context.readyWhen.filter((item) => item.kind === "route").map((item) => item.route!)
+      : contract.app.entryRoutes;
+    if (!requiredEntries.length) {
+      fail(`Flow ${flow.id} context must declare a route readyWhen so entry coverage can be proven`);
+    }
+    for (const entryRoute of requiredEntries) {
+      if (!flow.entryRoutes.includes(entryRoute)) {
+        fail(`Flow ${flow.id} does not support required entry screen ${entryRoute}; add the real navigation action with route/resultsIn, then include it in entryRoutes`);
+      }
+    }
     unique(flow.requiredSecrets ?? [], "secret");
     for (const [name, parameter] of Object.entries(flow.parameters ?? {})) {
       validateParameter(parameter, `Flow ${flow.id} parameter ${name}`);
@@ -273,6 +426,14 @@ export function validateContract(contract: LysContract): LysContract {
     }
     validateSteps(flow.steps, `Flow ${flow.id}`, screens, actions);
     flow.acceptance.forEach((item) => validatePredicate(item, `Flow ${flow.id}`, screens));
+    const finalRoute = validateRouteExecution(
+      flow.steps, flow.startRoute, `Flow ${flow.id}`, contract.capabilities,
+    );
+    for (const accepted of flow.acceptance.filter((item) => item.kind === "route")) {
+      if (accepted.route !== finalRoute) {
+        fail(`Flow ${flow.id} ends on ${finalRoute}, not acceptance route ${accepted.route}`);
+      }
+    }
   }
   return contract;
 }
@@ -281,7 +442,11 @@ export function serializeContract(contract: LysContract): string {
   return `${JSON.stringify(validateContract(contract), null, 2)}\n`;
 }
 
-export const route = (id: string): LysPredicate => ({ kind: "route", route: id });
+type LysReference<T extends { id: string }> = Pick<T, "id">;
+
+export const route = (reference: LysReference<LysScreen>): LysPredicate => ({
+  kind: "route", route: semanticID(reference),
+});
 export const visible = (identifier: string): LysPredicate => ({
   kind: "visible",
   selector: { identifier },
@@ -304,27 +469,92 @@ export function screen(id: string, title: string, terminal = false): LysScreen {
 export function action(
   id: string,
   title: string,
-  options: Omit<LysAction, "id" | "title" | "action" | "selector"> & {
+  options: Omit<LysAction, "id" | "title" | "action" | "selector" | "route" | "resultsIn"> & {
     action?: LysActionKind;
     selector?: LysSelector;
+    route?: LysReference<LysScreen>;
+    resultsIn?: LysReference<LysScreen>;
   } = {},
 ): LysAction {
+  const { route: source, resultsIn, ...rest } = options;
   return {
     id,
     title,
     action: options.action ?? "tap",
     selector: options.selector ?? { identifier: `lys.action.${id}` },
-    ...options,
+    ...rest,
+    ...(source ? { route: semanticID(source) } : {}),
+    ...(resultsIn ? { resultsIn: semanticID(resultsIn) } : {}),
   };
 }
 
-export function screenProps(id: string) {
+export function flow(
+  options: Omit<LysFlow, "startRoute" | "entryRoutes"> & {
+    startRoute: LysReference<LysScreen>;
+    entryRoutes: LysReference<LysScreen>[];
+  },
+): LysFlow {
+  return {
+    ...options,
+    startRoute: semanticID(options.startRoute),
+    entryRoutes: options.entryRoutes.map(semanticID),
+  };
+}
+
+export function navigate(
+  id: string, title: string, destination: LysReference<LysScreen>,
+): LysStep {
+  return { id, title, kind: "navigate", route: semanticID(destination) };
+}
+
+export function invoke(
+  id: string, title: string, capability: LysReference<LysAction>,
+  options: Omit<LysStep, "id" | "title" | "kind" | "capability"> = {},
+): LysStep {
+  return { ...options, id, title, kind: "invoke", capability: semanticID(capability) };
+}
+
+export function uiContext(options: {
+  id: string;
+  title: string;
+  startRoute: LysReference<LysScreen>;
+  entryRoutes: LysReference<LysScreen>[];
+  prepare: LysStep[];
+  readyWhen: LysPredicate[];
+  requiredSecrets?: string[];
+}): LysContext {
+  return {
+    ...options,
+    mode: "uiFlow",
+    startRoute: semanticID(options.startRoute),
+    entryRoutes: options.entryRoutes.map(semanticID),
+  };
+}
+
+function semanticID(reference: { id: string }): string {
+  if (!reference || typeof reference !== "object" || !reference.id) {
+    fail("Lys semantic helpers require a shared declared screen/action object, not a copied string ID");
+  }
+  return reference.id;
+}
+
+export function application(options: {
+  bundleIdentifier?: string;
+  displayName?: string;
+  entryRoutes: LysReference<LysScreen>[];
+}): LysApplication {
+  return { ...options, entryRoutes: options.entryRoutes.map(semanticID) };
+}
+
+export function screenProps(reference: LysReference<LysScreen>) {
+  const id = semanticID(reference);
   // A React Native container with accessible=true collapses its descendants into one element,
   // hiding nested buttons from XCTest. Keep the native view and expose its testID without grouping.
   return { testID: `lys.screen.${id}`, accessible: false, collapsable: false } as const;
 }
 
-export function actionProps(id: string) {
+export function actionProps(reference: LysReference<LysAction>) {
+  const id = semanticID(reference);
   return { testID: `lys.action.${id}`, accessible: true } as const;
 }
 
@@ -367,7 +597,7 @@ export function signedOutContext(
 }
 
 export function defineContract(contract: Omit<LysContract, "schemaVersion">): LysContract {
-  return validateContract({ schemaVersion: 1, ...contract });
+  return validateContract({ schemaVersion: 2, ...contract });
 }
 
 type NativeLysModule = {

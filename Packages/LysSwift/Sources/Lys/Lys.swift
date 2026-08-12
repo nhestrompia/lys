@@ -7,6 +7,8 @@ public enum Lys {
     registry.configure(app)
   }
 
+  public static func register(_ screen: LysScreen) { registry.register(screen) }
+  public static func register(_ action: LysAction) { registry.register(action) }
   public static func register(_ context: LysContext) { registry.register(context) }
   public static func register(_ flow: LysFlow) { registry.register(flow) }
 
@@ -43,6 +45,7 @@ public final class LysRegistry: @unchecked Sendable {
         capabilities: actions.values.sorted { $0.id < $1.id },
         contexts: contexts.values.sorted { $0.id < $1.id },
         flows: flows.values.sorted { $0.id < $1.id })
+        .expandingRecoverableFlowEntries()
     }
   }
 

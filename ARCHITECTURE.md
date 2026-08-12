@@ -43,6 +43,16 @@ issues screen-bound capability IDs. SDK declarations generate human-stable scree
 transition edges, protected authenticated-session setup, UI-authentication flows, parameters,
 bounded loops, and terminal criteria; they cannot make an absent control actionable. Declared
 `screen → resultsIn` edges form a safe graph that the host, not the model, plans across.
+Schema-version-2 flows declare guaranteed coverage roots and a start route. SDK export and host
+loading derive every additional declared route with a safe path to that start. The host executes
+the path from the observed current screen before running the flow body, so a restored app does not
+fail merely because a manually maintained entry whitelist omitted its current route.
+SDK and host validation also symbolically track the route after every declared step, rejecting
+wrong-screen actions before a model or Simulator is involved.
+The contract also declares guaranteed app-level bootstrap/restoration roots. Flows without a
+normalizing auth/setup context must cover those roots. Expo semantic helpers require shared
+declaration objects so UI
+instrumentation and contract export cannot silently maintain different action lists.
 
 The MCP surface intentionally excludes Simulator lifecycle, raw hierarchy queries, selectors,
 coordinates, and direct WDA calls. A declared flow is one `flow.run` call. Zero-integration testing

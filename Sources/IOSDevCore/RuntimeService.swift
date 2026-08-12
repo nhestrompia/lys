@@ -236,12 +236,14 @@ public actor RuntimeService {
     }
     do {
       let configuration: RuntimeSessionConfiguration = try decode(params)
-      sessionConfiguration = configuration
-      interactionBlueprint = try InteractionBlueprintDiscovery.load(in: workspace)
+      let loadedBlueprint = try InteractionBlueprintDiscovery.load(in: workspace)
       let projectConfigurationURL = workspace.appending(path: ".lys/config.json")
-      projectConfiguration =
+      let loadedProjectConfiguration =
         FileManager.default.fileExists(atPath: projectConfigurationURL.path)
         ? try LysConfiguration.load(from: projectConfigurationURL) : nil
+      sessionConfiguration = configuration
+      interactionBlueprint = loadedBlueprint
+      projectConfiguration = loadedProjectConfiguration
       sessionStoppedByHost = false
       activeJourney = nil
       rejectedActionStates = [:]
@@ -264,6 +266,8 @@ public actor RuntimeService {
           "configured": .bool(true), "intent": try jsonValue(configuration.intent),
           "message": .string("Host testing policy configured."),
         ]))
+    } catch let error as RPCError {
+      return failure(request.id, error.code, "Lys contract invalid: \(error.message)")
     } catch {
       return failure(request.id, -32602, "Invalid host session configuration: \(error)")
     }
@@ -355,6 +359,8 @@ public actor RuntimeService {
         "description": flow.description.map(JSONValue.string) ?? .null,
         "context": flow.context.map(JSONValue.string) ?? .null,
         "contextMode": context.map { .string($0.mode.rawValue) } ?? .null,
+        "startRoute": .string(flow.startRoute),
+        "entryRoutes": .array(flow.entryRoutes.map(JSONValue.string)),
         "trusted": .bool(true),
         "requiredSecrets": .array((flow.requiredSecrets ?? []).map(JSONValue.string)),
         "parameters": (try? jsonValue(flow.parameters ?? [:])) ?? .object([:]),
@@ -550,6 +556,17 @@ public actor RuntimeService {
               session, parameters: parameters, configuration: configuration,
               journeyID: journey.id)
           }
+          if context.mode == .uiFlow, let startRoute = context.startRoute {
+            let current = try await currentBlueprintElements()
+            if blueprintRoute(in: current, blueprint: blueprint)?.id != startRoute {
+              try await executeBlueprintSteps(
+                [
+                  .init(
+                    id: "lys.context.entry", title: "Reach \(startRoute)", kind: .navigate,
+                    route: startRoute)
+                ], blueprint: blueprint, parameters: parameters, journey: &journey)
+            }
+          }
           try await executeBlueprintSteps(
             context.prepare, blueprint: blueprint, parameters: parameters, journey: &journey)
           let prepared = try await currentBlueprintElements()
@@ -563,15 +580,33 @@ public actor RuntimeService {
         }
       }
 
-      if let startRoute = flow.startRoute {
-        let current = try await currentBlueprintElements()
-        guard blueprintRoute(in: current, blueprint: blueprint)?.id == startRoute else {
-          throw RPCError(
-            code: -32116,
-            message:
-              "Flow \(flow.id) expected start route \(startRoute). Add context preparation or navigation steps that reach it."
-          )
-        }
+      let current = try await currentBlueprintElements()
+      let currentRoute = blueprintRoute(in: current, blueprint: blueprint)?.id
+      guard let currentRoute else {
+        throw RPCError(
+          code: -32127,
+          message:
+            "Lys screen instrumentation error: the current screen does not match any declared route. Ensure it exposes exactly one lys.screen.* marker."
+        )
+      }
+      guard
+        BlueprintNavigationPlanner.path(
+          from: currentRoute, to: flow.startRoute,
+          capabilities: blueprint.capabilities ?? []) != nil
+      else {
+        throw RPCError(
+          code: -32127,
+          message:
+            "Lys routing error: the observed route \(currentRoute) has no safe declared path to \(flow.startRoute) for flow \(flow.id). Add the real route/resultsIn controls, or use a context that normalizes the app state."
+        )
+      }
+      if currentRoute != flow.startRoute {
+        try await executeBlueprintSteps(
+          [
+            .init(
+              id: "lys.entry", title: "Reach \(flow.startRoute)", kind: .navigate,
+              route: flow.startRoute)
+          ], blueprint: blueprint, parameters: parameters, journey: &journey)
       }
 
       try await executeBlueprintSteps(
@@ -715,9 +750,10 @@ public actor RuntimeService {
         let currentRoute = blueprintRoute(in: elements, blueprint: blueprint)?.id
         let targetRoute = declared.route
         var reached = currentRoute == targetRoute
+        var navigationFailure: String?
         if !reached, let currentRoute, let targetRoute,
-          let path = blueprintNavigationPath(
-            from: currentRoute, to: targetRoute, blueprint: blueprint)
+          let path = BlueprintNavigationPlanner.path(
+            from: currentRoute, to: targetRoute, capabilities: blueprint.capabilities ?? [])
         {
           for (index, capability) in path.enumerated() {
             let navigationStep = BlueprintStep(
@@ -726,17 +762,46 @@ public actor RuntimeService {
             let navigationResult = try await executeBlueprintCapability(
               navigationStep, capability: capability, blueprint: blueprint,
               parameters: parameters, journeyID: journey.id)
-            guard navigationResult.status == .passed else { break }
+            guard navigationResult.status == .passed else {
+              navigationFailure =
+                  "Lys transition delivery error: \(capability.id) failed on \(currentRoute): \(navigationResult.detail)"
+              break
+            }
+            if let expectedRoute = capability.resultsIn {
+              let observed = try await waitForBlueprintRoute(
+                expectedRoute, blueprint: blueprint)
+              guard observed.reached else {
+                navigationFailure =
+                  "Lys transition verification error: \(capability.id) was invoked, but expected route \(expectedRoute) was not observed. "
+                  + "Observed route: \(observed.route ?? "unrecognized"). Verify the action is attached to the real control, its handler navigates, and the destination exposes lys.screen.\(expectedRoute)."
+                break
+              }
+            }
           }
-          let navigated = try await currentBlueprintElements()
-          reached = blueprintRoute(in: navigated, blueprint: blueprint)?.id == targetRoute
+          if navigationFailure == nil {
+            let navigated = try await waitForBlueprintRoute(targetRoute, blueprint: blueprint)
+            reached = navigated.reached
+            if !reached {
+              navigationFailure =
+                "Declared path finished, but route \(targetRoute) was not observed. Observed route: \(navigated.route ?? "unrecognized")."
+            }
+          }
+        } else if !reached {
+          if let currentRoute, let targetRoute {
+            navigationFailure =
+              "Lys contract coverage error: no safe transition path exists from \(currentRoute) to \(targetRoute). Add the real control as a capability with route \(currentRoute) and resultsIn \(targetRoute), and include \(currentRoute) in the flow entryRoutes."
+          } else {
+            navigationFailure =
+              "Lys screen instrumentation error: the visible screen does not match a declared route. Ensure it exposes exactly one declared lys.screen.* marker."
+          }
         }
         result = .init(
           step: .init(id: declared.id, title: declared.title),
           status: reached ? .passed : .failed,
           detail: reached
             ? "Route reached."
-            : "No declared transition path reached route \(targetRoute ?? "unknown").")
+            : navigationFailure
+              ?? "No declared transition path reached route \(targetRoute ?? "unknown") from \(currentRoute ?? "an unrecognized current route").")
       case .repeatUntil: continue
       }
       journey.steps.removeAll { $0.id == result.id }
@@ -832,7 +897,7 @@ public actor RuntimeService {
           "Capability \(capability.id) is \(capability.risk?.rawValue ?? "restricted") and requires explicit user approval in Lys. Agents cannot self-approve it."
       )
     }
-    let elements = try await currentBlueprintElements()
+    var elements = try await currentBlueprintElements()
     if let expectedRoute = capability.route,
       blueprintRoute(in: elements, blueprint: blueprint)?.id != expectedRoute
     {
@@ -840,19 +905,49 @@ public actor RuntimeService {
         code: -32121,
         message: "Capability \(capability.id) is only valid on route \(expectedRoute)")
     }
-    let matches = blueprintMatches(capability.selector, in: elements)
-    let selected: UIElement?
-    if let index = capability.selector.index, matches.indices.contains(index) {
-      selected = matches[index]
-    } else {
-      selected = matches.count == 1 ? matches[0] : nil
+    let context = try await automationContext(.init())
+    var selected: UIElement?
+    switch BlueprintControlResolver.resolve(capability.selector, in: elements) {
+    case .visible(let element):
+      selected = element
+    case .offscreen(let element):
+      if let revealed = try await revealBlueprintControl(
+        capability.selector, expectedRoute: capability.route, blueprint: blueprint,
+        context: context)
+      {
+        elements = revealed.elements
+        selected = revealed.element
+      } else {
+        // Native XCTest click performs its own scroll-to-visible and remains a useful fallback.
+        selected = element
+      }
+    case .ambiguous:
+      throw RPCError(
+        code: -32121, message: "Capability \(capability.id) is ambiguous; add a relational selector or index")
+    case .missing:
+      if let revealed = try await revealBlueprintControl(
+        capability.selector, expectedRoute: capability.route, blueprint: blueprint,
+        context: context)
+      {
+        elements = revealed.elements
+        selected = revealed.element
+      }
+    }
+    if selected == nil, let identifier = capability.selector.identifier {
+      // XCTest queries can resolve non-virtualized descendants that page source omitted; the
+      // native click then scrolls the element into view. Keep this as the final semantic attempt.
+      selected = UIElement(
+        type: capability.selector.role ?? "Any", identifier: identifier,
+        label: capability.selector.name ?? capability.selector.text, visible: false,
+        hittable: false, frame: .init(x: 0, y: 0, width: 0, height: 0),
+        childPath: "semantic.\(capability.id)", owningApplication: context.bundleID,
+        availableActions: [blueprintPrimitiveAction(capability.action)], accessible: true)
     }
     guard let selected else {
       throw RPCError(
         code: -32121,
-        message: matches.isEmpty
-          ? "No current control matches capability \(capability.id)"
-          : "Capability \(capability.id) is ambiguous; add a relational selector or index")
+        message:
+          "No control matching capability \(capability.id) was found after bounded semantic scrolling on route \(capability.route ?? "unknown")")
     }
     let fingerprint = ScreenFingerprint.make(elements: elements, modal: false, navigationTitle: nil)
     let actionID = UIActionCatalog.actionID(
@@ -887,19 +982,33 @@ public actor RuntimeService {
     let primitive = blueprintPrimitiveAction(capability.action)
     let performed = await performBlueprintAction(
       action: primitive, arguments: resolvedArguments, selected: selected, before: elements,
-      context: try await automationContext(.init()))
+      context: context)
     if let error = performed.error { throw error }
     let passed = performed.result?["actionSucceeded"]?.boolValue == true
     var detail = performed.result?["message"]?.stringValue ?? declared.title
     if passed, let expected = declared.expect, !expected.isEmpty {
-      let after: [UIElement]
+      var after: [UIElement]
       if let value = performed.result?["elements"], let decoded: [UIElement] = try? decode(value) {
         after = decoded
       } else {
         after = try await currentBlueprintElements()
       }
-      if !(await blueprintPredicatesPass(expected, elements: after, blueprint: blueprint)) {
-        detail = "\(declared.title) ran, but its expected state was not reached."
+      var expectedReached = await blueprintPredicatesPass(
+        expected, elements: after, blueprint: blueprint)
+      if !expectedReached {
+        for _ in 0..<25 {
+          try await Task.sleep(for: .milliseconds(120))
+          after = try await currentBlueprintElements()
+          if await blueprintPredicatesPass(expected, elements: after, blueprint: blueprint) {
+            expectedReached = true
+            break
+          }
+        }
+      }
+      if !expectedReached {
+        let observed = blueprintRoute(in: after, blueprint: blueprint)?.id ?? "unrecognized"
+        detail =
+          "\(declared.title) ran, but its expected state was not reached within 3 seconds. Observed route: \(observed)."
         return .init(
           step: .init(
             id: declared.id, title: declared.title, actionID: actionID, action: primitive),
@@ -920,12 +1029,18 @@ public actor RuntimeService {
     context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight)
   ) async -> RPCEnvelope {
     do {
+      var usedPhysicalRetry = false
       if action == "type" || action == "clear" {
         let text = arguments["text"]?.stringValue ?? arguments["value"]?.stringValue
         if action == "type", text == nil {
           return failure(nil, -32602, "Blueprint type action requires a text argument")
         }
-        if let xpath = selected.xpath {
+        if let identifier = selected.identifier {
+          try await wda.perform(
+            udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+            identifier: identifier, label: nil, type: selected.type,
+            action: action, text: text, preflight: context.preflight)
+        } else if let xpath = selected.xpath {
           try await wda.performXPath(
             udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
             xpath: xpath, action: action, text: text, preflight: context.preflight)
@@ -935,6 +1050,41 @@ public actor RuntimeService {
             identifier: selected.identifier, label: selected.label, type: selected.type,
             action: action, text: text, preflight: context.preflight)
         }
+      } else if action == "tap" {
+        do {
+          if let identifier = selected.identifier {
+            try await wda.perform(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              identifier: identifier, label: nil, type: selected.type,
+              action: action, text: nil, preflight: context.preflight)
+          } else if let xpath = selected.xpath {
+            try await wda.performXPath(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              xpath: xpath, action: action, text: nil, preflight: context.preflight)
+          } else {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: selected.frame, action: action, arguments: arguments,
+              preflight: context.preflight)
+            usedPhysicalRetry = true
+          }
+        } catch {
+          if let xpath = selected.xpath {
+            try await wda.performXPath(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              xpath: xpath, action: action, text: nil, preflight: context.preflight)
+          } else if selected.visible != false && selected.frame.width > 1
+            && selected.frame.height > 1
+          {
+            try await wda.performFrameAction(
+              udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+              frame: selected.frame, action: action, arguments: arguments,
+              preflight: context.preflight)
+            usedPhysicalRetry = true
+          } else {
+            throw error
+          }
+        }
       } else {
         try await wda.performFrameAction(
           udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
@@ -942,14 +1092,27 @@ public actor RuntimeService {
           preflight: context.preflight)
       }
 
-      let after = try await settledSnapshot(context: context, baseline: before)
+      var after = try await settledSnapshot(context: context, baseline: before)
       let beforeFingerprint = ScreenFingerprint.make(
         elements: before, modal: false, navigationTitle: nil)
-      let afterFingerprint = ScreenFingerprint.make(
-        elements: after, modal: false, navigationTitle: nil)
-      let stateChanged =
+      var stateChanged =
         UIInteractionStateFingerprint.make(elements: before)
         != UIInteractionStateFingerprint.make(elements: after)
+      if action == "tap", !stateChanged, !usedPhysicalRetry, selected.visible != false,
+        selected.frame.width > 1, selected.frame.height > 1
+      {
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: selected.frame, action: action, arguments: arguments,
+          preflight: context.preflight)
+        usedPhysicalRetry = true
+        after = try await settledSnapshot(context: context, baseline: before)
+        stateChanged =
+          UIInteractionStateFingerprint.make(elements: before)
+          != UIInteractionStateFingerprint.make(elements: after)
+      }
+      let afterFingerprint = ScreenFingerprint.make(
+        elements: after, modal: false, navigationTitle: nil)
       let title = selected.label ?? selected.identifier ?? selected.type
       let diagnostic =
         stateChanged
@@ -981,6 +1144,7 @@ public actor RuntimeService {
           "afterFingerprint": try jsonValue(afterFingerprint),
           "evidenceIDs": .array([.string(item.id.uuidString)]),
           "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: after)),
+          "delivery": .string(usedPhysicalRetry ? "semanticThenPhysical" : "semantic"),
           "message": .string(diagnostic),
         ]))
     } catch let error as RPCError {
@@ -997,36 +1161,83 @@ public actor RuntimeService {
     return try decode(value)
   }
 
+  private func revealBlueprintControl(
+    _ selector: BlueprintSelector, expectedRoute: String?, blueprint: InteractionBlueprint,
+    context: (udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight)
+  ) async throws -> (elements: [UIElement], element: UIElement)? {
+    var elements = try await currentBlueprintElements()
+    let hidden = BlueprintControlResolver.matches(selector, in: elements, includeHidden: true)
+      .first
+    var directions = ["scrollUp", "scrollDown"]
+    if let hidden,
+      let surface = BlueprintRevealPlanner.scrollSurface(in: elements, action: "scrollUp")
+    {
+      let preferred = BlueprintRevealPlanner.preferredAction(
+        for: hidden, scrollSurface: surface)
+      directions = preferred == "scrollUp"
+        ? ["scrollUp", "scrollDown"] : ["scrollDown", "scrollUp"]
+    }
+
+    for direction in directions {
+      for _ in 0..<12 {
+        guard
+          let surface = BlueprintRevealPlanner.scrollSurface(
+            in: elements, action: direction)
+        else { break }
+        let before = UIInteractionStateFingerprint.make(elements: elements)
+        try await wda.performFrameAction(
+          udid: context.udid, runtime: context.runtime, bundleID: context.bundleID,
+          frame: surface.frame, action: direction, preflight: context.preflight)
+        try await Task.sleep(for: .milliseconds(120))
+        elements = try await currentBlueprintElements()
+        if let expectedRoute,
+          blueprintRoute(in: elements, blueprint: blueprint)?.id != expectedRoute
+        {
+          throw RPCError(
+            code: -32121,
+            message:
+              "Revealing a control for route \(expectedRoute) unexpectedly left that route")
+        }
+        switch BlueprintControlResolver.resolve(selector, in: elements) {
+        case .visible(let element):
+          return (elements, element)
+        case .offscreen:
+          break
+        case .ambiguous:
+          throw RPCError(
+            code: -32121,
+            message: "The requested capability became ambiguous while scrolling; refine its selector")
+        case .missing:
+          break
+        }
+        if UIInteractionStateFingerprint.make(elements: elements) == before { break }
+      }
+    }
+    return nil
+  }
+
+  private func waitForBlueprintRoute(
+    _ expectedRoute: String, blueprint: InteractionBlueprint
+  ) async throws -> (reached: Bool, route: String?) {
+    var observed: String?
+    for attempt in 0..<26 {
+      let elements = try await currentBlueprintElements()
+      observed = blueprintRoute(in: elements, blueprint: blueprint)?.id
+      if observed == expectedRoute { return (true, observed) }
+      if attempt < 25 { try await Task.sleep(for: .milliseconds(120)) }
+    }
+    return (false, observed)
+  }
+
   private func blueprintRoute(
     in elements: [UIElement], blueprint: InteractionBlueprint
   ) -> BlueprintRoute? {
-    (blueprint.routes ?? []).first { route in
+    let matches = (blueprint.routes ?? []).filter { route in
       route.match.allSatisfy {
         blueprintPredicatePassesSynchronously($0, elements: elements, blueprint: blueprint)
       }
     }
-  }
-
-  private func blueprintNavigationPath(
-    from source: String, to destination: String, blueprint: InteractionBlueprint
-  ) -> [BlueprintCapability]? {
-    guard source != destination else { return [] }
-    let edges = (blueprint.capabilities ?? []).filter {
-      $0.route != nil && $0.resultsIn != nil
-        && $0.risk != .destructive && $0.risk != .external
-    }
-    var queue: [(route: String, path: [BlueprintCapability])] = [(source, [])]
-    var visited: Set<String> = [source]
-    while !queue.isEmpty {
-      let current = queue.removeFirst()
-      for capability in edges where capability.route == current.route {
-        guard let next = capability.resultsIn, visited.insert(next).inserted else { continue }
-        let path = current.path + [capability]
-        if next == destination { return path }
-        queue.append((next, path))
-      }
-    }
-    return nil
+    return matches.count == 1 ? matches[0] : nil
   }
 
   private func blueprintPredicatesPass(
@@ -1111,41 +1322,7 @@ public actor RuntimeService {
   private func blueprintMatches(
     _ selector: BlueprintSelector, in elements: [UIElement]
   ) -> [UIElement] {
-    var matches = elements.filter { element in
-      (selector.identifier == nil || element.identifier == selector.identifier)
-        && (selector.role == nil || element.type == selector.role)
-        && (selector.name == nil
-          || element.label == selector.name || element.identifier == selector.name)
-        && (selector.text == nil
-          || element.label == selector.text || element.value == selector.text)
-        && element.visible != false
-    }
-    if let anchor = selector.above {
-      let anchors = blueprintAnchor(anchor, elements: elements)
-      matches = matches.filter { candidate in
-        anchors.contains { candidate.frame.y < $0.frame.y }
-      }
-    }
-    if let anchor = selector.below {
-      let anchors = blueprintAnchor(anchor, elements: elements)
-      matches = matches.filter { candidate in
-        anchors.contains { candidate.frame.y > $0.frame.y }
-      }
-    }
-    if let ancestor = selector.descendantOf {
-      let paths = blueprintAnchor(ancestor, elements: elements).map(\.childPath)
-      matches = matches.filter { candidate in
-        paths.contains { candidate.childPath.hasPrefix($0 + ".") }
-      }
-    }
-    return matches.sorted {
-      if $0.frame.y == $1.frame.y { return $0.frame.x < $1.frame.x }
-      return $0.frame.y < $1.frame.y
-    }
-  }
-
-  private func blueprintAnchor(_ value: String, elements: [UIElement]) -> [UIElement] {
-    elements.filter { $0.identifier == value || $0.label == value || $0.value == value }
+    BlueprintControlResolver.matches(selector, in: elements)
   }
 
   private func blueprintPrimitiveAction(_ action: BlueprintActionKind) -> String {

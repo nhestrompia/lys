@@ -1,9 +1,10 @@
 {
   "$schema": "../Schemas/lys-test-contract.schema.json",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "app": {
     "bundleIdentifier": "com.example.learning",
-    "displayName": "Learning App"
+    "displayName": "Learning App",
+    "entryRoutes": ["home"]
   },
   "routes": [
     {
@@ -117,6 +118,8 @@
       "title": "Signed-out user",
       "mode": "uiFlow",
       "requiredSecrets": ["test.email", "test.password"],
+      "startRoute": "home",
+      "entryRoutes": ["home"],
       "prepare": [
         {
           "id": "auth.ensureSignedOut",
@@ -137,6 +140,7 @@
       "context": "signedOut",
       "requiredSecrets": ["test.email", "test.password"],
       "startRoute": "auth.login",
+      "entryRoutes": ["auth.login"],
       "steps": [
         {
           "id": "auth.email",
@@ -170,14 +174,9 @@
       "title": "Complete a quiz",
       "description": "Signs in if needed, completes every question, and verifies results.",
       "context": "authenticated.testUser",
-      "startRoute": "home",
+      "startRoute": "quiz.setup",
+      "entryRoutes": ["home"],
       "steps": [
-        {
-          "id": "quiz.open",
-          "title": "Open quiz setup",
-          "kind": "navigate",
-          "route": "quiz.setup"
-        },
         {
           "id": "quiz.start",
           "title": "Start quiz",

@@ -12,7 +12,7 @@ public struct InteractionBlueprint: Codable, Sendable {
   public var flows: [BlueprintFlow]
 
   public init(
-    schemaVersion: Int = 1, app: BlueprintApp? = nil, routes: [BlueprintRoute]? = nil,
+    schemaVersion: Int = 2, app: BlueprintApp? = nil, routes: [BlueprintRoute]? = nil,
     capabilities: [BlueprintCapability]? = nil, contexts: [BlueprintContext]? = nil,
     flows: [BlueprintFlow]
   ) {
@@ -25,23 +25,57 @@ public struct InteractionBlueprint: Codable, Sendable {
   }
 
   public static func load(from url: URL) throws -> Self {
-    let blueprint = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+    let data = try Data(contentsOf: url)
+    let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    guard object?["schemaVersion"] as? Int == 2 else {
+      throw RPCError(
+        code: -32110,
+        message:
+          "Unsupported Lys contract schema. Regenerate .lys/contract.json with the current Lys SDK."
+      )
+    }
+    let blueprint = try JSONDecoder().decode(Self.self, from: data)
+      .expandingRecoverableFlowEntries()
     try blueprint.validate()
     return blueprint
   }
 
+  /// Treat declared flow entries as guaranteed coverage, not a brittle runtime whitelist. Any
+  /// known route with a safe graph path to the flow start is recoverable by the host and is added
+  /// to the in-memory contract before validation and execution.
+  public func expandingRecoverableFlowEntries() -> Self {
+    var copy = self
+    copy.flows = flows.map { flow in
+      var expanded = flow
+      expanded.entryRoutes = BlueprintNavigationPlanner.recoverableRoutes(
+        to: flow.startRoute, routes: routes ?? [], capabilities: capabilities ?? [],
+        declared: flow.entryRoutes)
+      return expanded
+    }
+    return copy
+  }
+
   public func validate() throws {
-    guard schemaVersion == 1 else {
+    let validationFlows = expandingRecoverableFlowEntries().flows
+    guard schemaVersion == 2 else {
       throw RPCError(code: -32110, message: "Unsupported Lys test contract schema version")
     }
     try requireUnique((routes ?? []).map(\.id), kind: "route")
     try requireUnique((capabilities ?? []).map(\.id), kind: "capability")
     try requireUnique((contexts ?? []).map(\.id), kind: "context")
-    try requireUnique(flows.map(\.id), kind: "flow")
+    try requireUnique(validationFlows.map(\.id), kind: "flow")
 
     let routeIDs = Set((routes ?? []).map(\.id))
     let capabilityIDs = Set((capabilities ?? []).map(\.id))
     let contextIDs = Set((contexts ?? []).map(\.id))
+    guard let app, !app.entryRoutes.isEmpty else {
+      throw invalid(
+        "Lys contract app.entryRoutes must declare the real routes where testing can begin")
+    }
+    try requireUnique(app.entryRoutes, kind: "app entry route")
+    for route in app.entryRoutes where !routeIDs.contains(route) {
+      throw invalid("App entryRoutes references unknown route \(route)")
+    }
     for route in routes ?? [] {
       guard !route.match.isEmpty else {
         throw invalid("Route \(route.id) requires match predicates")
@@ -91,6 +125,42 @@ public struct InteractionBlueprint: Codable, Sendable {
       try validate(
         steps: context.prepare, owner: "Context \(context.id)", routes: routeIDs,
         capabilities: capabilityIDs)
+      if !context.prepare.isEmpty {
+        guard let startRoute = context.startRoute, routeIDs.contains(startRoute) else {
+          throw invalid("Context \(context.id) preparation requires a valid startRoute")
+        }
+        guard let entryRoutes = context.entryRoutes, !entryRoutes.isEmpty else {
+          throw invalid("Context \(context.id) preparation requires entryRoutes")
+        }
+        try requireUnique(entryRoutes, kind: "entry route")
+        for entryRoute in entryRoutes {
+          guard routeIDs.contains(entryRoute) else {
+            throw invalid("Context \(context.id) references unknown entry route \(entryRoute)")
+          }
+          guard
+            BlueprintNavigationPlanner.path(
+              from: entryRoute, to: startRoute, capabilities: capabilities ?? []) != nil
+          else {
+            throw invalid(
+              "Context \(context.id) cannot reach start route \(startRoute) from entry route \(entryRoute)"
+            )
+          }
+        }
+        if context.mode == .uiFlow {
+          for route in app.entryRoutes where !entryRoutes.contains(route) {
+            throw invalid(
+              "Context \(context.id) must support app entry route \(route). Declare its recovery path before preparation."
+            )
+          }
+        }
+        let finalRoute = try validateRouteExecution(
+          steps: context.prepare, from: startRoute, owner: "Context \(context.id)")
+        let readyRoutes = context.readyWhen.compactMap { $0.kind == .route ? $0.route : nil }
+        for route in readyRoutes where route != finalRoute {
+          throw invalid(
+            "Context \(context.id) preparation ends on \(finalRoute), not ready route \(route)")
+        }
+      }
       let undeclaredContextSecrets = secrets(in: context.prepare)
         .subtracting(context.requiredSecrets ?? [])
       if let secret = undeclaredContextSecrets.sorted().first {
@@ -102,15 +172,62 @@ public struct InteractionBlueprint: Codable, Sendable {
       try validate(
         predicates: context.readyWhen, owner: "Context \(context.id)", routes: routeIDs)
     }
-    for flow in flows {
+    for flow in validationFlows {
       guard !flow.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw invalid("Flow \(flow.id) requires a title")
       }
       if let context = flow.context, !contextIDs.contains(context) {
         throw invalid("Flow \(flow.id) references unknown context \(context)")
       }
-      if let startRoute = flow.startRoute, !routeIDs.contains(startRoute) {
-        throw invalid("Flow \(flow.id) references unknown start route \(startRoute)")
+      guard routeIDs.contains(flow.startRoute) else {
+        throw invalid("Flow \(flow.id) references unknown start route \(flow.startRoute)")
+      }
+      guard !flow.entryRoutes.isEmpty else {
+        throw invalid("Flow \(flow.id) requires at least one supported entry route")
+      }
+      try requireUnique(flow.entryRoutes, kind: "entry route")
+      for entryRoute in flow.entryRoutes {
+        guard routeIDs.contains(entryRoute) else {
+          throw invalid("Flow \(flow.id) references unknown entry route \(entryRoute)")
+        }
+        guard
+          BlueprintNavigationPlanner.path(
+            from: entryRoute, to: flow.startRoute, capabilities: capabilities ?? []) != nil
+        else {
+          throw invalid(
+            "Flow \(flow.id) cannot reach start route \(flow.startRoute) from entry route \(entryRoute). Declare the missing route capability and resultsIn transition."
+          )
+        }
+      }
+      if let contextID = flow.context,
+        let context = contexts?.first(where: { $0.id == contextID })
+      {
+        let readyRoutes = context.readyWhen.compactMap { $0.kind == .route ? $0.route : nil }
+        for route in readyRoutes where !flow.entryRoutes.contains(route) {
+          throw invalid(
+            "Flow \(flow.id) context becomes ready on \(route), but that route is missing from entryRoutes"
+          )
+        }
+      }
+      let context = flow.context.flatMap { contextID in
+        contexts?.first(where: { $0.id == contextID })
+      }
+      let requiredEntries: [String]
+      if let context,
+        context.mode == .authenticatedSession || !context.prepare.isEmpty
+      {
+        requiredEntries = context.readyWhen.compactMap { $0.kind == .route ? $0.route : nil }
+        guard !requiredEntries.isEmpty else {
+          throw invalid(
+            "Flow \(flow.id) context must declare a route readyWhen so entry coverage can be proven")
+        }
+      } else {
+        requiredEntries = app.entryRoutes
+      }
+      for route in requiredEntries where !flow.entryRoutes.contains(route) {
+        throw invalid(
+          "Flow \(flow.id) does not support required entry route \(route). Add the real navigation actions with route/resultsIn, then include \(route) in entryRoutes."
+        )
       }
       guard !flow.steps.isEmpty else { throw invalid("Flow \(flow.id) requires steps") }
       guard !flow.acceptance.isEmpty else {
@@ -128,7 +245,57 @@ public struct InteractionBlueprint: Codable, Sendable {
         steps: flow.steps, owner: "Flow \(flow.id)", routes: routeIDs,
         capabilities: capabilityIDs)
       try validate(predicates: flow.acceptance, owner: "Flow \(flow.id)", routes: routeIDs)
+      let finalRoute = try validateRouteExecution(
+        steps: flow.steps, from: flow.startRoute, owner: "Flow \(flow.id)")
+      for route in flow.acceptance.compactMap({ $0.kind == .route ? $0.route : nil })
+      where route != finalRoute {
+        throw invalid("Flow \(flow.id) ends on \(finalRoute), not acceptance route \(route)")
+      }
     }
+  }
+
+  /// Symbolically executes declared route transitions so a contract cannot invoke an action from
+  /// the wrong screen and defer that discovery to a live agent run.
+  private func validateRouteExecution(
+    steps: [BlueprintStep], from startRoute: String, owner: String
+  ) throws -> String {
+    var route = startRoute
+    let capabilityByID = Dictionary(uniqueKeysWithValues: (capabilities ?? []).map { ($0.id, $0) })
+    for step in steps {
+      switch step.kind {
+      case .navigate:
+        guard let destination = step.route,
+          BlueprintNavigationPlanner.path(
+            from: route, to: destination, capabilities: capabilities ?? []) != nil
+        else {
+          throw invalid(
+            "\(owner) step \(step.id) cannot navigate from \(route) to \(step.route ?? "unknown")")
+        }
+        route = destination
+      case .invoke:
+        guard let id = step.capability, let capability = capabilityByID[id] else { continue }
+        if let expected = capability.route, expected != route {
+          throw invalid(
+            "\(owner) step \(step.id) invokes \(id) on \(route), but the action belongs to \(expected)")
+        }
+        if let result = capability.resultsIn { route = result }
+        let expectedRoutes = step.expect?.compactMap { $0.kind == .route ? $0.route : nil } ?? []
+        if let expected = expectedRoutes.first {
+          if capability.resultsIn != nil, route != expected {
+            throw invalid(
+              "\(owner) step \(step.id) declares result \(route), but expects route \(expected)")
+          }
+          route = expected
+        }
+      case .repeatUntil:
+        route = try validateRouteExecution(
+          steps: step.steps ?? [], from: route, owner: "\(owner) repeat \(step.id)")
+        if step.until?.kind == .route, let terminal = step.until?.route { route = terminal }
+      case .assert:
+        break
+      }
+    }
+    return route
   }
 
   private func validate(
@@ -255,10 +422,27 @@ public enum LysFlowMatcher {
 public struct BlueprintApp: Codable, Sendable {
   public var bundleIdentifier: String?
   public var displayName: String?
+  public var entryRoutes: [String]
 
-  public init(bundleIdentifier: String? = nil, displayName: String? = nil) {
+  public init(
+    bundleIdentifier: String? = nil, displayName: String? = nil, entryRoutes: [String]
+  ) {
     self.bundleIdentifier = bundleIdentifier
     self.displayName = displayName
+    self.entryRoutes = entryRoutes
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case bundleIdentifier, displayName, entryRoutes
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    bundleIdentifier = try values.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+    displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+    // Keep decoding tolerant so validation can explain the migration precisely. Without this,
+    // Decoder emits an opaque "key not found" error for early v2 contracts.
+    entryRoutes = try values.decodeIfPresent([String].self, forKey: .entryRoutes) ?? []
   }
 }
 
@@ -394,26 +578,31 @@ public struct BlueprintContext: Codable, Identifiable, Sendable {
   public var title: String
   public var mode: BlueprintContextMode
   public var requiredSecrets: [String]?
+  public var startRoute: String?
+  public var entryRoutes: [String]?
   public var prepare: [BlueprintStep]
   public var readyWhen: [BlueprintPredicate]
   public var session: BlueprintAuthenticatedSession?
 
   public init(
     id: String, title: String, mode: BlueprintContextMode = .uiFlow,
-    requiredSecrets: [String]? = nil, prepare: [BlueprintStep] = [],
+    requiredSecrets: [String]? = nil, startRoute: String? = nil,
+    entryRoutes: [String]? = nil, prepare: [BlueprintStep] = [],
     readyWhen: [BlueprintPredicate], session: BlueprintAuthenticatedSession? = nil
   ) {
     self.id = id
     self.title = title
     self.mode = mode
     self.requiredSecrets = requiredSecrets
+    self.startRoute = startRoute
+    self.entryRoutes = entryRoutes
     self.prepare = prepare
     self.readyWhen = readyWhen
     self.session = session
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, title, mode, requiredSecrets, prepare, readyWhen, session
+    case id, title, mode, requiredSecrets, startRoute, entryRoutes, prepare, readyWhen, session
   }
 
   public init(from decoder: Decoder) throws {
@@ -422,6 +611,8 @@ public struct BlueprintContext: Codable, Identifiable, Sendable {
     title = try values.decode(String.self, forKey: .title)
     mode = try values.decodeIfPresent(BlueprintContextMode.self, forKey: .mode) ?? .uiFlow
     requiredSecrets = try values.decodeIfPresent([String].self, forKey: .requiredSecrets)
+    startRoute = try values.decodeIfPresent(String.self, forKey: .startRoute)
+    entryRoutes = try values.decodeIfPresent([String].self, forKey: .entryRoutes)
     prepare = try values.decodeIfPresent([BlueprintStep].self, forKey: .prepare) ?? []
     readyWhen = try values.decode([BlueprintPredicate].self, forKey: .readyWhen)
     session = try values.decodeIfPresent(BlueprintAuthenticatedSession.self, forKey: .session)
@@ -433,7 +624,8 @@ public struct BlueprintFlow: Codable, Identifiable, Sendable {
   public var title: String
   public var description: String?
   public var context: String?
-  public var startRoute: String?
+  public var startRoute: String
+  public var entryRoutes: [String]
   public var parameters: [String: BlueprintParameter]?
   public var requiredSecrets: [String]?
   public var steps: [BlueprintStep]
@@ -441,7 +633,7 @@ public struct BlueprintFlow: Codable, Identifiable, Sendable {
 
   public init(
     id: String, title: String, description: String? = nil, context: String? = nil,
-    startRoute: String? = nil, parameters: [String: BlueprintParameter]? = nil,
+    startRoute: String, entryRoutes: [String], parameters: [String: BlueprintParameter]? = nil,
     requiredSecrets: [String]? = nil, steps: [BlueprintStep], acceptance: [BlueprintPredicate]
   ) {
     self.id = id
@@ -449,10 +641,155 @@ public struct BlueprintFlow: Codable, Identifiable, Sendable {
     self.description = description
     self.context = context
     self.startRoute = startRoute
+    self.entryRoutes = entryRoutes
     self.parameters = parameters
     self.requiredSecrets = requiredSecrets
     self.steps = steps
     self.acceptance = acceptance
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, title, description, context, startRoute, entryRoutes, parameters, requiredSecrets
+    case steps, acceptance
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(String.self, forKey: .id)
+    title = try values.decode(String.self, forKey: .title)
+    description = try values.decodeIfPresent(String.self, forKey: .description)
+    context = try values.decodeIfPresent(String.self, forKey: .context)
+    startRoute = try values.decodeIfPresent(String.self, forKey: .startRoute) ?? ""
+    entryRoutes = try values.decodeIfPresent([String].self, forKey: .entryRoutes) ?? []
+    parameters = try values.decodeIfPresent(
+      [String: BlueprintParameter].self, forKey: .parameters)
+    requiredSecrets = try values.decodeIfPresent([String].self, forKey: .requiredSecrets)
+    steps = try values.decode([BlueprintStep].self, forKey: .steps)
+    acceptance = try values.decode([BlueprintPredicate].self, forKey: .acceptance)
+  }
+}
+
+public enum BlueprintNavigationPlanner {
+  public static func path(
+    from source: String, to destination: String, capabilities: [BlueprintCapability]
+  ) -> [BlueprintCapability]? {
+    guard source != destination else { return [] }
+    let edges = capabilities.filter {
+      $0.route != nil && $0.resultsIn != nil
+        && $0.risk != .destructive && $0.risk != .external
+    }
+    var queue: [(route: String, path: [BlueprintCapability])] = [(source, [])]
+    var visited: Set<String> = [source]
+    while !queue.isEmpty {
+      let current = queue.removeFirst()
+      for capability in edges where capability.route == current.route {
+        guard let next = capability.resultsIn, visited.insert(next).inserted else { continue }
+        let path = current.path + [capability]
+        if next == destination { return path }
+        queue.append((next, path))
+      }
+    }
+    return nil
+  }
+
+  public static func recoverableRoutes(
+    to destination: String, routes: [BlueprintRoute], capabilities: [BlueprintCapability],
+    declared: [String] = []
+  ) -> [String] {
+    let recoverable = routes.map(\.id).filter {
+      path(from: $0, to: destination, capabilities: capabilities) != nil
+    }
+    var seen = Set<String>()
+    return (declared + recoverable).filter { seen.insert($0).inserted }
+  }
+}
+
+public enum BlueprintControlResolution: Sendable {
+  case visible(UIElement)
+  case offscreen(UIElement)
+  case missing
+  case ambiguous
+}
+
+/// Resolves semantic controls without confusing "not in the viewport" with "not in the app".
+/// XCTest's native element click scrolls an off-screen descendant into view before activating it.
+public enum BlueprintControlResolver {
+  public static func resolve(
+    _ selector: BlueprintSelector, in elements: [UIElement]
+  ) -> BlueprintControlResolution {
+    let all = matches(selector, in: elements, includeHidden: true)
+    if let index = selector.index {
+      guard all.indices.contains(index) else { return .missing }
+      return all[index].visible == false ? .offscreen(all[index]) : .visible(all[index])
+    }
+    let visible = all.filter { $0.visible != false }
+    if visible.count == 1 { return .visible(visible[0]) }
+    if visible.count > 1 { return .ambiguous }
+    if all.count == 1 { return .offscreen(all[0]) }
+    return all.isEmpty ? .missing : .ambiguous
+  }
+
+  public static func matches(
+    _ selector: BlueprintSelector, in elements: [UIElement], includeHidden: Bool = false
+  ) -> [UIElement] {
+    var matches = elements.filter { element in
+      (selector.identifier == nil || element.identifier == selector.identifier)
+        && (selector.role == nil || element.type == selector.role)
+        && (selector.name == nil
+          || element.label == selector.name || element.identifier == selector.name)
+        && (selector.text == nil
+          || element.label == selector.text || element.value == selector.text)
+        && (includeHidden || element.visible != false)
+    }
+    if let anchor = selector.above {
+      let anchors = anchorMatches(anchor, elements: elements)
+      matches = matches.filter { candidate in
+        anchors.contains { candidate.frame.y < $0.frame.y }
+      }
+    }
+    if let anchor = selector.below {
+      let anchors = anchorMatches(anchor, elements: elements)
+      matches = matches.filter { candidate in
+        anchors.contains { candidate.frame.y > $0.frame.y }
+      }
+    }
+    if let ancestor = selector.descendantOf {
+      let paths = anchorMatches(ancestor, elements: elements).map(\.childPath)
+      matches = matches.filter { candidate in
+        paths.contains { candidate.childPath.hasPrefix($0 + ".") }
+      }
+    }
+    return matches.sorted {
+      if $0.frame.y == $1.frame.y { return $0.frame.x < $1.frame.x }
+      return $0.frame.y < $1.frame.y
+    }
+  }
+
+  private static func anchorMatches(_ value: String, elements: [UIElement]) -> [UIElement] {
+    elements.filter { $0.identifier == value || $0.label == value || $0.value == value }
+  }
+}
+
+public enum BlueprintRevealPlanner {
+  /// Prefer the largest visible scroll surface. This avoids accidentally moving nested horizontal
+  /// carousels when the requested control belongs to the page's vertical scroll view.
+  public static func scrollSurface(in elements: [UIElement], action: String) -> UIElement? {
+    elements.filter {
+      $0.visible != false && $0.enabled && $0.availableActions.contains(action)
+        && $0.frame.width > 1 && $0.frame.height > 1
+    }.max {
+      ($0.frame.width * $0.frame.height) < ($1.frame.width * $1.frame.height)
+    }
+  }
+
+  public static func preferredAction(
+    for target: UIElement, scrollSurface: UIElement
+  ) -> String {
+    if target.frame.y + target.frame.height > scrollSurface.frame.y + scrollSurface.frame.height {
+      return "scrollUp"
+    }
+    if target.frame.y < scrollSurface.frame.y { return "scrollDown" }
+    return "scrollUp"
   }
 }
 

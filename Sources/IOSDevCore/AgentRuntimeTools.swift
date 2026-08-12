@@ -67,7 +67,7 @@ public enum AgentRuntimeToolCatalog {
           ], required: ["flows", "contractAvailable", "message"])),
       tool(
         "flow.run",
-        "Run one complete host-owned Lys flow, including authenticated-session setup, bounded loops, every acceptance criterion, evidence, and terminal completion. Omit flowID only for explicitly exploratory testing.",
+        "Run one complete host-owned Lys flow, including safe navigation from the current route to its declared start, authenticated-session setup, bounded loops, every acceptance criterion, evidence, and terminal completion. Omit flowID only for explicitly exploratory testing.",
         properties: [
           "goal": string("Natural-language outcome to test"),
           "flowID": string("Optional exact ID returned by flow.list"),
