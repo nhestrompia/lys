@@ -1926,7 +1926,6 @@ public final class AppModel: ObservableObject {
     ]
     let previewRoot = activeWorktree ?? URL(fileURLWithPath: "/Synthetic/Tasks/profile-dark-mode")
     files = [
-      FileNode(url: previewRoot.appending(path: "AI_CHAT_SETUP.md"), isDirectory: false),
       FileNode(
         url: previewRoot.appending(path: "App", directoryHint: .isDirectory), isDirectory: true),
       FileNode(
@@ -1935,26 +1934,29 @@ public final class AppModel: ObservableObject {
       FileNode(
         url: previewRoot.appending(path: "Components", directoryHint: .isDirectory),
         isDirectory: true),
-      FileNode(url: previewRoot.appending(path: "Package.swift"), isDirectory: false),
+      FileNode(url: previewRoot.appending(path: "README.md"), isDirectory: false),
+      FileNode(url: previewRoot.appending(path: "package.json"), isDirectory: false),
     ]
-    selectedFile = files[0].url
+    selectedFile = files[4].url
     source = """
-      # Agent setup
-
-      This workspace keeps implementation and verification in the same task.
-
-      ## Workflow
-
-      1. Inspect the current source.
-      2. Make the smallest complete change.
-      3. Build and run the app.
-      4. Record fresh evidence before applying changes.
-
-      ## Repository rules
-
-      - Keep source edits inside the isolated task worktree.
-      - Treat build, launch, interaction, and screenshot evidence as generation-scoped.
-      - Review the final diff before applying it to the repository.
+      {
+        "name": "travel-app",
+        "main": "expo-router/entry",
+        "version": "1.0.0",
+        "scripts": {
+          "start": "expo start",
+          "ios": "expo run:ios",
+          "test": "jest --watchAll"
+        },
+        "dependencies": {
+          "@react-native-async-storage/async-storage": "^2.1.2",
+          "expo": "53.0.22",
+          "expo-router": "~5.1.5",
+          "react": "19.0.0",
+          "react-native": "0.79.5"
+        },
+        "private": true
+      }
       """
   }
 

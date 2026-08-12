@@ -3365,7 +3365,9 @@ private struct CodeWorkspace: View {
               detail: "Choose a file from the browser to inspect it with line numbers, find, and syntax color."
             )
           } else {
-            CodeEditor(text: $model.source, readOnly: model.activeWorktree == nil)
+            CodeEditor(
+              text: $model.source, fileURL: model.selectedFile,
+              readOnly: model.activeWorktree == nil)
               .frame(maxWidth: .infinity, maxHeight: .infinity)
               .clipped()
           }

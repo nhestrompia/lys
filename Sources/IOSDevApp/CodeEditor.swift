@@ -3,9 +3,12 @@ import SwiftUI
 
 @MainActor struct CodeEditor: NSViewRepresentable {
   @Binding var text: String
+  var fileURL: URL?
   var readOnly = false
 
-  func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+  func makeCoordinator() -> Coordinator {
+    Coordinator(text: $text, language: SyntaxLanguage(fileURL: fileURL))
+  }
   func makeNSView(context: Context) -> NSScrollView {
     let scroll = NSScrollView()
     scroll.hasVerticalScroller = true
@@ -19,13 +22,14 @@ import SwiftUI
     editor.isVerticallyResizable = true
     editor.isHorizontallyResizable = false
     editor.minSize = NSSize(width: 0, height: 0)
-    editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+    editor.maxSize = NSSize(
+      width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
     editor.autoresizingMask = [.width]
     editor.textContainer?.widthTracksTextView = true
     editor.textContainer?.lineFragmentPadding = 0
-    editor.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-    editor.textColor = NSColor(white: 0.9, alpha: 1)
-    editor.backgroundColor = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
+    editor.font = CodeEditorTheme.baseFont
+    editor.textColor = CodeEditorTheme.baseText
+    editor.backgroundColor = CodeEditorTheme.background
     editor.insertionPointColor = NSColor.white
     editor.isAutomaticQuoteSubstitutionEnabled = false
     editor.isAutomaticDashSubstitutionEnabled = false
@@ -35,25 +39,26 @@ import SwiftUI
     editor.textStorage?.setAttributedString(
       NSAttributedString(
         string: text,
-        attributes: [
-          .foregroundColor: NSColor(white: 0.86, alpha: 1),
-          .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
-        ]))
+        attributes: CodeEditorTheme.baseAttributes))
+    editor.typingAttributes = CodeEditorTheme.baseAttributes
     scroll.documentView = editor
     scroll.hasVerticalRuler = true
     scroll.rulersVisible = true
     scroll.verticalRulerView = LineNumberRuler(scrollView: scroll, textView: editor)
     (scroll.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     context.coordinator.editor = editor
-    context.coordinator.highlight()
+    context.coordinator.highlightImmediately()
     return scroll
   }
   func updateNSView(_ scroll: NSScrollView, context: Context) {
     guard let editor = scroll.documentView as? NSTextView else { return }
+    let languageChanged = context.coordinator.setLanguage(SyntaxLanguage(fileURL: fileURL))
     if editor.string != text {
       editor.string = text
-      context.coordinator.highlight()
       (scroll.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
+      context.coordinator.highlightImmediately()
+    } else if languageChanged {
+      context.coordinator.highlightImmediately()
     }
     editor.isEditable = !readOnly
   }
@@ -61,49 +66,132 @@ import SwiftUI
   @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
     @Binding var text: String
     weak var editor: NSTextView?
-    init(text: Binding<String>) { _text = text }
+    private var language: SyntaxLanguage
+    private var highlightRevision = 0
+    private var highlightTask: Task<Void, Never>?
+
+    init(text: Binding<String>, language: SyntaxLanguage) {
+      _text = text
+      self.language = language
+    }
+
+    func setLanguage(_ language: SyntaxLanguage) -> Bool {
+      guard self.language != language else { return false }
+      self.language = language
+      return true
+    }
+
     func textDidChange(_ notification: Notification) {
       guard let editor else { return }
       text = editor.string
-      highlight()
+      scheduleHighlight()
       (editor.enclosingScrollView?.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     }
-    func highlight() {
-    guard let editor, let storage = editor.textStorage else { return }
-    let range = NSRange(location: 0, length: storage.length)
-    storage.beginEditing()
-    editor.textColor = NSColor(white: 0.86, alpha: 1)
-    storage.setAttributes(
-        [
-          .foregroundColor: NSColor(white: 0.86, alpha: 1),
-          .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
-        ], range: range)
-      let source = storage.string as NSString
-      for pattern in [
-        "\\b(import|struct|class|enum|actor|func|let|var|if|else|guard|return|async|await|throws|public|private)\\b"
-      ] {
-        if let regex = try? NSRegularExpression(pattern: pattern) {
-          regex.enumerateMatches(in: storage.string, range: range) { match, _, _ in
-            if let match {
-              storage.addAttribute(
-                .foregroundColor, value: NSColor(red: 0.38, green: 0.69, blue: 0.94, alpha: 1),
-                range: match.range)
-            }
-          }
-        }
+
+    func highlightImmediately() {
+      guard let editor else { return }
+      highlightTask?.cancel()
+      highlightRevision += 1
+      let source = editor.string
+      applyBaseAttributes()
+
+      if (source as NSString).length <= 250_000 {
+        apply(SyntaxHighlighter.tokens(in: source, language: language), to: source)
+      } else {
+        scheduleHighlight(delayMilliseconds: 0)
       }
-      if let comments = try? NSRegularExpression(pattern: "//.*$", options: .anchorsMatchLines) {
-        comments.enumerateMatches(in: storage.string, range: range) { match, _, _ in
-          if let match {
-            storage.addAttribute(
-              .foregroundColor, value: NSColor(red: 0.38, green: 0.64, blue: 0.47, alpha: 1),
-              range: match.range)
-          }
-        }
-      }
-      _ = source
-      storage.endEditing()
     }
+
+    private func scheduleHighlight(delayMilliseconds: Int = 55) {
+      guard let editor else { return }
+      highlightTask?.cancel()
+      highlightRevision += 1
+      let revision = highlightRevision
+      let source = editor.string
+      let language = language
+
+      highlightTask = Task { [weak self] in
+        if delayMilliseconds > 0 {
+          try? await Task.sleep(for: .milliseconds(delayMilliseconds))
+        }
+        guard !Task.isCancelled else { return }
+        let tokens = await Task.detached(priority: .userInitiated) {
+          SyntaxHighlighter.tokens(in: source, language: language)
+        }.value
+        guard !Task.isCancelled, let self, self.highlightRevision == revision else { return }
+        self.apply(tokens, to: source)
+      }
+    }
+
+    private func applyBaseAttributes() {
+      guard let editor, let storage = editor.textStorage else { return }
+      let range = NSRange(location: 0, length: storage.length)
+      storage.beginEditing()
+      storage.setAttributes(CodeEditorTheme.baseAttributes, range: range)
+      storage.endEditing()
+      editor.typingAttributes = CodeEditorTheme.baseAttributes
+    }
+
+    private func apply(_ tokens: [SyntaxToken], to source: String) {
+      guard let editor, editor.string == source, let storage = editor.textStorage else { return }
+      let fullRange = NSRange(location: 0, length: storage.length)
+      storage.beginEditing()
+      storage.setAttributes(CodeEditorTheme.baseAttributes, range: fullRange)
+      for token in tokens where NSMaxRange(token.range) <= storage.length {
+        storage.addAttributes(CodeEditorTheme.attributes(for: token.kind), range: token.range)
+      }
+      storage.endEditing()
+      editor.typingAttributes = CodeEditorTheme.baseAttributes
+    }
+  }
+}
+
+@MainActor private enum CodeEditorTheme {
+  static let background = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
+  static let baseText = NSColor(white: 0.86, alpha: 1)
+  static let baseFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+  static let headingFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .semibold)
+  static let baseAttributes: [NSAttributedString.Key: Any] = [
+    .foregroundColor: baseText,
+    .font: baseFont,
+  ]
+
+  static func attributes(for kind: SyntaxTokenKind) -> [NSAttributedString.Key: Any] {
+    let color: NSColor
+    let font: NSFont
+    switch kind {
+    case .keyword:
+      color = NSColor(red: 0.39, green: 0.70, blue: 0.96, alpha: 1)
+      font = baseFont
+    case .type:
+      color = NSColor(red: 0.50, green: 0.79, blue: 0.76, alpha: 1)
+      font = baseFont
+    case .string, .code:
+      color = NSColor(red: 0.88, green: 0.70, blue: 0.46, alpha: 1)
+      font = baseFont
+    case .number:
+      color = NSColor(red: 0.77, green: 0.65, blue: 0.92, alpha: 1)
+      font = baseFont
+    case .comment:
+      color = NSColor(red: 0.48, green: 0.68, blue: 0.54, alpha: 1)
+      font = baseFont
+    case .property:
+      color = NSColor(red: 0.61, green: 0.79, blue: 0.94, alpha: 1)
+      font = baseFont
+    case .punctuation:
+      color = NSColor(red: 0.65, green: 0.68, blue: 0.72, alpha: 1)
+      font = baseFont
+    case .heading:
+      color = NSColor(red: 0.43, green: 0.72, blue: 0.98, alpha: 1)
+      font = headingFont
+    case .emphasis:
+      color = NSColor(red: 0.82, green: 0.66, blue: 0.89, alpha: 1)
+      font = baseFont
+    case .link:
+      color = NSColor(red: 0.44, green: 0.75, blue: 0.95, alpha: 1)
+      font = baseFont
+    }
+    return [.foregroundColor: color, .font: font]
   }
 }
 
@@ -127,7 +215,8 @@ import SwiftUI
     var searchLocation = 0
     while searchLocation < text.length {
       let newline = text.range(
-        of: "\n", options: [], range: NSRange(location: searchLocation, length: text.length - searchLocation))
+        of: "\n", options: [],
+        range: NSRange(location: searchLocation, length: text.length - searchLocation))
       guard newline.location != NSNotFound else { break }
       searchLocation = NSMaxRange(newline)
       starts.append(searchLocation)
