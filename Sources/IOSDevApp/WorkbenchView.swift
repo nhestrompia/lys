@@ -144,6 +144,7 @@ private struct TerminalDrawer: View {
           Image(systemName: model.isTerminalExpanded ? "chevron.down" : "chevron.up")
             .font(.system(size: 10, weight: .semibold))
             .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(model.isTerminalExpanded ? "Collapse terminal" : "Expand terminal")
@@ -196,8 +197,7 @@ private struct LysToolbar: View {
 
   var body: some View {
     HStack(spacing: 0) {
-      Text("Lys")
-        .font(.system(size: 20, weight: .bold))
+      LysLogoView(width: 60, height: 42)
         .padding(.leading, 22)
         .frame(width: 100, alignment: .leading)
 
@@ -307,6 +307,7 @@ private struct LysToolbar: View {
         Label("Run", systemImage: "play.fill")
           .font(.system(size: 12, weight: .semibold))
           .frame(width: 92, height: 40)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .foregroundStyle(Color.primary)
@@ -360,6 +361,7 @@ private struct ToolbarControl: View {
     }
     .frame(width: width, height: 40)
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .contentShape(Rectangle())
     .shadow(color: .black.opacity(0.014), radius: 4, y: 1)
   }
 }
@@ -384,6 +386,7 @@ private struct ToolbarMoreButton: View {
           .foregroundStyle(Color.primary)
       }
       .frame(width: 52, height: 40)
+      .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .popover(isPresented: $isPresented, arrowEdge: .bottom) {
@@ -581,7 +584,9 @@ private struct AgentPanel: View {
               .accessibilityLabel("Agent message")
           }
           Button(action: model.sendAgentPrompt) {
-            Image(systemName: "paperplane.fill").frame(width: 28, height: 28)
+            Image(systemName: "paperplane.fill")
+              .frame(width: 28, height: 28)
+              .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
           .foregroundStyle(model.canSendAgentPrompt ? Studio.accent : Studio.tertiary)
@@ -921,6 +926,7 @@ private struct AgentModelSelector: View {
               .frame(width: 7, height: 7)
               .overlay(Circle().stroke(Studio.surface, lineWidth: 1.5))
           }
+          .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(model.hasAgentSession && adapter.id != model.selectedAdapterID)
@@ -1232,6 +1238,7 @@ private struct AppStage: View {
             Image(systemName: "arrow.clockwise")
               .font(.system(size: 13, weight: .medium))
               .frame(width: 30, height: 30)
+              .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
           .disabled(model.selectedTarget == nil || model.isBusy)
@@ -1245,7 +1252,9 @@ private struct AppStage: View {
             .disabled(model.selectedTarget == nil)
             Button("Stop", action: model.stop).disabled(!model.isBusy)
           } label: {
-            Image(systemName: "ellipsis").frame(width: 32, height: 32)
+            Image(systemName: "ellipsis")
+              .frame(width: 32, height: 32)
+              .contentShape(Rectangle())
           }
           .menuStyle(.borderlessButton)
         }
@@ -1318,6 +1327,7 @@ private struct AppStage: View {
         Image(systemName: "arrow.triangle.2.circlepath")
           .font(.system(size: 13, weight: .medium))
           .frame(width: 28, height: 28)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .foregroundStyle(Studio.secondary)
@@ -1337,6 +1347,7 @@ private struct AppStage: View {
         .frame(height: 30)
         .background(selected ? Studio.accentSoft : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
   }
@@ -1360,7 +1371,9 @@ private struct AppStage: View {
       Button {
         adjustZoom(by: -0.1)
       } label: {
-        Image(systemName: "minus.magnifyingglass").frame(width: 32, height: 32)
+        Image(systemName: "minus.magnifyingglass")
+          .frame(width: 32, height: 32)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .keyboardShortcut("-", modifiers: .command)
@@ -1383,7 +1396,9 @@ private struct AppStage: View {
       Button {
         adjustZoom(by: 0.1)
       } label: {
-        Image(systemName: "plus.magnifyingglass").frame(width: 32, height: 32)
+        Image(systemName: "plus.magnifyingglass")
+          .frame(width: 32, height: 32)
+          .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .keyboardShortcut("+", modifiers: .command)
@@ -1410,6 +1425,7 @@ private struct AppStage: View {
         .background(model.selectedAppearance == appearance ? Studio.accentSoft : .clear)
         .foregroundStyle(model.selectedAppearance == appearance ? Studio.accent : Color.primary)
         .clipShape(Capsule())
+        .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .disabled(model.selectedDestination == nil)
@@ -1713,6 +1729,7 @@ private struct InteractionPalette: View {
       .background(.clear)
       .foregroundStyle(Studio.accent)
       .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+      .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .help(help)
@@ -2555,6 +2572,7 @@ private struct EvidenceWorkspace: View {
           ForEach(Array(model.verificationEvidence.reversed().prefix(4))) { evidence in
             Button { selectedEvidence = evidence } label: {
               EvidenceThumbnail(evidence: evidence)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .popover(item: $selectedEvidence, arrowEdge: .top) { selected in
@@ -2576,6 +2594,7 @@ private struct EvidenceWorkspace: View {
               RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Studio.separator, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
             }
+            .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
           .disabled(model.selectedTarget == nil)
@@ -2838,6 +2857,7 @@ private struct TaskActionBar: View {
             .font(.system(size: 11.5, weight: .semibold))
             .padding(.horizontal, 16)
             .frame(height: 38)
+            .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
           .foregroundStyle(.white)
@@ -3011,6 +3031,7 @@ private struct DeployWorkspace: View {
                     .fill(detailTab == tab ? Color.primary : .clear)
                     .frame(height: 1)
                 }
+                .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
               .accessibilityLabel("Show deploy \(tab.rawValue.lowercased())")
@@ -3380,6 +3401,7 @@ private struct FileBrowser: View {
           Image(systemName: "folder.badge.plus")
             .font(.system(size: 13, weight: .medium))
             .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(Studio.accent)
@@ -3395,31 +3417,135 @@ private struct FileBrowser: View {
           actionTitle: "Open Repository…", action: model.chooseRepository)
       } else {
         ScrollView {
-          OutlineGroup(model.files, children: \.children) { node in
-            let isSelected = model.selectedFile == node.url
-            Button {
-              model.selectFile(node.url)
-            } label: {
-              HStack(spacing: 7) {
-                Image(systemName: node.children == nil ? fileSymbol(node.name) : "folder")
-                  .foregroundStyle(node.children == nil ? Studio.secondary : Studio.accent)
-                Text(node.name).lineLimit(1)
-                Spacer(minLength: 0)
-              }
-              .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-              .padding(.horizontal, 8)
-              .frame(height: 29)
-              .background(isSelected ? Studio.accentSoft : .clear)
-              .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-              .contentShape(Rectangle())
+          LazyVStack(spacing: 1) {
+            ForEach(model.files) { node in
+              FileTreeNodeRow(node: node, depth: 0)
             }
-            .buttonStyle(.plain)
           }
           .padding(10)
         }
       }
     }
     .background(Studio.surface)
+  }
+}
+
+private struct FileTreeNodeRow: View {
+  @EnvironmentObject var model: AppModel
+  let node: FileNode
+  let depth: Int
+
+  @State private var isExpanded = false
+  @State private var isLoading = false
+  @State private var children: [FileNode]?
+  @State private var loadError: String?
+  @State private var loadAttempt = 0
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 1) {
+      Button(action: activate) {
+        HStack(spacing: 7) {
+          Image(systemName: "chevron.right")
+            .font(.system(size: 9, weight: .semibold))
+            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            .foregroundStyle(Studio.tertiary)
+            .frame(width: 11, height: 18)
+            .opacity(node.isDirectory ? 1 : 0)
+
+          Image(systemName: node.isDirectory ? folderSymbol : fileSymbol(node.name))
+            .foregroundStyle(node.isDirectory ? Studio.accent : Studio.secondary)
+            .frame(width: 16)
+
+          Text(node.name)
+            .lineLimit(1)
+            .truncationMode(.middle)
+          Spacer(minLength: 0)
+        }
+        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+        .padding(.leading, CGFloat(depth) * 16 + 8)
+        .padding(.trailing, 8)
+        .frame(height: 30)
+        .background(isSelected ? Studio.accentSoft : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(node.name)
+      .accessibilityValue(
+        node.isDirectory ? (isExpanded ? "Expanded folder" : "Collapsed folder") : "File")
+      .help(node.url.path)
+
+      if isExpanded {
+        if isLoading {
+          HStack(spacing: 7) {
+            ProgressView().controlSize(.mini)
+            Text("Loading…")
+          }
+          .font(.system(size: 10))
+          .foregroundStyle(Studio.secondary)
+          .padding(.leading, CGFloat(depth + 1) * 16 + 26)
+          .frame(height: 28)
+        } else if let loadError {
+          Button {
+            children = nil
+            self.loadError = nil
+            loadAttempt += 1
+          } label: {
+            Label("Couldn’t open folder · Retry", systemImage: "exclamationmark.triangle")
+              .font(.system(size: 10))
+              .foregroundStyle(Studio.warning)
+              .lineLimit(1)
+              .padding(.leading, CGFloat(depth + 1) * 16 + 10)
+              .frame(height: 28)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .help(loadError)
+        } else if let children, children.isEmpty {
+          Text("Empty folder")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.tertiary)
+            .padding(.leading, CGFloat(depth + 1) * 16 + 26)
+            .frame(height: 28)
+        } else if let children {
+          ForEach(children) { child in
+            FileTreeNodeRow(node: child, depth: depth + 1)
+          }
+        }
+      }
+    }
+    .task(id: "\(isExpanded)-\(loadAttempt)") {
+      guard isExpanded, node.isDirectory, children == nil else { return }
+      isLoading = true
+      loadError = nil
+      let result = await Task.detached(priority: .userInitiated) {
+        FileTreeLoader.loadContents(of: node.url)
+      }.value
+      guard !Task.isCancelled else { return }
+      isLoading = false
+      switch result {
+      case .success(let loadedChildren):
+        children = loadedChildren
+      case .failure(let message):
+        loadError = message
+      }
+    }
+  }
+
+  private var isSelected: Bool {
+    !node.isDirectory && model.selectedFile == node.url
+  }
+
+  private var folderSymbol: String {
+    isExpanded ? "folder.fill" : "folder"
+  }
+
+  private func activate() {
+    if node.isDirectory {
+      isExpanded.toggle()
+    } else {
+      model.selectFile(node.url)
+    }
   }
 
   private func fileSymbol(_ name: String) -> String {
@@ -4043,6 +4169,7 @@ private struct AgentPermissionCard: View {
           } label: {
             Image(systemName: "ellipsis.circle")
               .frame(width: 22, height: 22)
+              .contentShape(Rectangle())
               .accessibilityLabel("More permission choices")
           }
           .menuStyle(.borderlessButton)

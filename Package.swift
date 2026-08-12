@@ -28,5 +28,6 @@ let package = Package(
     .testTarget(
       name: "IOSDevCoreTests", dependencies: ["IOSDevCore"],
       resources: [.copy("Fixtures")]),
+    .testTarget(name: "IOSDevUITests", dependencies: ["IOSDevUI"]),
   ]
 )

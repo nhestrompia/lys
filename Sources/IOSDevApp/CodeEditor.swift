@@ -43,6 +43,7 @@ import SwiftUI
     scroll.hasVerticalRuler = true
     scroll.rulersVisible = true
     scroll.verticalRulerView = LineNumberRuler(scrollView: scroll, textView: editor)
+    (scroll.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     context.coordinator.editor = editor
     context.coordinator.highlight()
     return scroll
@@ -52,6 +53,7 @@ import SwiftUI
     if editor.string != text {
       editor.string = text
       context.coordinator.highlight()
+      (scroll.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     }
     editor.isEditable = !readOnly
   }
@@ -64,7 +66,7 @@ import SwiftUI
       guard let editor else { return }
       text = editor.string
       highlight()
-      editor.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+      (editor.enclosingScrollView?.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     }
     func highlight() {
     guard let editor, let storage = editor.textStorage else { return }
@@ -107,6 +109,9 @@ import SwiftUI
 
 @MainActor final class LineNumberRuler: NSRulerView {
   weak var textView: NSTextView?
+  private var lineStarts = [0]
+  var numberOfLines: Int { lineStarts.count }
+
   init(scrollView: NSScrollView, textView: NSTextView) {
     self.textView = textView
     super.init(scrollView: scrollView, orientation: .verticalRuler)
@@ -114,37 +119,97 @@ import SwiftUI
     ruleThickness = 38
   }
   required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  func reloadLineNumbers() {
+    guard let textView else { return }
+    let text = textView.string as NSString
+    var starts = [0]
+    var searchLocation = 0
+    while searchLocation < text.length {
+      let newline = text.range(
+        of: "\n", options: [], range: NSRange(location: searchLocation, length: text.length - searchLocation))
+      guard newline.location != NSNotFound else { break }
+      searchLocation = NSMaxRange(newline)
+      starts.append(searchLocation)
+    }
+    lineStarts = starts
+
+    let digits = max(2, String(starts.count).count)
+    let digitWidth = ("0" as NSString).size(
+      withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)]
+    ).width
+    ruleThickness = max(38, ceil(CGFloat(digits) * digitWidth + 14))
+    needsDisplay = true
+  }
+
   override func drawHashMarksAndLabels(in rect: NSRect) {
     guard let textView, let layout = textView.layoutManager, let container = textView.textContainer
     else { return }
     NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1).setFill()
-    rect.fill()
-    let visible = textView.enclosingScrollView?.contentView.bounds ?? .zero
-    let glyphRange = layout.glyphRange(forBoundingRect: visible, in: container)
-    let text = textView.string as NSString
-    var line = 1
-    if glyphRange.location > 0 {
-      line = text.substring(to: layout.characterIndexForGlyph(at: glyphRange.location)).reduce(1) {
-        $1 == "\n" ? $0 + 1 : $0
-      }
-    }
-    var glyph = glyphRange.location
+    // AppKit passes this hook a client-space dirty rect that can be as wide as the document.
+    // Painting that rect lets the ruler cover the text view itself, so constrain the fill to the
+    // ruler's own bounds.
+    bounds.fill()
+    let visible = textView.visibleRect
+    let origin = textView.textContainerOrigin
+    let visibleContainerRect = visible.offsetBy(dx: -origin.x, dy: -origin.y)
+    let glyphRange = layout.glyphRange(forBoundingRect: visibleContainerRect, in: container)
+    let firstCharacter =
+      layout.numberOfGlyphs == 0
+      ? 0
+      : layout.characterIndexForGlyph(at: min(glyphRange.location, layout.numberOfGlyphs - 1))
+    var lineIndex = lowerBound(for: firstCharacter)
+    if lineIndex > 0 { lineIndex -= 1 }
+
     let attributes: [NSAttributedString.Key: Any] = [
       .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
       .foregroundColor: NSColor(white: 0.48, alpha: 1),
     ]
-    while glyph < NSMaxRange(glyphRange) {
-      let character = layout.characterIndexForGlyph(at: glyph)
-      let lineRange = text.lineRange(for: NSRange(location: character, length: 0))
-      let rect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-      let label = "\(line)" as NSString
+
+    while lineIndex < lineStarts.count {
+      let character = lineStarts[lineIndex]
+      let fragment: NSRect
+      if character < textView.string.utf16.count, layout.numberOfGlyphs > 0 {
+        let glyph = layout.glyphIndexForCharacter(at: character)
+        fragment = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+      } else if character == textView.string.utf16.count,
+        layout.extraLineFragmentTextContainer != nil
+      {
+        fragment = layout.extraLineFragmentRect
+      } else {
+        break
+      }
+
+      let textY = fragment.minY + origin.y
+      if textY > visible.maxY { break }
+      if fragment.maxY + origin.y < visible.minY {
+        lineIndex += 1
+        continue
+      }
+
+      let label = "\(lineIndex + 1)" as NSString
+      let labelSize = label.size(withAttributes: attributes)
+      let rulerPoint = convert(NSPoint(x: 0, y: textY), from: textView)
       label.draw(
         at: NSPoint(
-          x: ruleThickness - label.size(withAttributes: attributes).width - 7,
-          y: rect.minY + textView.textContainerInset.height), withAttributes: attributes)
-      glyph = layout.glyphIndexForCharacter(at: NSMaxRange(lineRange))
-      if lineRange.length == 0 { break }
-      line += 1
+          x: ruleThickness - labelSize.width - 7,
+          y: floor(rulerPoint.y + (fragment.height - labelSize.height) / 2)),
+        withAttributes: attributes)
+      lineIndex += 1
     }
+  }
+
+  private func lowerBound(for character: Int) -> Int {
+    var lower = 0
+    var upper = lineStarts.count
+    while lower < upper {
+      let middle = (lower + upper) / 2
+      if lineStarts[middle] < character {
+        lower = middle + 1
+      } else {
+        upper = middle
+      }
+    }
+    return lower
   }
 }
