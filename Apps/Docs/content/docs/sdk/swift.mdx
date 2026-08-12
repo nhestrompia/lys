@@ -1,0 +1,183 @@
+---
+title: Swift, SwiftUI, and UIKit SDK
+description: Add the local Lys Swift package, instrument native controls, declare a bounded flow, and export its contract.
+---
+
+The standalone package in `Packages/LysSwift` supports iOS 15+ and macOS 13+. Its library product is
+named `Lys`.
+
+## Install the local package
+
+In Xcode, choose **File → Add Package Dependencies → Add Local**, select
+`Packages/LysSwift`, and add the `Lys` product to the application and tooling/test targets that use
+it.
+
+For a Swift package consumer inside this monorepo:
+
+```swift title="Package.swift"
+let package = Package(
+  name: "ExampleApp",
+  platforms: [.iOS(.v15)],
+  dependencies: [
+    .package(path: "../../Packages/LysSwift"),
+  ],
+  targets: [
+    .target(
+      name: "ExampleApp",
+      dependencies: [.product(name: "Lys", package: "LysSwift")]
+    ),
+  ]
+)
+```
+
+This repository does not declare a published Swift package URL, so the guide does not invent one.
+
+## Define semantics once
+
+```swift title="LysSemantics.swift"
+import Lys
+
+enum AppSemantics {
+  static let home = LysScreen(id: "home", title: "Home")
+  static let quiz = LysScreen(id: "quiz.home", title: "Quiz")
+  static let question = LysScreen(
+    id: "quiz.question",
+    title: "Question",
+    terminal: true
+  )
+
+  static let openQuiz = LysAction(
+    id: "home.openQuiz",
+    title: "Open quiz",
+    route: home,
+    resultsIn: quiz,
+    risk: .readOnly
+  )
+
+  static let startQuiz = LysAction(
+    id: "quiz.start",
+    title: "Start quiz",
+    route: quiz,
+    resultsIn: question,
+    risk: .readOnly
+  )
+}
+```
+
+## Bind SwiftUI controls
+
+```swift title="QuizHome.swift"
+import Lys
+import SwiftUI
+
+struct QuizHome: View {
+  @State private var status = "ready"
+
+  var body: some View {
+    VStack {
+      Button("Start quiz", action: startQuiz)
+        .lysAction(AppSemantics.startQuiz)
+
+      Text(status)
+        .lysState("quiz.status", value: status)
+    }
+    .lysScreen(AppSemantics.quiz)
+  }
+}
+```
+
+SwiftUI screen helpers use containment semantics so nested controls remain independently
+actionable.
+
+## Bind UIKit controls
+
+```swift title="QuizViewController.swift"
+import Lys
+import UIKit
+
+final class QuizViewController: UIViewController {
+  private let startButton = UIButton(type: .system)
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.lysScreen(AppSemantics.quiz)
+    startButton.lysAction(AppSemantics.startQuiz)
+  }
+}
+```
+
+UIKit container views receive a separate 1×1 semantic marker so their child controls remain
+addressable. Do not turn the entire screen into one accessibility element.
+
+## Register and export
+
+```swift title="LysContractExportTests.swift"
+import Foundation
+import Lys
+import Testing
+
+@Test func exportsLysContract() throws {
+  Lys.configure(.init(
+    bundleIdentifier: "com.example.quiz",
+    entryRoutes: [AppSemantics.home]
+  ))
+
+  Lys.register(AppSemantics.home)
+  Lys.register(AppSemantics.quiz)
+  Lys.register(AppSemantics.question)
+  Lys.register(AppSemantics.openQuiz)
+  Lys.register(AppSemantics.startQuiz)
+
+  Lys.register(LysFlow(
+    id: "quiz.complete",
+    title: "Complete quiz",
+    startRoute: AppSemantics.quiz,
+    entryRoutes: [AppSemantics.home],
+    steps: [
+      .invoke(
+        id: "quiz.start",
+        title: "Start quiz",
+        action: AppSemantics.startQuiz
+      )
+    ],
+    acceptance: [.route(AppSemantics.question)]
+  ))
+
+  let repository = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+  try Lys.exportContract(to: repository.appending(path: ".lys/contract.json"))
+}
+```
+
+The exporter validates reachability and rejects actions invoked from the wrong route before writing
+the contract.
+
+## Authenticated test setup
+
+```swift
+Lys.register(
+  .authenticated(
+    id: "authenticated.student",
+    title: "Authenticated student",
+    tokenEnvironmentKey: "LYS_TEST_SESSION_TOKEN",
+    tokenSecret: "test.student.session",
+    readyWhen: [.route(AppSemantics.home)]
+  )
+)
+
+if let token = LysTestSession.credential(
+  environmentKey: "LYS_TEST_SESSION_TOKEN"
+) {
+  await auth.restoreTestSession(token)
+}
+```
+
+Keep restoration behind `LysTestSession`; it returns a value only when the host supplied
+`-LysTesting`.
+
+## Verify
+
+```sh title="Lys monorepo"
+swift test --package-path Packages/LysSwift
+node Skills/lys-integrate/scripts/check-contract-goal.mjs \
+  .lys/contract.json "complete a quiz"
+```

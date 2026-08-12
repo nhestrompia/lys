@@ -1,0 +1,67 @@
+---
+title: Agent integration
+description: Give coding agents the canonical Lys implementation workflow and machine-readable documentation endpoints.
+---
+
+Lys includes an Agent Skills-compatible bundle at `Skills/lys-integrate`. Its compact `SKILL.md`
+contains the required workflow; framework and contract details live in focused references that an
+agent loads only when needed.
+
+## Install the skill for a repository agent
+
+Keep the whole directory together:
+
+```text
+Skills/lys-integrate/
+├── SKILL.md
+├── agents/openai.yaml
+├── references/
+│   ├── contract.md
+│   ├── expo.md
+│   └── swift.md
+└── scripts/check-contract-goal.mjs
+```
+
+Point an agent at the repository skill or copy the directory into that agent's supported skills
+location. The exact discovery location is agent-specific; the skill itself uses portable relative
+references.
+
+## Direct agent access
+
+- [`/agent-skill`](/agent-skill) serves the canonical repository `SKILL.md` as Markdown.
+- [`/llms.txt`](/llms.txt) lists the documentation pages for language models.
+- [`/llms-full.txt`](/llms-full.txt) returns the full processed documentation corpus.
+- Append `.mdx` to any documentation URL to request that page as Markdown—for example,
+  [`/docs/sdk/swift.mdx`](/docs/sdk/swift.mdx).
+
+These routes complement the skill; they do not replace its bundled framework references or static
+contract-audit script.
+
+## Suggested agent prompt
+
+```text
+Use $lys-integrate to instrument this application, export .lys/contract.json,
+and prove the requested journey from every supported app entry state.
+```
+
+## The workflow agents must preserve
+
+1. Inspect the installed SDK, router, authentication restoration, real event handlers, and current
+   contract.
+2. Create one typed semantic source of truth shared by UI and exporter.
+3. Model real startup and authentication states without exposing secrets.
+4. Declare safe `route` → `resultsIn` graph edges on actual controls.
+5. Add a bounded flow with terminal acceptance criteria.
+6. Export and run `check-contract-goal.mjs` for every requested outcome.
+7. Execute the real journey and require fresh build, launch, interaction, and screenshot evidence.
+
+## Contract audit
+
+```sh
+node Skills/lys-integrate/scripts/check-contract-goal.mjs \
+  .lys/contract.json "<user goal>" \
+  --current-route "<observed route>"
+```
+
+Exit code 0 means one declared flow covers the goal from the supplied route. Route/action-only
+coverage remains exploratory; missing or ambiguous semantics fail with a nonzero exit.
