@@ -1,0 +1,21 @@
+---
+title: SDK overview
+description: Choose the Lys integration package for your application and produce the shared semantic contract.
+---
+
+Both SDKs model the same graph and export the same schema. Choose by application framework, not by
+the host used to run the test.
+
+| Application UI | Package | UI binding | Export |
+| --- | --- | --- | --- |
+| Expo / React Native | `@lys/testkit` | `screenProps`, `actionProps`, `stateProps` | `writeContract` from `@lys/testkit/node` |
+| SwiftUI / UIKit | Swift product `Lys` | `.lysScreen`, `.lysAction`, `.lysState` | `Lys.exportContract` |
+
+## Shared rules
+
+- Define every screen and action once in shared typed code.
+- Bind actions to the real interactive control.
+- Declare stable dot-separated IDs that survive copy and localization changes.
+- Model every supported application entry and its safe path to the flow start.
+- Bound repetition and require a user-observable terminal result.
+- Keep secrets out of code, contracts, prompts, logs, and evidence.

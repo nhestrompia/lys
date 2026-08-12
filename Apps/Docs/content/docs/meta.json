@@ -1,0 +1,13 @@
+{
+  "title": "Lys documentation",
+  "pages": [
+    "index",
+    "---Get started---",
+    "installation",
+    "concepts",
+    "---SDK guides---",
+    "sdk",
+    "---For agents---",
+    "agents"
+  ]
+}

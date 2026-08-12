@@ -1,0 +1,35 @@
+---
+title: Build iOS changes. Prove they work.
+description: Install Lys, instrument your app, export a semantic contract, and give agents a deterministic path from code to current evidence.
+---
+
+Lys is a public-alpha macOS workbench for agent-assisted iOS development. It treats the running app
+as first-class context and accepts completion only when build, launch, interaction, and screenshot
+evidence support the requested outcome.
+
+<ProofTrail />
+
+## Choose an SDK
+
+Use the package that owns your real application UI. Both SDKs emit the same versioned contract and
+keep automation outside the app.
+
+- **[React Native and Expo](/docs/sdk/react-native):** add `@lys/testkit`, bind semantic props to
+  real controls, and export from a Node script.
+- **[Swift, SwiftUI, and UIKit](/docs/sdk/swift):** add the local Swift package product `Lys`, use
+  native view modifiers or UIKit helpers, and export from a tooling or test target.
+
+## What the SDK adds
+
+The SDK exposes stable screen, action, and non-sensitive state identifiers. It also models bounded
+flows and validates their reachability before writing `.lys/contract.json`.
+
+The SDK does **not** boot devices, execute arbitrary code, take screenshots, or decide test results.
+The Lys host owns physical input, bounded execution, evidence, cancellation, and verification.
+
+## Start here
+
+1. [Install and run the Lys app](/docs/installation).
+2. Read the [semantic contract model](/docs/concepts).
+3. Follow the [React Native](/docs/sdk/react-native) or [Swift](/docs/sdk/swift) implementation guide.
+4. Give your coding agent the canonical [Lys integration skill](/docs/agents).
