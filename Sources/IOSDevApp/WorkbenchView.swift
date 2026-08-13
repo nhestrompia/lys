@@ -3800,12 +3800,6 @@ private struct DeployWorkspace: View {
         .foregroundStyle(Studio.secondary)
       }
       Spacer(minLength: 8)
-      if group.hasAccessToAllBuilds {
-        Image(systemName: "infinity")
-          .font(.system(size: 9, weight: .semibold))
-          .foregroundStyle(Studio.secondary)
-          .help("Access to all builds")
-      }
     }
     .padding(.horizontal, 20)
     .frame(minHeight: 56)
@@ -4180,12 +4174,6 @@ private struct DeployWorkspace: View {
         .foregroundStyle(Studio.secondary)
       }
       Spacer(minLength: 4)
-      if group.hasAccessToAllBuilds {
-        Image(systemName: "infinity")
-          .font(.system(size: 9, weight: .semibold))
-          .foregroundStyle(Studio.secondary)
-          .help("Access to all builds")
-      }
     }
     .padding(.horizontal, compact ? 12 : 20)
     .frame(minHeight: compact ? 42 : 56)
@@ -4965,8 +4953,16 @@ private struct AppStoreUploadSheet: View {
               uploadReviewRow("Bundle ID", preflight.target.bundleID, monospaced: true)
               uploadReviewRow(
                 "Version", "\(preflight.target.marketingVersion) (\(preflight.target.buildNumber))")
-              uploadReviewRow("Team", preflight.target.developmentTeam ?? "Not configured")
-              uploadReviewRow("Signing", preflight.target.codeSignStyle ?? "Project default")
+              uploadReviewRow(
+                "Team",
+                preflight.effectiveTeamID(
+                  override: model.appStoreUploadOptions.developmentTeamID) ?? "Needed below")
+              uploadReviewRow(
+                "Signing",
+                preflight.effectiveTeamID(
+                  override: model.appStoreUploadOptions.developmentTeamID) == nil
+                  ? (preflight.target.codeSignStyle ?? "Project default")
+                  : "Automatic · managed by Lys")
               uploadReviewRow(
                 "Distribution identity",
                 preflight.distributionIdentities.first?.name ?? "Not installed", isLast: true)
@@ -4989,8 +4985,34 @@ private struct AppStoreUploadSheet: View {
               }
             }
 
+            VStack(alignment: .leading, spacing: 9) {
+              HStack(spacing: 8) {
+                Image(systemName: "person.text.rectangle")
+                  .foregroundStyle(Studio.accent)
+                Text("Apple signing team")
+                  .font(.system(size: 11, weight: .semibold))
+              }
+              TextField(
+                "10-character Team ID", text: $model.appStoreUploadOptions.developmentTeamID
+              )
+              .textFieldStyle(.roundedBorder)
+              .font(.system(size: 10.5).monospaced())
+              .textCase(.uppercase)
+              Text(
+                "Lys saves this nonsecret ID to the connected account and passes it to Xcode "
+                  + "for this archive. The project file is not changed."
+              )
+              .font(.system(size: 9))
+              .foregroundStyle(Studio.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .background(Studio.backdrop.opacity(0.7))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
             let unresolvedIssues = preflight.unresolvedIssues(
-              allowProvisioningUpdates: model.appStoreUploadOptions.allowProvisioningUpdates)
+              allowProvisioningUpdates: model.appStoreUploadOptions.allowProvisioningUpdates,
+              developmentTeamID: model.appStoreUploadOptions.developmentTeamID)
             if !unresolvedIssues.isEmpty {
               VStack(alignment: .leading, spacing: 12) {
                 Label("Signing setup required", systemImage: "exclamationmark.shield.fill")
@@ -5001,19 +5023,6 @@ private struct AppStoreUploadSheet: View {
                     .font(.system(size: 9.5))
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: 10) {
-                  Button {
-                    NSWorkspace.shared.open(preflight.target.container)
-                  } label: {
-                    Label("Open Project in Xcode", systemImage: "hammer")
-                  }
-                  Button {
-                    Task { await model.prepareAppStoreUpload() }
-                  } label: {
-                    Label("Run Preflight Again", systemImage: "arrow.clockwise")
-                  }
-                }
-                .controlSize(.small)
               }
               .padding(14)
               .frame(maxWidth: .infinity, alignment: .leading)
@@ -5067,7 +5076,8 @@ private struct AppStoreUploadSheet: View {
             .buttonStyle(.borderedProminent)
             .disabled(
               !preflight.canArchive(
-                allowProvisioningUpdates: model.appStoreUploadOptions.allowProvisioningUpdates))
+                allowProvisioningUpdates: model.appStoreUploadOptions.allowProvisioningUpdates,
+                developmentTeamID: model.appStoreUploadOptions.developmentTeamID))
         }
         .padding(16)
       }
@@ -5174,8 +5184,9 @@ private struct AppStoreUploadSheet: View {
       HStack {
         Button("Close") { dismiss() }
         Button {
-          model.isEvidenceWorkspaceOpen = true
           model.evidenceWorkspaceTab = .terminal
+          model.isEvidenceWorkspaceOpen = true
+          dismiss()
         } label: {
           Label("View Build Log", systemImage: "terminal")
         }
@@ -5507,12 +5518,16 @@ private struct AppStoreConnectionSheet: View {
   @State private var label = "App Store Connect"
   @State private var keyID = ""
   @State private var issuerID = ""
+  @State private var teamID = ""
+  @State private var editedTeamID = ""
+  @State private var isEditingTeamID = false
   @State private var privateKeyURL: URL?
   @State private var showsReplacementForm = false
 
   private var isWorking: Bool {
     model.appStoreConnectionPhase == .connecting
       || model.appStoreConnectionPhase == .refreshing
+      || model.isAppStoreSigningMetadataLoading
   }
 
   var body: some View {
@@ -5587,6 +5602,13 @@ private struct AppStoreConnectionSheet: View {
         connectionValue("Key ID", connection.keyID, monospaced: true)
         Divider().overlay(Studio.separator)
         connectionValue("Issuer ID", connection.issuerID ?? "Missing", monospaced: true)
+        Divider().overlay(Studio.separator)
+        teamIDValue(connection)
+        Divider().overlay(Studio.separator)
+        connectionValue(
+          "Accessible apps", "\(model.appStoreApps.count)")
+        Divider().overlay(Studio.separator)
+        connectionValue("Private key", "Stored in Keychain")
         if let lastSync = model.appStoreLastSyncedAt {
           Divider().overlay(Studio.separator)
           connectionValue(
@@ -5597,6 +5619,11 @@ private struct AppStoreConnectionSheet: View {
       .background(Studio.raised)
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
+      if let message = model.appStoreSigningMetadataMessage, !message.isEmpty {
+        Label(message, systemImage: "checkmark.circle.fill")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.success)
+      }
       errorMessage
 
       HStack {
@@ -5616,7 +5643,7 @@ private struct AppStoreConnectionSheet: View {
           if model.appStoreConnectionPhase == .refreshing {
             ProgressView().controlSize(.small)
           } else {
-            Text("Sync Now")
+            Text("Sync Apps")
           }
         }
         .buttonStyle(.borderedProminent)
@@ -5653,6 +5680,13 @@ private struct AppStoreConnectionSheet: View {
           TextField("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", text: $issuerID)
             .textFieldStyle(.roundedBorder)
             .font(.system(size: 11).monospaced())
+        }
+        GridRow {
+          formLabel("Team ID")
+          TextField("Optional · ABC123DEFG", text: $teamID)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11).monospaced())
+            .textCase(.uppercase)
         }
         GridRow(alignment: .center) {
           formLabel("Private key")
@@ -5711,7 +5745,7 @@ private struct AppStoreConnectionSheet: View {
           guard let privateKeyURL else { return }
           Task {
             if await model.connectAppStore(
-              label: label, keyID: keyID, issuerID: issuerID,
+              label: label, keyID: keyID, issuerID: issuerID, teamID: teamID,
               privateKeyURL: privateKeyURL)
             {
               dismiss()
@@ -5769,6 +5803,61 @@ private struct AppStoreConnectionSheet: View {
     }
     .padding(.horizontal, 12)
     .frame(minHeight: 38)
+  }
+
+  private func teamIDValue(_ connection: AppStoreConnection) -> some View {
+    HStack(spacing: 8) {
+      Text("Team ID")
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.secondary)
+        .frame(width: 74, alignment: .leading)
+      if isEditingTeamID {
+        TextField("ABC123DEFG", text: $editedTeamID)
+          .textFieldStyle(.roundedBorder)
+          .font(.system(size: 10, weight: .medium).monospaced())
+          .textCase(.uppercase)
+          .frame(maxWidth: 150)
+        Button("Cancel") { isEditingTeamID = false }
+          .controlSize(.small)
+        Button("Save") {
+          Task {
+            if await model.saveAppStoreTeamID(editedTeamID) {
+              isEditingTeamID = false
+            }
+          }
+        }
+        .controlSize(.small)
+        .buttonStyle(.borderedProminent)
+        .disabled(
+          AppStoreDistributionSupport.normalizedTeamID(editedTeamID) == nil
+            || model.isAppStoreSigningMetadataLoading)
+      } else {
+        Text(connection.teamID ?? "Not set")
+          .font(.system(size: 10, weight: .medium).monospaced())
+          .foregroundStyle(connection.teamID == nil ? Studio.secondary : Color.primary)
+          .lineLimit(1)
+        Spacer(minLength: 4)
+        Button("Edit") {
+          editedTeamID = connection.teamID ?? ""
+          isEditingTeamID = true
+        }
+        .controlSize(.small)
+        Button {
+          Task { _ = await model.discoverAppStoreTeamID() }
+        } label: {
+          if model.isAppStoreSigningMetadataLoading {
+            ProgressView().controlSize(.small)
+          } else {
+            Label("Discover", systemImage: "arrow.triangle.2.circlepath")
+          }
+        }
+        .controlSize(.small)
+        .help("Discover the Team ID from Apple distribution-certificate metadata")
+        .disabled(isWorking)
+      }
+    }
+    .padding(.horizontal, 12)
+    .frame(minHeight: 42)
   }
 
   private func choosePrivateKey() {
@@ -6314,7 +6403,11 @@ private struct SettingsWorkspace: View {
     case .connected:
       let sync = model.appStoreLastSyncedAt?.formatted(date: .abbreviated, time: .shortened)
         ?? "not synced"
-      return "Connected · \(model.appStoreApps.count) accessible app\(model.appStoreApps.count == 1 ? "" : "s") · synced \(sync)"
+      let team = model.appStoreConnection?.teamID.map { "Team \($0)" } ?? "Team ID not set"
+      let key = model.appStoreConnection.map { "Key \($0.keyID)" } ?? ""
+      return
+        "Connected · \(team) · \(key) · \(model.appStoreApps.count) accessible "
+        + "app\(model.appStoreApps.count == 1 ? "" : "s") · synced \(sync)"
     case .connecting: return "Validating the Team API key with Apple."
     case .refreshing: return "Refreshing accessible apps from Apple."
     case .failed: return model.appStoreConnectionError ?? "The connection needs attention."

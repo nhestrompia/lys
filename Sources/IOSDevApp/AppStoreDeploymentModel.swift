@@ -52,8 +52,18 @@ struct AppStoreUploadPreflight: Sendable {
     signingIdentities.filter(\.isDistributionIdentity)
   }
 
-  func unresolvedIssues(allowProvisioningUpdates: Bool) -> [String] {
+  func effectiveTeamID(override: String) -> String? {
+    AppStoreDistributionSupport.normalizedTeamID(override)
+      ?? AppStoreDistributionSupport.normalizedTeamID(target.developmentTeam)
+  }
+
+  func unresolvedIssues(allowProvisioningUpdates: Bool, developmentTeamID: String) -> [String] {
     var issues = blockingIssues
+    if effectiveTeamID(override: developmentTeamID) == nil {
+      issues.append(
+        "Enter the 10-character Apple Team ID for this account. Lys applies it only to this "
+          + "archive and does not edit the repository.")
+    }
     if distributionIdentities.isEmpty && !allowProvisioningUpdates {
       issues.append(
         "No Apple Distribution identity is installed. Turn on Xcode signing updates below, or "
@@ -62,12 +72,16 @@ struct AppStoreUploadPreflight: Sendable {
     return issues
   }
 
-  func canArchive(allowProvisioningUpdates: Bool) -> Bool {
-    unresolvedIssues(allowProvisioningUpdates: allowProvisioningUpdates).isEmpty
+  func canArchive(allowProvisioningUpdates: Bool, developmentTeamID: String) -> Bool {
+    unresolvedIssues(
+      allowProvisioningUpdates: allowProvisioningUpdates,
+      developmentTeamID: developmentTeamID
+    ).isEmpty
   }
 }
 
 struct AppStoreUploadOptions: Equatable, Sendable {
+  var developmentTeamID = ""
   var allowProvisioningUpdates = false
   var internalTestingOnly = false
   var uploadSymbols = true
@@ -138,11 +152,13 @@ extension AppModel {
   }
 
   func connectAppStore(
-    label: String, keyID: String, issuerID: String, privateKeyURL: URL
+    label: String, keyID: String, issuerID: String, teamID: String = "", privateKeyURL: URL
   ) async -> Bool {
     let normalizedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
     let normalizedKeyID = keyID.trimmingCharacters(in: .whitespacesAndNewlines)
     let normalizedIssuerID = issuerID.trimmingCharacters(in: .whitespacesAndNewlines)
+    let enteredTeamID = teamID.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedTeamID = AppStoreDistributionSupport.normalizedTeamID(enteredTeamID)
     guard !normalizedLabel.isEmpty else {
       appStoreConnectionError = "Give this connection a name so it is identifiable later."
       appStoreConnectionPhase = .failed
@@ -159,6 +175,11 @@ extension AppModel {
       appStoreConnectionPhase = .failed
       return false
     }
+    guard enteredTeamID.isEmpty || normalizedTeamID != nil else {
+      appStoreConnectionError = "Apple Team ID must contain 10 letters or numbers."
+      appStoreConnectionPhase = .failed
+      return false
+    }
     guard privateKeyURL.pathExtension.caseInsensitiveCompare("p8") == .orderedSame else {
       appStoreConnectionError = "Select the original .p8 private key downloaded from Apple."
       appStoreConnectionPhase = .failed
@@ -172,12 +193,17 @@ extension AppModel {
       defer { if hasSecurityScope { privateKeyURL.stopAccessingSecurityScopedResource() } }
       let privateKey = try Data(contentsOf: privateKeyURL, options: [.mappedIfSafe])
       try AppStoreCredentialStore.validate(privateKeyPEM: privateKey)
-      let connection = AppStoreConnection(
+      var connection = AppStoreConnection(
         label: normalizedLabel, keyID: normalizedKeyID, issuerID: normalizedIssuerID,
-        keyKind: .team)
+        teamID: normalizedTeamID, keyKind: .team)
       let client = try AppStoreConnectClient(
         connection: connection, privateKeyPEM: privateKey)
       let apps = try await client.listApps()
+      if connection.teamID == nil,
+        let discovered = try? await client.developmentTeamIDs(), discovered.count == 1
+      {
+        connection.teamID = discovered[0]
+      }
 
       try AppStoreCredentialStore.write(privateKey, connectionID: connection.id)
       do {
@@ -213,7 +239,7 @@ extension AppModel {
   }
 
   func refreshAppStoreConnection() async {
-    guard let connection = appStoreConnection else {
+    guard var connection = appStoreConnection else {
       appStoreConnectionPhase = .disconnected
       appStoreApps = []
       appStoreLastSyncedAt = nil
@@ -226,7 +252,14 @@ extension AppModel {
       let client = try AppStoreConnectClient(
         connection: connection, privateKeyPEM: privateKey)
       let apps = try await client.listApps()
+      if connection.teamID == nil,
+        let discovered = try? await client.developmentTeamIDs(), discovered.count == 1
+      {
+        connection.teamID = discovered[0]
+        try? await appStoreMetadataStore?.saveAppStoreConnection(connection)
+      }
       guard appStoreConnection?.id == connection.id else { return }
+      appStoreConnection = connection
       appStoreApps = apps
       appStoreLastSyncedAt = Date()
       appStoreConnectionPhase = .connected
@@ -235,6 +268,55 @@ extension AppModel {
       guard appStoreConnection?.id == connection.id else { return }
       appStoreConnectionPhase = .failed
       appStoreConnectionError = error.localizedDescription
+    }
+  }
+
+  func saveAppStoreTeamID(_ value: String) async -> Bool {
+    guard var connection = appStoreConnection else { return false }
+    guard let teamID = AppStoreDistributionSupport.normalizedTeamID(value) else {
+      appStoreConnectionError = "Apple Team ID must contain 10 letters or numbers."
+      return false
+    }
+    connection.teamID = teamID
+    do {
+      try await appStoreMetadataStore?.saveAppStoreConnection(connection)
+      appStoreConnection = connection
+      appStoreConnectionError = nil
+      appStoreSigningMetadataMessage = "Team ID saved for this App Store Connect account."
+      return true
+    } catch {
+      appStoreConnectionError = error.localizedDescription
+      return false
+    }
+  }
+
+  func discoverAppStoreTeamID() async -> Bool {
+    guard var connection = appStoreConnection else { return false }
+    isAppStoreSigningMetadataLoading = true
+    appStoreConnectionError = nil
+    appStoreSigningMetadataMessage = nil
+    defer { isAppStoreSigningMetadataLoading = false }
+    do {
+      let privateKey = try await appStoreCredentialSession.privateKey(for: connection.id)
+      let client = try AppStoreConnectClient(connection: connection, privateKeyPEM: privateKey)
+      let teamIDs = try await client.developmentTeamIDs()
+      guard let teamID = teamIDs.first, teamIDs.count == 1 else {
+        throw AppStoreConnectError.invalidConnection(
+          teamIDs.isEmpty
+            ? "Apple returned no active distribution-certificate Team ID for this key. "
+              + "Enter the 10-character Team ID manually."
+            : "Apple returned more than one Team ID. Enter the Team ID used by this app "
+              + "manually.")
+      }
+      connection.teamID = teamID
+      try await appStoreMetadataStore?.saveAppStoreConnection(connection)
+      guard appStoreConnection?.id == connection.id else { return false }
+      appStoreConnection = connection
+      appStoreSigningMetadataMessage = "Team ID synced from Apple signing metadata."
+      return true
+    } catch {
+      appStoreConnectionError = error.localizedDescription
+      return false
     }
   }
 
@@ -248,6 +330,7 @@ extension AppModel {
       appStoreApps = []
       appStoreLastSyncedAt = nil
       appStoreConnectionError = nil
+      appStoreSigningMetadataMessage = nil
       appStoreConnectionPhase = .disconnected
       resetAppStoreDeploymentData()
     } catch {
@@ -768,18 +851,30 @@ extension AppModel {
         xcodebuild: URL(fileURLWithPath: xcodebuildPath),
         developerDirectory: URL(fileURLWithPath: developerPath), derivedData: discoveryRoot)
       async let identitiesResult = ToolchainDiscovery.signingIdentities()
-      let (target, identities) = try await (targetResult, identitiesResult)
+      var (target, identities) = try await (targetResult, identitiesResult)
       guard target.bundleID == app.bundleID else {
         throw AppStoreDistributionError.identityMismatch(
           expected: app.bundleID, actual: target.bundleID)
       }
-      var blockingIssues: [String] = []
-      var warnings: [String] = []
-      if target.developmentTeam == nil {
-        blockingIssues.append(
-          "The Release target has no development team. Open this project in Xcode, select the "
-            + "team that owns \(target.bundleID) under Signing & Capabilities, then run preflight again.")
+      var teamID = AppStoreDistributionSupport.normalizedTeamID(target.developmentTeam)
+        ?? AppStoreDistributionSupport.normalizedTeamID(appStoreConnection?.teamID)
+      if teamID == nil, let connection = appStoreConnection,
+        let privateKey = try? await appStoreCredentialSession.privateKey(for: connection.id),
+        let client = try? AppStoreConnectClient(
+          connection: connection, privateKeyPEM: privateKey),
+        let discovered = try? await client.developmentTeamIDs(), discovered.count == 1
+      {
+        teamID = discovered[0]
+        _ = await saveAppStoreTeamID(discovered[0])
       }
+      if let teamID {
+        target.developmentTeam = teamID
+        appStoreUploadOptions.developmentTeamID = teamID
+      } else {
+        appStoreUploadOptions.developmentTeamID = ""
+      }
+      let blockingIssues: [String] = []
+      var warnings: [String] = []
       if identities.contains(where: \.isDistributionIdentity) == false {
         warnings.append(
           "No local Apple Distribution identity was found. With a configured team, Xcode signing "
@@ -797,7 +892,7 @@ extension AppModel {
         target: target, signingIdentities: identities, sourceRoot: sourceRoot,
         blockingIssues: blockingIssues, warnings: warnings)
       appStoreUploadStatus = blockingIssues.isEmpty
-        ? "Review the archive identity and signing options."
+        ? "Review the archive identity and let Lys manage signing for this upload."
         : "Complete the required signing setup before archiving."
       appStoreUploadPhase = .ready
     } catch {
@@ -848,16 +943,21 @@ extension AppModel {
         throw AppStoreDistributionError.identityMismatch(
           expected: app.bundleID, actual: uploadPreflight.target.bundleID)
       }
-      guard uploadPreflight.target.developmentTeam != nil else {
+      guard let teamID = uploadPreflight.effectiveTeamID(
+        override: options.developmentTeamID)
+      else {
         throw AppStoreConnectError.invalidConnection(
-          "The Release target has no development team. Open the project in Xcode, select the team "
-            + "that owns \(uploadPreflight.target.bundleID) under Signing & Capabilities, then run preflight again.")
+          "Enter the 10-character Apple Team ID for this account before archiving.")
       }
       if uploadPreflight.distributionIdentities.isEmpty && !options.allowProvisioningUpdates {
         throw AppStoreConnectError.invalidConnection(
           "No Apple Distribution identity is installed. Enable Xcode signing updates or add the "
             + "distribution certificate in Xcode.")
       }
+      _ = await saveAppStoreTeamID(teamID)
+      var archiveTarget = uploadPreflight.target
+      archiveTarget.developmentTeam = teamID
+      archiveTarget.codeSignStyle = "Automatic"
 
       let jobRoot = appStoreDeploymentArtifactsRoot.appending(
         path: UUID().uuidString, directoryHint: .isDirectory)
@@ -879,7 +979,7 @@ extension AppModel {
       appStoreUploadPhase = .archiving
       appStoreUploadStatus = "Creating a signed Release archive…"
       let archiveCommand = AppStoreDistributionSupport.archiveCommand(
-        xcodebuild: URL(fileURLWithPath: xcodebuildPath), target: uploadPreflight.target,
+        xcodebuild: URL(fileURLWithPath: xcodebuildPath), target: archiveTarget,
         archivePath: archiveURL, derivedDataPath: derivedDataURL,
         developerDirectory: URL(fileURLWithPath: developerPath),
         authentication: options.allowProvisioningUpdates ? credential : nil,
@@ -895,10 +995,10 @@ extension AppModel {
       appStoreUploadStatus = "Verifying the archive identity before upload…"
       let inspection = try AppStoreDistributionSupport.inspectArchive(at: archiveURL)
       try verifyArchive(
-        inspection, expected: uploadPreflight.target, appBundleID: app.bundleID)
+        inspection, expected: archiveTarget, appBundleID: app.bundleID)
       appStoreUploadArchiveInspection = inspection
       let exportOptions = try AppStoreDistributionSupport.exportOptionsData(
-        teamID: inspection.teamID ?? uploadPreflight.target.developmentTeam,
+        teamID: inspection.teamID ?? archiveTarget.developmentTeam,
         internalTestingOnly: options.internalTestingOnly, uploadSymbols: options.uploadSymbols)
       try exportOptions.write(to: exportOptionsURL, options: .atomic)
       try Task.checkCancellation()
@@ -923,7 +1023,7 @@ extension AppModel {
       appStoreUploadPhase = .processing
       appStoreUploadStatus = "Upload accepted. Waiting for Apple to process the build…"
       await followUploadedBuild(
-        target: uploadPreflight.target, connection: connection, expectedAppID: app.id)
+        target: archiveTarget, connection: connection, expectedAppID: app.id)
     } catch is CancellationError {
       removeCredentialDirectory(credentialDirectory)
       appStoreUploadPhase = uploadAccepted ? .uploaded : .cancelled

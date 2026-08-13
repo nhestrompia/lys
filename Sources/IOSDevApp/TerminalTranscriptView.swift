@@ -15,7 +15,9 @@ struct TerminalTranscriptView: NSViewRepresentable {
     scroll.hasVerticalScroller = true
     scroll.hasHorizontalScroller = true
     scroll.autohidesScrollers = false
-    scroll.scrollerStyle = .overlay
+    // A persistent track keeps long build output discoverably scrollable even when macOS is set
+    // to show overlay scrollbars only while scrolling.
+    scroll.scrollerStyle = .legacy
 
     let storage = NSTextStorage()
     let manager = NSLayoutManager()

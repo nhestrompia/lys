@@ -48,7 +48,8 @@ import Testing
 @Test func appStoreTokenRejectsLifetimeOverTwentyMinutes() throws {
   let key = P256.Signing.PrivateKey()
   let connection = AppStoreConnection(
-    label: "Release", keyID: "KEY", issuerID: "issuer", keyKind: .team)
+    label: "Release", keyID: "KEY", issuerID: "issuer", teamID: "ABC123DEFG",
+    keyKind: .team)
   let signer = try AppStoreConnectTokenSigner(
     connection: connection, privateKeyPEM: Data(key.pemRepresentation.utf8))
   #expect(throws: AppStoreConnectError.self) {
@@ -60,10 +61,12 @@ import Testing
   let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   let store = try SQLiteStore(url: root.appending(path: "metadata.sqlite3"))
   let connection = AppStoreConnection(
-    label: "Release", keyID: "KEY", issuerID: "issuer", keyKind: .team)
+    label: "Release", keyID: "KEY", issuerID: "issuer", teamID: "ABC123DEFG",
+    keyKind: .team)
   try await store.saveAppStoreConnection(connection)
   let loaded = try await store.appStoreConnections()
   #expect(loaded == [connection])
+  #expect(loaded.first?.teamID == "ABC123DEFG")
   try await store.deleteAppStoreConnection(id: connection.id)
   #expect(try await store.appStoreConnections().isEmpty)
 }
@@ -100,6 +103,14 @@ import Testing
     }
     let path = try #require(request.url?.path)
     switch path {
+    case "/v1/certificates":
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      #expect(query.first { $0.name == "filter[certificateType]" }?.value?.contains("DISTRIBUTION") == true)
+      return fixtureResponse(
+        request,
+        """
+        {"data":[{"type":"certificates","id":"certificate-1","attributes":{"displayName":"Apple Distribution: Example, Inc. (ABC123DEFG)","certificateType":"DISTRIBUTION"}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/certificates"}}
+        """)
     case "/v1/apps/app-1/appStoreVersions":
       return fixtureResponse(
         request,
@@ -308,6 +319,7 @@ import Testing
     connection: connection, privateKeyPEM: Data(key.pemRepresentation.utf8),
     session: URLSession(configuration: configuration))
   let versions = try await client.listAppStoreVersions(appID: "app-1")
+  let teamIDs = try await client.developmentTeamIDs()
   let builds = try await client.listBuilds(appID: "app-1")
   let groups = try await client.listBetaGroups(appID: "app-1")
   let testerUsages = try await client.listBetaTesterUsages(appID: "app-1", period: .oneYear)
@@ -337,6 +349,7 @@ import Testing
   try await client.releaseApprovedVersion(createdVersion.id)
 
   #expect(versions.first?.versionString == "2.4")
+  #expect(teamIDs == ["ABC123DEFG"])
   #expect(versions.first?.buildID == "build-1")
   #expect(builds.first?.version == "42")
   #expect(builds.first?.marketingVersion == "2.4")

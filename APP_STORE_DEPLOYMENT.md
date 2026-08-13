@@ -36,6 +36,9 @@ is unavailable.
 - [x] Implement a production `URLSession` App Store Connect client.
 - [x] Decode Apple JSON:API app records and structured API errors.
 - [x] Persist nonsecret connection metadata in SQLite.
+- [x] Show the nonsecret Key ID, Issuer ID, Team ID, accessible-app count, Keychain status, and
+  last sync in Settings; allow the Team ID to be edited or rediscovered from Apple signing
+  metadata without replacing the API key.
 - [x] Restore and validate the most recent connection on launch.
 - [x] Add a native connection sheet and keep the connected-account entry in Settings; Deploy only
   shows the connection action while disconnected or failed.
@@ -58,8 +61,10 @@ is unavailable.
   does not depend on an active task runtime or agent session.
 - [x] Read the Release bundle ID, product name, marketing version, build number, development team,
   signing style and identity, provisioning-profile specifier, and entitlements path.
-- [ ] Read the deployment target, device families, resolved Info.plist, local app icon, symbol
+- [ ] Read the deployment target, device families, local app icon, symbol
   settings, and export-compliance declaration.
+- [x] Resolve the Release app's effective marketing version and build number from its Info.plist,
+  including build-setting expansion, so preflight reviews the same identity Xcode archives.
 - [ ] Discover extensions, App Clips, watch companions, and their bundle IDs.
 - [ ] Detect whether the selected scheme has an Archive action and is shared.
 - [ ] Let the user explicitly choose the deployment source: original checkout, applied branch, or
@@ -85,10 +90,15 @@ is unavailable.
 - [ ] Compare local entitlements with the selected provisioning path.
 - [ ] Report missing agreements or developer-account actions as external prerequisites rather than
   claiming a false machine-verified result.
-- [x] Block archive when the Release target has no development team or has neither a local
-  distribution identity nor explicit approval for Xcode signing updates.
-- [x] Present signing blockers separately from warnings, open the selected project directly in
-  Xcode, and rerun preflight without closing the upload sheet.
+- [x] Resolve the Apple Team ID from the Release target, saved account metadata, or accessible
+  distribution-certificate records; accept a one-time Team ID in Lys when API permissions prevent
+  discovery.
+- [x] Apply `DEVELOPMENT_TEAM` and automatic signing as archive-only overrides without editing the
+  repository, and persist the nonsecret Team ID with the connected account.
+- [x] Block archive only when the Team ID is unresolved or there is neither a local distribution
+  identity nor explicit approval for Xcode signing updates.
+- [x] Present signing blockers separately from warnings and resolve ordinary team/provisioning
+  setup inside the upload review.
 - [x] Present a single ordered signing-readiness checklist with direct recovery actions.
 - [x] Present a protected archive/upload review with the exact source, scheme, bundle ID,
   version/build, team, signing style, local distribution identity, and actionable warnings.
@@ -150,6 +160,8 @@ is unavailable.
   authentication-key path.
 - [x] Prefer actionable compiler/signing/provisioning diagnostics over Xcode's terminal
   `ARCHIVE FAILED` summary and expose the full build log from the failure state.
+- [x] Dismiss the upload review before revealing the build log, and keep terminal vertical and
+  horizontal scrollbars visible for long Xcode output.
 - [ ] Persist Xcode distribution logs and structured diagnostics.
 - [x] Poll processed builds by exact marketing version/build number until ready, failed, cancelled,
   or the bounded foreground wait expires.

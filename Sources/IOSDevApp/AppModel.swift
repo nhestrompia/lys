@@ -260,6 +260,8 @@ public final class AppModel: ObservableObject {
   @Published var appStoreConnectionPhase: AppStoreConnectionPhase = .disconnected
   @Published var appStoreConnectionError: String?
   @Published var appStoreLastSyncedAt: Date?
+  @Published var isAppStoreSigningMetadataLoading = false
+  @Published var appStoreSigningMetadataMessage: String?
   @Published var appStoreDistributionTarget: AppTarget?
   @Published var appStoreSelectedAppID: String?
   @Published var appStoreVersions: [AppStoreVersion] = []

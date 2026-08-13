@@ -146,6 +146,12 @@ public enum AppStoreDistributionSupport {
       "-destination", "generic/platform=iOS", "-archivePath", archivePath.path,
       "-derivedDataPath", derivedDataPath.path, "archive",
     ]
+    if let teamID = normalizedTeamID(target.developmentTeam) {
+      arguments.append("DEVELOPMENT_TEAM=\(teamID)")
+    }
+    if target.codeSignStyle?.caseInsensitiveCompare("automatic") == .orderedSame {
+      arguments.append("CODE_SIGN_STYLE=Automatic")
+    }
     appendAuthentication(
       to: &arguments, authentication: authentication,
       allowProvisioningUpdates: allowProvisioningUpdates)
@@ -178,6 +184,7 @@ public enum AppStoreDistributionSupport {
       "destination": "upload",
       "manageAppVersionAndBuildNumber": false,
       "method": "app-store-connect",
+      "signingStyle": "automatic",
       "testFlightInternalTestingOnly": internalTestingOnly,
       "uploadSymbols": uploadSymbols,
     ]
@@ -262,6 +269,14 @@ public enum AppStoreDistributionSupport {
     return detail.isEmpty
       ? "xcodebuild exited with status \(status). Open the build log for details."
       : detail
+  }
+
+  public static func normalizedTeamID(_ value: String?) -> String? {
+    let value = value?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? ""
+    guard value.count == 10,
+      value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) })
+    else { return nil }
+    return value
   }
 
   private static func appendAuthentication(

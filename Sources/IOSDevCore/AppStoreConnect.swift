@@ -12,12 +12,13 @@ public struct AppStoreConnection: Codable, Identifiable, Hashable, Sendable {
   public var label: String
   public var keyID: String
   public var issuerID: String?
+  public var teamID: String?
   public var keyKind: AppStoreConnectKeyKind
   public var createdAt: Date
   public var validatedAt: Date
 
   public init(
-    id: UUID = UUID(), label: String, keyID: String, issuerID: String?,
+    id: UUID = UUID(), label: String, keyID: String, issuerID: String?, teamID: String? = nil,
     keyKind: AppStoreConnectKeyKind = .team, createdAt: Date = Date(),
     validatedAt: Date = Date()
   ) {
@@ -25,6 +26,7 @@ public struct AppStoreConnection: Codable, Identifiable, Hashable, Sendable {
     self.label = label
     self.keyID = keyID
     self.issuerID = issuerID
+    self.teamID = teamID
     self.keyKind = keyKind
     self.createdAt = createdAt
     self.validatedAt = validatedAt
@@ -600,6 +602,18 @@ public actor AppStoreConnectClient {
       nextURL = following
     }
     return apps
+  }
+
+  public func developmentTeamIDs() async throws -> [String] {
+    let url = try endpoint(
+      "v1/certificates",
+      query: [
+        .init(name: "filter[certificateType]", value: "DISTRIBUTION,IOS_DISTRIBUTION"),
+        .init(name: "fields[certificates]", value: "displayName,certificateType"),
+        .init(name: "limit", value: "200"),
+      ])
+    let resources: [CertificateResource] = try await getAll(url)
+    return Array(Set(resources.compactMap(\.teamID))).sorted()
   }
 
   public func listAppStoreVersions(appID: String) async throws -> [AppStoreVersion] {
@@ -1720,6 +1734,25 @@ private struct AppsDocument: Decodable {
         id: id, name: attributes.name, bundleID: attributes.bundleId, sku: attributes.sku,
         primaryLocale: attributes.primaryLocale)
     }
+  }
+}
+
+private struct CertificateResource: Decodable {
+  struct Attributes: Decodable {
+    var displayName: String?
+    var certificateType: String?
+  }
+  var attributes: Attributes?
+
+  var teamID: String? {
+    guard let displayName = attributes?.displayName else { return nil }
+    let pattern = #"\(([A-Z0-9]{10})\)\s*$"#
+    guard let expression = try? NSRegularExpression(pattern: pattern),
+      let match = expression.firstMatch(
+        in: displayName, range: NSRange(displayName.startIndex..., in: displayName)),
+      let range = Range(match.range(at: 1), in: displayName)
+    else { return nil }
+    return String(displayName[range])
   }
 }
 

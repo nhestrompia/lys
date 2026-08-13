@@ -8,7 +8,7 @@ import Testing
     container: URL(fileURLWithPath: "/tmp/Client App;$(touch nope).xcworkspace"),
     scheme: "Release App; echo nope", target: "Release App", bundleID: "com.example.app",
     productName: "Release App", marketingVersion: "2.4", buildNumber: "42",
-    developmentTeam: "TEAM123", codeSignStyle: "Automatic")
+    developmentTeam: "TEAM123ABC", codeSignStyle: "Automatic")
   let authentication = AppStoreDistributionAuthentication(
     privateKeyURL: URL(fileURLWithPath: "/tmp/private key/AuthKey_TEST.p8"), keyID: "KEY123",
     issuerID: "issuer-123")
@@ -26,6 +26,8 @@ import Testing
   #expect(archive.arguments.contains("/tmp/job/App archive.xcarchive"))
   #expect(archive.arguments.contains("/tmp/private key/AuthKey_TEST.p8"))
   #expect(archive.arguments.contains("-allowProvisioningUpdates"))
+  #expect(archive.arguments.contains("DEVELOPMENT_TEAM=TEAM123ABC"))
+  #expect(archive.arguments.contains("CODE_SIGN_STYLE=Automatic"))
 
   let upload = AppStoreDistributionSupport.uploadCommand(
     xcodebuild: archive.executable,
@@ -41,7 +43,7 @@ import Testing
 
 @Test func appStoreExportOptionsKeepReviewedBuildNumberAndInternalRestriction() throws {
   let data = try AppStoreDistributionSupport.exportOptionsData(
-    teamID: "TEAM123", internalTestingOnly: true, uploadSymbols: true)
+    teamID: "TEAM123ABC", internalTestingOnly: true, uploadSymbols: true)
   let plist = try #require(
     PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
   #expect(plist["method"] as? String == "app-store-connect")
@@ -49,7 +51,14 @@ import Testing
   #expect(plist["manageAppVersionAndBuildNumber"] as? Bool == false)
   #expect(plist["testFlightInternalTestingOnly"] as? Bool == true)
   #expect(plist["uploadSymbols"] as? Bool == true)
-  #expect(plist["teamID"] as? String == "TEAM123")
+  #expect(plist["teamID"] as? String == "TEAM123ABC")
+  #expect(plist["signingStyle"] as? String == "automatic")
+}
+
+@Test func appStoreTeamIDNormalizationRejectsIssuerIDsAndUnsafeOverrides() {
+  #expect(AppStoreDistributionSupport.normalizedTeamID(" abc123defg ") == "ABC123DEFG")
+  #expect(AppStoreDistributionSupport.normalizedTeamID("issuer-123") == nil)
+  #expect(AppStoreDistributionSupport.normalizedTeamID("TEAM=12345") == nil)
 }
 
 @Test func appStoreArchiveInspectionReadsTheIdentityXcodeActuallyArchived() throws {
@@ -90,6 +99,57 @@ import Testing
   #expect(identities.filter(\.isDistributionIdentity).map(\.fingerprint) == [
     "FEDCBA9876543210FEDCBA9876543210FEDCBA98"
   ])
+}
+
+@Test func releaseDiscoveryPrefersTheInfoPlistVersionXcodeActuallyArchives() {
+  let versions = ToolchainDiscovery.effectiveBundleVersions(
+    buildSettings: [
+      "MARKETING_VERSION": "1.0",
+      "CURRENT_PROJECT_VERSION": "1",
+    ],
+    infoPlist: [
+      "CFBundleShortVersionString": "1.0.17",
+      "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
+    ])
+
+  #expect(versions.marketingVersion == "1.0.17")
+  #expect(versions.buildNumber == "1")
+}
+
+@Test func releaseDiscoveryFallsBackToBuildSettingsWithoutAnInfoPlist() {
+  let versions = ToolchainDiscovery.effectiveBundleVersions(
+    buildSettings: [
+      "MARKETING_VERSION": "2.4",
+      "CURRENT_PROJECT_VERSION": "42",
+    ], infoPlist: nil)
+
+  #expect(versions.marketingVersion == "2.4")
+  #expect(versions.buildNumber == "42")
+}
+
+@Test func releaseDiscoveryLoadsTheResolvedSourceInfoPlist() throws {
+  let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let appDirectory = root.appending(path: "ReleaseApp", directoryHint: .isDirectory)
+  try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let data = try PropertyListSerialization.data(
+    fromPropertyList: [
+      "CFBundleShortVersionString": "1.0.17",
+      "CFBundleVersion": "9",
+    ], format: .xml, options: 0)
+  try data.write(to: appDirectory.appending(path: "Info.plist"))
+
+  let versions = ToolchainDiscovery.effectiveBundleVersions(
+    buildSettings: [
+      "SRCROOT": root.path,
+      "INFOPLIST_FILE": "ReleaseApp/Info.plist",
+      "MARKETING_VERSION": "1.0",
+      "CURRENT_PROJECT_VERSION": "1",
+    ],
+    container: root.appending(path: "ReleaseApp.xcodeproj"))
+
+  #expect(versions.marketingVersion == "1.0.17")
+  #expect(versions.buildNumber == "9")
 }
 
 @Test func appStoreDistributionFailurePrefersActionableSigningDiagnostics() {
