@@ -1,6 +1,47 @@
 import AppKit
 import SwiftUI
 
+@MainActor struct SyntaxHighlightedText: View {
+  let text: String
+  let language: SyntaxLanguage
+
+  var body: some View {
+    highlightedText
+      .font(.system(size: 11, weight: .regular, design: .monospaced))
+      .foregroundStyle(Color(nsColor: .labelColor).opacity(0.84))
+  }
+
+  private var highlightedText: Text {
+    let source = text.isEmpty ? " " : text
+    let nsSource = source as NSString
+    let fullRange = NSRange(location: 0, length: nsSource.length)
+    let tokens = SyntaxHighlighter.tokens(in: source, language: language)
+    var result = Text("")
+    var cursor = 0
+
+    for token in tokens {
+      let range = NSIntersectionRange(token.range, fullRange)
+      guard range.length > 0 else { continue }
+      if range.location > cursor {
+        let fragment = Text(nsSource.substring(with: NSRange(
+          location: cursor, length: range.location - cursor)))
+        result = Text("\(result)\(fragment)")
+      }
+      let fragment = Text(nsSource.substring(with: range))
+        .foregroundStyle(CodeEditorTheme.color(for: token.kind))
+      result = Text("\(result)\(fragment)")
+      cursor = max(cursor, NSMaxRange(range))
+    }
+
+    if cursor < nsSource.length {
+      let fragment = Text(nsSource.substring(with: NSRange(
+        location: cursor, length: nsSource.length - cursor)))
+      result = Text("\(result)\(fragment)")
+    }
+    return result
+  }
+}
+
 @MainActor struct CodeEditor: NSViewRepresentable {
   @Binding var text: String
   var fileURL: URL?
@@ -211,6 +252,13 @@ import SwiftUI
       font = baseFont
     }
     return [.foregroundColor: color, .font: font]
+  }
+
+  static func color(for kind: SyntaxTokenKind) -> Color {
+    guard let color = attributes(for: kind)[.foregroundColor] as? NSColor else {
+      return Color(nsColor: baseText)
+    }
+    return Color(nsColor: color)
   }
 }
 

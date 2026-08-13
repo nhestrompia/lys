@@ -6652,9 +6652,9 @@ private struct GitWorkspace: View {
 
       HStack(spacing: 0) {
         changeMetric("Changed", count: modifiedCount, color: Studio.accent)
-        Divider().frame(height: 26).overlay(Studio.separator)
+        changeMetricSeparator
         changeMetric("Added", count: addedCount, color: Studio.success)
-        Divider().frame(height: 26).overlay(Studio.separator)
+        changeMetricSeparator
         changeMetric("Deleted", count: deletedCount, color: .red)
         Spacer()
         HStack(spacing: 7) {
@@ -6714,7 +6714,14 @@ private struct GitWorkspace: View {
       Text(title).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Studio.secondary)
       Text("\(count)").font(.system(size: 12, weight: .semibold).monospacedDigit())
     }
-    .frame(width: 112, alignment: .leading)
+    .padding(.horizontal, 16)
+  }
+
+  private var changeMetricSeparator: some View {
+    Rectangle()
+      .fill(Studio.separator)
+      .frame(width: 1, height: 30)
+      .padding(.horizontal, 8)
   }
 
   private var changes: [ProposedChange] { model.visibleChanges }
@@ -6873,7 +6880,7 @@ private struct GitWorkspace: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
           } else {
-            diffLines(selectedDiff.lines)
+            diffLines(selectedDiff)
           }
         } else {
           VStack(spacing: 10) {
@@ -6897,11 +6904,12 @@ private struct GitWorkspace: View {
     }
   }
 
-  private func diffLines(_ lines: [ProposedDiffLine]) -> some View {
-    ScrollView([.vertical, .horizontal]) {
+  private func diffLines(_ diff: ProposedFileDiff) -> some View {
+    let language = SyntaxLanguage(fileURL: URL(fileURLWithPath: diff.path))
+    return ScrollView([.vertical, .horizontal]) {
       LazyVStack(spacing: 0) {
-        ForEach(lines) { line in
-          DiffLineRow(line: line)
+        ForEach(diff.lines) { line in
+          DiffLineRow(line: line, language: language)
         }
       }
       .padding(.vertical, 8)
@@ -6984,29 +6992,30 @@ private struct DiffKindBadge: View {
 
 private struct DiffLineRow: View {
   let line: ProposedDiffLine
+  let language: SyntaxLanguage
 
   var body: some View {
     HStack(spacing: 0) {
-      Text(line.oldLineNumber.map(String.init) ?? "")
-        .frame(width: 42, alignment: .trailing)
-        .foregroundStyle(Studio.tertiary)
-      Text(line.newLineNumber.map(String.init) ?? "")
+      Text(lineNumber)
         .frame(width: 42, alignment: .trailing)
         .foregroundStyle(Studio.tertiary)
       Text(prefix)
         .frame(width: 24)
         .foregroundStyle(prefixColor)
-      Text(line.text.isEmpty ? " " : line.text)
+      SyntaxHighlightedText(text: line.text, language: language)
+        .fixedSize(horizontal: true, vertical: false)
         .frame(minWidth: 420, alignment: .leading)
-        .foregroundStyle(Color(nsColor: .labelColor).opacity(0.82))
         .textSelection(.enabled)
     }
-    .font(.system(size: 10.5, weight: .regular, design: .monospaced))
     .foregroundStyle(Studio.secondary)
     .padding(.horizontal, 10)
     .frame(minHeight: 23, alignment: .center)
     .background(rowColor)
     .overlay(alignment: .bottom) { Divider().overlay(Studio.separator.opacity(0.5)) }
+  }
+
+  private var lineNumber: String {
+    String(line.newLineNumber ?? line.oldLineNumber ?? 0)
   }
 
   private var prefix: String {
