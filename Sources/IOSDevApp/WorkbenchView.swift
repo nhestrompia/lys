@@ -4030,12 +4030,12 @@ private struct DeployWorkspace: View {
         detail: "Apple returned no screenshot or crash feedback for this app.")
     } else {
       ScrollView {
-        LazyVStack(spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 10) {
           ForEach(model.appStoreFeedback) { feedback in
             feedbackRow(feedback)
-            Divider().overlay(Studio.separator)
           }
         }
+        .padding(16)
       }
     }
   }
@@ -4123,11 +4123,12 @@ private struct DeployWorkspace: View {
                   ?? "Apple returned no TestFlight feedback."))
           } else {
             ScrollView {
-              LazyVStack(spacing: 0) {
+              LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(model.appStoreFeedback.prefix(5))) { feedback in
                   feedbackRow(feedback, compact: true)
                 }
               }
+              .padding(10)
             }
           }
         }
@@ -4292,26 +4293,27 @@ private struct DeployWorkspace: View {
   }
 
   private func feedbackRow(_ feedback: AppStoreFeedback, compact: Bool = false) -> some View {
-    HStack(alignment: .top, spacing: 10) {
-      Image(systemName: feedback.kind == .crash ? "exclamationmark.triangle" : "bubble.left")
-        .font(.system(size: compact ? 10 : 12, weight: .medium))
-        .foregroundStyle(feedback.kind == .crash ? Studio.warning : Studio.accent)
-        .frame(width: compact ? 22 : 28, height: compact ? 22 : 28)
-        .background(feedback.kind == .crash ? Studio.raised : Studio.accentSoft)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-      VStack(alignment: .leading, spacing: 4) {
-        Text(feedback.comment?.nonempty ?? (feedback.kind == .crash ? "Crash report" : "Screenshot feedback"))
-          .font(.system(size: compact ? 9.5 : 10.5, weight: .semibold))
-          .lineLimit(compact ? 2 : 4)
-        HStack(spacing: 4) {
-          if let device = feedback.deviceModel { Text(device) }
-          if let os = feedback.osVersion { Text("· \(os)") }
-          if let date = feedback.createdDate {
-            Text("· \(date.formatted(date: .abbreviated, time: .omitted))")
+    let title = feedback.comment?.nonempty
+      ?? (feedback.kind == .crash ? "Crash report" : "Screenshot feedback")
+
+    return HStack(alignment: .top, spacing: compact ? 10 : 14) {
+      feedbackTypeIcon(feedback, compact: compact)
+
+      VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+          Text(title)
+            .font(.system(size: compact ? 9.5 : 11.5, weight: .semibold))
+            .lineLimit(compact ? 2 : 3)
+            .fixedSize(horizontal: false, vertical: true)
+
+          if !compact {
+            Spacer(minLength: 4)
+            feedbackKindBadge(feedback)
           }
         }
-        .font(.system(size: compact ? 8.5 : 9.5))
-        .foregroundStyle(Studio.secondary)
+
+        feedbackMetadata(feedback, compact: compact)
+
         if !compact {
           Button {
             Task { await model.startAgentTask(for: feedback) }
@@ -4322,48 +4324,113 @@ private struct DeployWorkspace: View {
           }
           .buttonStyle(.bordered)
           .controlSize(.small)
+          .tint(Studio.accent)
           .font(.system(size: 9.5, weight: .medium))
           .disabled(model.isBusy || model.isPreparingFeedbackAgentTask)
           .help("Start a task in the selected coding agent with this feedback and its screenshots")
+          .padding(.top, 1)
         }
       }
-      Spacer(minLength: 0)
+      .frame(maxWidth: .infinity, alignment: .leading)
+
       if let imageURL = feedback.imageURL {
-        Button { feedbackScreenshot = feedback } label: {
-          ZStack(alignment: .topTrailing) {
-            AsyncImage(url: imageURL) { phase in
-              switch phase {
-              case .success(let image): image.resizable().scaledToFill()
-              case .failure:
-                Image(systemName: "photo.badge.exclamationmark")
-                  .foregroundStyle(Studio.tertiary)
-              default: ProgressView().controlSize(.mini)
-              }
-            }
-            .frame(width: compact ? 42 : 54, height: compact ? 42 : 64)
-            .background(Studio.raised)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            if feedback.imageURLs.count > 1 {
-              Text("\(feedback.imageURLs.count)")
-                .font(.system(size: 7.5, weight: .bold).monospacedDigit())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 4)
-                .frame(minHeight: 14)
-                .background(Color.black.opacity(0.72))
-                .clipShape(Capsule())
-                .padding(3)
-            }
-          }
-          .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Open feedback screenshot")
-        .accessibilityLabel(
-          "Open \(feedback.imageURLs.count) feedback screenshot\(feedback.imageURLs.count == 1 ? "" : "s")")
+        feedbackThumbnail(feedback, imageURL: imageURL, compact: compact)
       }
     }
-    .padding(.horizontal, compact ? 12 : 20)
-    .padding(.vertical, compact ? 9 : 14)
+    .padding(.horizontal, compact ? 10 : 16)
+    .padding(.vertical, compact ? 10 : 16)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Studio.raised.opacity(compact ? 0.58 : 0.52))
+    .clipShape(RoundedRectangle(cornerRadius: compact ? 10 : 12, style: .continuous))
+    .accessibilityElement(children: .contain)
+  }
+
+  private func feedbackTypeIcon(_ feedback: AppStoreFeedback, compact: Bool) -> some View {
+    let isCrash = feedback.kind == .crash
+    return Image(systemName: isCrash ? "exclamationmark.triangle" : "bubble.left")
+      .font(.system(size: compact ? 10 : 13, weight: .medium))
+      .foregroundStyle(isCrash ? Studio.warning : Studio.accent)
+      .frame(width: compact ? 26 : 36, height: compact ? 26 : 36)
+      .background(isCrash ? Studio.raised : Studio.accentSoft)
+      .clipShape(RoundedRectangle(cornerRadius: compact ? 7 : 10, style: .continuous))
+      .accessibilityHidden(true)
+  }
+
+  private func feedbackKindBadge(_ feedback: AppStoreFeedback) -> some View {
+    let isCrash = feedback.kind == .crash
+    return Label(
+      isCrash ? "Crash" : "Screenshot",
+      systemImage: isCrash ? "exclamationmark.triangle.fill" : "photo")
+      .font(.system(size: 8.5, weight: .semibold))
+      .foregroundStyle(isCrash ? Studio.warning : Studio.accent)
+      .padding(.horizontal, 7)
+      .frame(height: 22)
+      .background((isCrash ? Studio.warning : Studio.accent).opacity(0.11))
+      .clipShape(Capsule())
+  }
+
+  private func feedbackMetadata(_ feedback: AppStoreFeedback, compact: Bool) -> some View {
+    HStack(spacing: 5) {
+      if let device = feedback.deviceModel?.nonempty {
+        Text(device)
+      }
+      if let os = feedback.osVersion?.nonempty {
+        feedbackMetadataSeparator
+        Text(os)
+      }
+      if let date = feedback.createdDate {
+        feedbackMetadataSeparator
+        Text(date.formatted(date: .abbreviated, time: .omitted))
+      }
+    }
+    .font(.system(size: compact ? 8.5 : 9.5))
+    .foregroundStyle(Studio.secondary)
+    .lineLimit(1)
+    .truncationMode(.tail)
+  }
+
+  private var feedbackMetadataSeparator: some View {
+    Text("·")
+      .foregroundStyle(Studio.tertiary)
+  }
+
+  private func feedbackThumbnail(
+    _ feedback: AppStoreFeedback, imageURL: URL, compact: Bool
+  ) -> some View {
+    Button { feedbackScreenshot = feedback } label: {
+      ZStack(alignment: .topTrailing) {
+        AsyncImage(url: imageURL) { phase in
+          switch phase {
+          case .success(let image): image.resizable().scaledToFit().padding(4)
+          case .failure:
+            Image(systemName: "photo.badge.exclamationmark")
+              .font(.system(size: compact ? 11 : 14))
+              .foregroundStyle(Studio.tertiary)
+          default: ProgressView().controlSize(.mini)
+          }
+        }
+        .frame(width: compact ? 44 : 76, height: compact ? 58 : 98)
+        .background(Studio.surface)
+        .clipShape(RoundedRectangle(cornerRadius: compact ? 7 : 9, style: .continuous))
+
+        if feedback.imageURLs.count > 1 {
+          Text("\(feedback.imageURLs.count)")
+            .font(.system(size: 7.5, weight: .bold).monospacedDigit())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .frame(minHeight: 14)
+            .background(Color.black.opacity(0.72))
+            .clipShape(Capsule())
+            .padding(3)
+        }
+      }
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .help("Open feedback screenshot")
+    .accessibilityLabel(
+      "Open \(feedback.imageURLs.count) feedback screenshot\(feedback.imageURLs.count == 1 ? "" : "s")")
+    .layoutPriority(1)
   }
 
   private func friendlyAppStoreState(_ value: String) -> String {
