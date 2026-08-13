@@ -817,6 +817,30 @@ public actor AppStoreConnectClient {
     }
   }
 
+  public func findBuild(
+    appID: String, marketingVersion: String, buildNumber: String
+  ) async throws -> AppStoreBuild? {
+    let url = try endpoint(
+      "v1/builds",
+      query: [
+        .init(name: "filter[app]", value: try safeResourceID(appID)),
+        .init(name: "filter[version]", value: buildNumber),
+        .init(name: "filter[preReleaseVersion.version]", value: marketingVersion),
+        .init(name: "include", value: "preReleaseVersion"),
+        .init(
+          name: "fields[builds]",
+          value:
+            "version,uploadedDate,expirationDate,expired,minOsVersion,processingState,buildAudienceType,usesNonExemptEncryption,preReleaseVersion"
+        ),
+        .init(name: "fields[preReleaseVersions]", value: "version,platform"),
+        .init(name: "limit", value: "1"),
+      ])
+    let document: BuildLookupDocument = try await get(url)
+    let marketingVersions = Dictionary(
+      uniqueKeysWithValues: (document.included ?? []).map { ($0.id, $0.attributes?.version) })
+    return document.data.first?.build(marketingVersions: marketingVersions)
+  }
+
   public func listBetaGroups(appID: String) async throws -> [AppStoreBetaGroup] {
     let url = try endpoint(
       "v1/betaGroups",
@@ -1511,6 +1535,11 @@ private struct BuildResource: Decodable {
       audienceType: attributes?.buildAudienceType,
       usesNonExemptEncryption: attributes?.usesNonExemptEncryption)
   }
+}
+
+private struct BuildLookupDocument: Decodable {
+  var data: [BuildResource]
+  var included: [PreReleaseVersionResource]?
 }
 
 private struct PreReleaseVersionResource: Decodable {

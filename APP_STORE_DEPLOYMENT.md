@@ -25,6 +25,12 @@ is unavailable.
 
 ## Status
 
+### Shared Settings UX
+
+- [x] Keep authenticated-testing credential fields out of the Settings row; expose a compact
+  Set Authentication popover with labeled ID and secret fields, storing only the value in
+  Keychain and showing saved IDs without revealing values.
+
 ### 1. Connection foundation
 
 - [x] Define nonsecret connection and remote-app domain models.
@@ -119,6 +125,8 @@ is unavailable.
 - [x] Load tester counts for beta groups.
 - [x] Load and display individual TestFlight tester names, email addresses, invite state, and group
   membership.
+- [x] Keep tester analytics width-bound to the Deploy surface with responsive metric columns and
+  collapsible tester groups; never require horizontal scrolling to inspect a group.
 - [x] Load per-tester TestFlight sessions, crashes, and feedback for selectable 7-day, 30-day,
   90-day, and 1-year periods; keep analytics permission/errors independent from tester membership.
 - [x] Load each tester's Apple-reported app devices, OS versions, and tested build versions and
@@ -165,6 +173,9 @@ is unavailable.
 - [ ] Persist Xcode distribution logs and structured diagnostics.
 - [x] Poll processed builds by exact marketing version/build number until ready, failed, cancelled,
   or the bounded foreground wait expires.
+- [x] Query the exact uploaded version/build immediately after upload, then use short adaptive
+  polling intervals for up to 30 minutes instead of repeatedly loading the account's entire build
+  history; allow the upload sheet to close while processing continues in the background.
 - [ ] Recover an in-progress processing job after Lys restarts.
 - [x] Provide explicit cancellation, stop-waiting, and retry behavior.
 
@@ -175,6 +186,8 @@ is unavailable.
   the tester from the entire Apple account.
 - [ ] Edit localized What to Test text.
 - [x] Assign a ready build to an internal group from the protected update-release flow.
+- [x] Provide a focused Send to Testers flow directly after upload and from a selected processed
+  build, without requiring App Store version metadata or an App Review submission.
 - [ ] Create and manage internal groups when permitted.
 - [x] Assign a ready build to an external group from the protected update-release flow.
 - [ ] Create and manage external groups when permitted.

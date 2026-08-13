@@ -123,6 +123,17 @@ import Testing
         """
         {"data":[{"type":"builds","id":"build-1","attributes":{"version":"42","uploadedDate":"2026-08-10T12:00:00Z","expired":false,"minOsVersion":"17.0","processingState":"VALID","buildAudienceType":"APP_STORE_ELIGIBLE"},"relationships":{"preReleaseVersion":{"data":{"type":"preReleaseVersions","id":"pre-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/apps/app-1/builds"}}
         """)
+    case "/v1/builds":
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      #expect(query.first { $0.name == "filter[app]" }?.value == "app-1")
+      #expect(query.first { $0.name == "filter[version]" }?.value == "42")
+      #expect(query.first { $0.name == "filter[preReleaseVersion.version]" }?.value == "2.4")
+      #expect(query.first { $0.name == "include" }?.value == "preReleaseVersion")
+      return fixtureResponse(
+        request,
+        """
+        {"data":[{"type":"builds","id":"build-1","attributes":{"version":"42","uploadedDate":"2026-08-10T12:00:00Z","expired":false,"minOsVersion":"17.0","processingState":"VALID","buildAudienceType":"APP_STORE_ELIGIBLE"},"relationships":{"preReleaseVersion":{"data":{"type":"preReleaseVersions","id":"pre-1"}}}}],"included":[{"type":"preReleaseVersions","id":"pre-1","attributes":{"version":"2.4","platform":"IOS"}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/builds"}}
+        """)
     case "/v1/apps/app-1/preReleaseVersions":
       let queryNames = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
         .queryItems?.map(\.name) ?? []
@@ -321,6 +332,8 @@ import Testing
   let versions = try await client.listAppStoreVersions(appID: "app-1")
   let teamIDs = try await client.developmentTeamIDs()
   let builds = try await client.listBuilds(appID: "app-1")
+  let exactBuild = try await client.findBuild(
+    appID: "app-1", marketingVersion: "2.4", buildNumber: "42")
   let groups = try await client.listBetaGroups(appID: "app-1")
   let testerUsages = try await client.listBetaTesterUsages(appID: "app-1", period: .oneYear)
   let icons = try await client.listBuildIcons(buildID: "build-1")
@@ -353,6 +366,8 @@ import Testing
   #expect(versions.first?.buildID == "build-1")
   #expect(builds.first?.version == "42")
   #expect(builds.first?.marketingVersion == "2.4")
+  #expect(exactBuild?.id == "build-1")
+  #expect(exactBuild?.marketingVersion == "2.4")
   #expect(groups.first?.testerCount == 1)
   #expect(groups.first?.testers.first?.email == "ada@example.com")
   #expect(groups.first?.testers.first?.devices.first?.model == "iPhone14,5")

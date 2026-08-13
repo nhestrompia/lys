@@ -2914,6 +2914,9 @@ private struct DeployWorkspace: View {
   @State private var feedbackScreenshot: AppStoreFeedback?
   @State private var showsBuildUpload = false
   @State private var showsReleaseUpdate = false
+  @State private var showsTestFlightDistribution = false
+  @State private var pendingDistributionAfterUpload = false
+  @State private var collapsedTesterGroupIDs: Set<String> = []
   @State private var confirmsManualRelease = false
 
   var body: some View {
@@ -2968,7 +2971,13 @@ private struct DeployWorkspace: View {
       FeedbackScreenshotViewer(feedback: feedback)
     }
     .sheet(isPresented: $showsBuildUpload) {
-      AppStoreUploadSheet()
+      AppStoreUploadSheet {
+        pendingDistributionAfterUpload = true
+      }
+        .environmentObject(model)
+    }
+    .sheet(isPresented: $showsTestFlightDistribution) {
+      AppStoreBuildDistributionSheet()
         .environmentObject(model)
     }
     .sheet(isPresented: $showsReleaseUpdate) {
@@ -3007,6 +3016,13 @@ private struct DeployWorkspace: View {
     .task(id: deploymentContextKey) {
       guard model.appStoreConnectionPhase == .connected else { return }
       await model.refreshAppStoreDeploymentData()
+    }
+    .onChange(of: showsBuildUpload) { _, isPresented in
+      guard !isPresented, pendingDistributionAfterUpload else { return }
+      pendingDistributionAfterUpload = false
+      model.appStoreReleasePhase = .idle
+      model.appStoreReleaseError = nil
+      showsTestFlightDistribution = true
     }
   }
 
@@ -3320,6 +3336,18 @@ private struct DeployWorkspace: View {
           }
           Spacer(minLength: 8)
           if model.selectedAppStoreApp != nil {
+            if listTab == .builds, model.selectedAppStoreBuild?.processingState == "VALID" {
+              Button {
+                model.appStoreReleasePhase = .idle
+                model.appStoreReleaseError = nil
+                showsTestFlightDistribution = true
+              } label: {
+                Label("Send to Testers", systemImage: "person.2.badge.plus")
+              }
+              .buttonStyle(.borderedProminent)
+              .controlSize(.small)
+              .disabled(model.appStoreReleasePhase.isRunning)
+            }
             if model.selectedAppStoreVersion?.state == "PENDING_DEVELOPER_RELEASE" {
               Button {
                 confirmsManualRelease = true
@@ -3683,32 +3711,41 @@ private struct DeployWorkspace: View {
           .background(Studio.warning.opacity(0.06))
           Divider().overlay(Studio.separator)
         }
-        ScrollView([.horizontal, .vertical]) {
-          LazyVStack(spacing: 0) {
-            testerAnalyticsColumnHeader
-            ForEach(model.appStoreBetaGroups) { group in
-              VStack(spacing: 0) {
-                testerGroupHeader(group)
-                if group.testers.isEmpty {
-                  Text("No individual testers in this group")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(Studio.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 58)
-                    .padding(.bottom, 14)
-                } else {
-                  ForEach(group.testers) { tester in
-                    testerAnalyticsRow(tester)
-                    if tester.id != group.testers.last?.id {
-                      Divider().overlay(Studio.separator).padding(.leading, 58)
+        GeometryReader { geometry in
+          let metricWidth: CGFloat = geometry.size.width < 620 ? 52 : 68
+          let showsDevice = geometry.size.width >= 760
+          ScrollView(.vertical) {
+            LazyVStack(spacing: 0) {
+              testerAnalyticsColumnHeader(
+                metricWidth: metricWidth, showsDevice: showsDevice)
+              ForEach(model.appStoreBetaGroups) { group in
+                let isCollapsed = collapsedTesterGroupIDs.contains(group.id)
+                VStack(spacing: 0) {
+                  testerGroupHeader(group, isCollapsed: isCollapsed)
+                  if !isCollapsed {
+                    if group.testers.isEmpty {
+                      Text("No individual testers in this group")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Studio.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 58)
+                        .padding(.bottom, 14)
+                    } else {
+                      ForEach(group.testers) { tester in
+                        testerAnalyticsRow(
+                          tester, metricWidth: metricWidth, showsDevice: showsDevice)
+                        if tester.id != group.testers.last?.id {
+                          Divider().overlay(Studio.separator).padding(.leading, 58)
+                        }
+                      }
                     }
                   }
                 }
+                Divider().overlay(Studio.separator)
               }
-              Divider().overlay(Studio.separator)
             }
+            .frame(maxWidth: .infinity)
           }
-          .frame(minWidth: 760)
         }
       }
     }
@@ -3746,14 +3783,18 @@ private struct DeployWorkspace: View {
     .frame(minHeight: 54)
   }
 
-  private var testerAnalyticsColumnHeader: some View {
+  private func testerAnalyticsColumnHeader(
+    metricWidth: CGFloat, showsDevice: Bool
+  ) -> some View {
     HStack(spacing: 12) {
       Text("TESTER")
-        .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
-      Text("SESSIONS").frame(width: 68, alignment: .trailing)
-      Text("CRASHES").frame(width: 68, alignment: .trailing)
-      Text("FEEDBACK").frame(width: 68, alignment: .trailing)
-      Text("DEVICE").frame(width: 160, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      Text("SESSIONS").frame(width: metricWidth, alignment: .trailing)
+      Text("CRASHES").frame(width: metricWidth, alignment: .trailing)
+      Text("FEEDBACK").frame(width: metricWidth, alignment: .trailing)
+      if showsDevice {
+        Text("DEVICE").frame(width: 140, alignment: .leading)
+      }
     }
     .font(.system(size: 7.5, weight: .semibold))
     .foregroundStyle(Studio.secondary)
@@ -3762,51 +3803,74 @@ private struct DeployWorkspace: View {
     .background(Studio.raised.opacity(0.35))
   }
 
-  private func testerGroupHeader(_ group: AppStoreBetaGroup) -> some View {
+  private func testerGroupHeader(
+    _ group: AppStoreBetaGroup, isCollapsed: Bool
+  ) -> some View {
     HStack(spacing: 10) {
-      Image(systemName: group.isInternal ? "person.2.fill" : "globe")
-        .font(.system(size: 12, weight: .medium))
-        .foregroundStyle(group.isInternal ? Studio.accent : Studio.secondary)
-        .frame(width: 28, height: 28)
-        .background(group.isInternal ? Studio.accentSoft : Studio.raised)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-      VStack(alignment: .leading, spacing: 3) {
-        HStack(spacing: 8) {
+      Button {
+        withAnimation(.easeOut(duration: 0.16)) {
+          if isCollapsed {
+            collapsedTesterGroupIDs.remove(group.id)
+          } else {
+            collapsedTesterGroupIDs.insert(group.id)
+          }
+        }
+      } label: {
+        HStack(spacing: 10) {
+          Image(systemName: "chevron.right")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(Studio.secondary)
+            .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+            .frame(width: 10)
+          Image(systemName: group.isInternal ? "person.2.fill" : "globe")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(group.isInternal ? Studio.accent : Studio.secondary)
+            .frame(width: 28, height: 28)
+            .background(group.isInternal ? Studio.accentSoft : Studio.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+          VStack(alignment: .leading, spacing: 3) {
           Text(group.name)
             .font(.system(size: 11, weight: .semibold))
             .lineLimit(1)
             .truncationMode(.tail)
-            .layoutPriority(1)
-          Button("Manage…") { testerEditorGroupID = group.id }
-            .buttonStyle(.plain)
-            .font(.system(size: 9.5, weight: .medium))
-            .foregroundStyle(Studio.accent)
-            .padding(.horizontal, 7)
-            .frame(height: 24)
-            .background(Studio.accentSoft)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .fixedSize()
-            .contentShape(Rectangle())
-            .help("Add or remove testers in \(group.name)")
-            .accessibilityLabel("Manage \(group.name) testers")
-        }
-        HStack(spacing: 5) {
-          Text(group.isInternal ? "Internal" : "External")
-          if let count = group.testerCount {
-            Text("· \(count) tester\(count == 1 ? "" : "s")")
+          HStack(spacing: 5) {
+            Text(group.isInternal ? "Internal" : "External")
+            if let count = group.testerCount {
+              Text("· \(count) tester\(count == 1 ? "" : "s")")
+            }
           }
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.secondary)
         }
-        .font(.system(size: 9.5))
-        .foregroundStyle(Studio.secondary)
+          Spacer(minLength: 8)
+        }
+        .contentShape(Rectangle())
       }
+      .buttonStyle(.plain)
+      .frame(maxWidth: .infinity)
+      .accessibilityLabel("\(isCollapsed ? "Expand" : "Collapse") \(group.name)")
       Spacer(minLength: 8)
+      Button("Manage…") { testerEditorGroupID = group.id }
+        .buttonStyle(.plain)
+        .font(.system(size: 9.5, weight: .medium))
+        .foregroundStyle(Studio.accent)
+        .padding(.horizontal, 7)
+        .frame(height: 24)
+        .background(Studio.accentSoft)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .fixedSize()
+        .contentShape(Rectangle())
+        .help("Add or remove testers in \(group.name)")
+        .accessibilityLabel("Manage \(group.name) testers")
     }
     .padding(.horizontal, 20)
     .frame(minHeight: 56)
     .background(Studio.raised.opacity(0.55))
   }
 
-  private func testerAnalyticsRow(_ tester: AppStoreBetaTester) -> some View {
+  private func testerAnalyticsRow(
+    _ tester: AppStoreBetaTester, metricWidth: CGFloat, showsDevice: Bool
+  ) -> some View {
     let usage = model.appStoreTesterUsages[tester.id]
     return HStack(spacing: 12) {
       HStack(spacing: 10) {
@@ -3828,12 +3892,14 @@ private struct DeployWorkspace: View {
           .lineLimit(1)
         }
       }
-      .frame(minWidth: 240, maxWidth: .infinity, alignment: .leading)
-      testerMetricCell(usage?.sessionCount, width: 68)
-      testerMetricCell(usage?.crashCount, width: 68, warnsWhenPositive: true)
-      testerMetricCell(usage?.feedbackCount, width: 68)
-      testerDeviceCell(tester.devices)
-        .frame(width: 160, alignment: .leading)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      testerMetricCell(usage?.sessionCount, width: metricWidth)
+      testerMetricCell(usage?.crashCount, width: metricWidth, warnsWhenPositive: true)
+      testerMetricCell(usage?.feedbackCount, width: metricWidth)
+      if showsDevice {
+        testerDeviceCell(tester.devices)
+          .frame(width: 140, alignment: .leading)
+      }
     }
     .padding(.horizontal, 20)
     .frame(minHeight: 54)
@@ -4877,9 +4943,275 @@ private struct AppStoreReleaseSheet: View {
   }
 }
 
+private struct AppStoreBuildDistributionSheet: View {
+  @Environment(\.dismiss) private var dismiss
+  @EnvironmentObject var model: AppModel
+  @State private var buildID = ""
+  @State private var betaGroupIDs: Set<String> = []
+  @State private var usesNonExemptEncryption: Bool?
+  @State private var submitForBetaReview = false
+
+  private var validBuilds: [AppStoreBuild] {
+    model.appStoreBuilds.filter { $0.processingState == "VALID" && !$0.expired }
+  }
+
+  private var selectedBuild: AppStoreBuild? {
+    model.appStoreBuilds.first { $0.id == buildID }
+  }
+
+  private var selectedExternalGroup: Bool {
+    model.appStoreBetaGroups.contains {
+      betaGroupIDs.contains($0.id) && !$0.isInternal && !$0.hasAccessToAllBuilds
+    }
+  }
+
+  private var needsComplianceAnswer: Bool {
+    selectedBuild?.usesNonExemptEncryption == nil
+  }
+
+  private var canDistribute: Bool {
+    !buildID.isEmpty && !betaGroupIDs.isEmpty
+      && (!needsComplianceAnswer || usesNonExemptEncryption != nil)
+      && !model.appStoreReleasePhase.isRunning
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .top, spacing: 14) {
+        Image(systemName: "person.2.badge.plus")
+          .font(.system(size: 16, weight: .medium))
+          .foregroundStyle(Studio.accent)
+          .frame(width: 38, height: 38)
+          .background(Studio.accentSoft)
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Send Build to Testers")
+            .font(.system(size: 17, weight: .bold))
+          Text("Give TestFlight groups access to a processed build.")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        if !model.appStoreReleasePhase.isRunning {
+          Button("Close") { dismiss() }
+            .keyboardShortcut(.cancelAction)
+        }
+      }
+      .padding(20)
+
+      Divider().overlay(Studio.separator)
+
+      if model.appStoreReleasePhase == .complete {
+        distributionResult
+      } else {
+        distributionForm
+      }
+    }
+    .frame(width: 540, height: 620)
+    .background(Studio.surface)
+    .interactiveDismissDisabled(model.appStoreReleasePhase.isRunning)
+    .onAppear(perform: initialize)
+    .onChange(of: buildID) { _, _ in
+      usesNonExemptEncryption = selectedBuild?.usesNonExemptEncryption
+      removeIneligibleExternalGroups()
+    }
+    .onChange(of: betaGroupIDs) { _, _ in
+      submitForBetaReview = selectedExternalGroup
+    }
+  }
+
+  private var distributionForm: some View {
+    VStack(spacing: 0) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 20) {
+          distributionSection("Processed build") {
+            Picker("Build", selection: $buildID) {
+              Text("Choose a build").tag("")
+              ForEach(validBuilds) { build in
+                Text(buildLabel(build)).tag(build.id)
+              }
+            }
+            if validBuilds.isEmpty {
+              Label(
+                "Apple has not returned a processed build yet.",
+                systemImage: "clock")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.secondary)
+            }
+          }
+
+          distributionSection("TestFlight groups") {
+            ForEach(model.appStoreBetaGroups) { group in
+              if group.hasAccessToAllBuilds {
+                HStack(spacing: 9) {
+                  Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Studio.success)
+                  groupLabel(group, detail: "Already receives every build")
+                  Spacer()
+                }
+              } else {
+                Toggle(isOn: groupBinding(group)) {
+                  groupLabel(
+                    group,
+                    detail:
+                      "\(group.isInternal ? "Internal" : "External") · "
+                      + "\(group.testerCount ?? group.testers.count) testers")
+                }
+                .disabled(selectedBuild?.audienceType == "INTERNAL_ONLY" && !group.isInternal)
+              }
+            }
+            if model.appStoreBetaGroups.isEmpty {
+              Text("Apple returned no tester groups for this app.")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.secondary)
+            }
+          }
+
+          if needsComplianceAnswer {
+            distributionSection("Export compliance") {
+              Text("Does this build use non-exempt encryption?")
+                .font(.system(size: 10.5, weight: .semibold))
+              Picker("Encryption", selection: $usesNonExemptEncryption) {
+                Text("Choose an answer").tag(Optional<Bool>.none)
+                Text("No — exempt or no encryption").tag(Optional(false))
+                Text("Yes — non-exempt encryption").tag(Optional(true))
+              }
+              Text("Apple requires this answer before the build can be distributed.")
+                .font(.system(size: 9))
+                .foregroundStyle(Studio.secondary)
+            }
+          }
+
+          if selectedExternalGroup {
+            distributionSection("External testing") {
+              Toggle("Submit for TestFlight beta review", isOn: $submitForBetaReview)
+              Text("External testers receive the build after Apple approves the beta review.")
+                .font(.system(size: 9))
+                .foregroundStyle(Studio.secondary)
+            }
+          }
+        }
+        .padding(20)
+        .disabled(model.appStoreReleasePhase.isRunning)
+      }
+
+      Divider().overlay(Studio.separator)
+      VStack(alignment: .leading, spacing: 10) {
+        if let error = model.appStoreReleaseError {
+          Label(error, systemImage: "exclamationmark.triangle.fill")
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.warning)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+        } else if model.appStoreReleasePhase.isRunning {
+          HStack(spacing: 8) {
+            ProgressView().controlSize(.mini)
+            Text(model.appStoreReleaseStatus)
+          }
+          .font(.system(size: 9.5, weight: .medium))
+        }
+        HStack {
+          Text("Only the selected groups gain access to this build.")
+            .font(.system(size: 9))
+            .foregroundStyle(Studio.secondary)
+          Spacer()
+          Button("Cancel") { dismiss() }
+            .disabled(model.appStoreReleasePhase.isRunning)
+          Button(selectedExternalGroup ? "Assign & Submit" : "Send to Testers") {
+            Task {
+              await model.distributeAppStoreBuild(
+                buildID: buildID, betaGroupIDs: betaGroupIDs,
+                usesNonExemptEncryption: usesNonExemptEncryption,
+                submitForBetaReview: submitForBetaReview)
+            }
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(!canDistribute || (selectedExternalGroup && !submitForBetaReview))
+        }
+      }
+      .padding(16)
+    }
+  }
+
+  private var distributionResult: some View {
+    VStack(spacing: 16) {
+      Image(systemName: "checkmark.circle.fill")
+        .font(.system(size: 34))
+        .foregroundStyle(Studio.success)
+      Text("Build sent to testers")
+        .font(.system(size: 16, weight: .bold))
+      Text(model.appStoreReleaseStatus)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+      Button("Done") { dismiss() }
+        .buttonStyle(.borderedProminent)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .padding(32)
+  }
+
+  private func distributionSection<Content: View>(
+    _ title: String, @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text(title).font(.system(size: 11.5, weight: .semibold))
+      content()
+    }
+    .padding(16)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Studio.backdrop.opacity(0.55))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+  }
+
+  private func groupLabel(_ group: AppStoreBetaGroup, detail: String) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text(group.name).font(.system(size: 10.5, weight: .medium))
+      Text(detail)
+        .font(.system(size: 9))
+        .foregroundStyle(Studio.secondary)
+    }
+  }
+
+  private func groupBinding(_ group: AppStoreBetaGroup) -> Binding<Bool> {
+    Binding(
+      get: { betaGroupIDs.contains(group.id) },
+      set: { selected in
+        if selected {
+          betaGroupIDs.insert(group.id)
+        } else {
+          betaGroupIDs.remove(group.id)
+        }
+      })
+  }
+
+  private func initialize() {
+    if let selected = model.selectedAppStoreBuild,
+      selected.processingState == "VALID", !selected.expired
+    {
+      buildID = selected.id
+    } else {
+      buildID = validBuilds.first?.id ?? ""
+    }
+    usesNonExemptEncryption = selectedBuild?.usesNonExemptEncryption
+  }
+
+  private func removeIneligibleExternalGroups() {
+    guard selectedBuild?.audienceType == "INTERNAL_ONLY" else { return }
+    let externalIDs = Set(model.appStoreBetaGroups.filter { !$0.isInternal }.map(\.id))
+    betaGroupIDs.subtract(externalIDs)
+  }
+
+  private func buildLabel(_ build: AppStoreBuild) -> String {
+    build.marketingVersion.map { "Version \($0) · build \(build.version)" }
+      ?? "Build \(build.version)"
+  }
+}
+
 private struct AppStoreUploadSheet: View {
   @Environment(\.dismiss) private var dismiss
   @EnvironmentObject var model: AppModel
+  var onDistribute: () -> Void = {}
 
   var body: some View {
     VStack(spacing: 0) {
@@ -5111,8 +5443,9 @@ private struct AppStoreUploadSheet: View {
           .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
           Button {
-            model.isEvidenceWorkspaceOpen = true
             model.evidenceWorkspaceTab = .terminal
+            model.isEvidenceWorkspaceOpen = true
+            dismiss()
           } label: {
             Label("View live xcodebuild output", systemImage: "terminal")
           }
@@ -5124,10 +5457,16 @@ private struct AppStoreUploadSheet: View {
       }
       Divider().overlay(Studio.separator)
       HStack {
-        Text("The API private key is removed from disk after this operation.")
-          .font(.system(size: 9))
-          .foregroundStyle(Studio.secondary)
+        if model.appStoreUploadPhase == .processing {
+          Text("Apple processing continues safely if you close this window.")
+            .font(.system(size: 9))
+            .foregroundStyle(Studio.secondary)
+        }
         Spacer()
+        if model.appStoreUploadPhase == .processing {
+          Button("Continue in Background") { dismiss() }
+            .buttonStyle(.borderedProminent)
+        }
         Button(model.appStoreUploadPhase == .processing ? "Stop Waiting" : "Cancel") {
           model.cancelAppStoreUpload()
         }
@@ -5162,7 +5501,13 @@ private struct AppStoreUploadSheet: View {
           }
         }
         Button("Done") { dismiss() }
+        if model.appStoreUploadPhase == .complete {
+          Button("Send to Testers…") {
+            onDistribute()
+            dismiss()
+          }
           .buttonStyle(.borderedProminent)
+        }
       }
     }
     .padding(32)
@@ -6240,6 +6585,7 @@ private struct SettingsWorkspace: View {
   @EnvironmentObject var model: AppModel
   @State private var testSecretID = ""
   @State private var testSecretValue = ""
+  @State private var showsTestSecretSetup = false
   @State private var showsAppStoreConnection = false
 
   var body: some View {
@@ -6329,20 +6675,11 @@ private struct SettingsWorkspace: View {
             detail:
               "Store local credentials by ID. Values are kept in Keychain and are never exposed to agents or diagnostics."
           ) {
-            VStack(alignment: .trailing, spacing: 6) {
-              TextField("Secret ID", text: $testSecretID)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 190)
-              SecureField("Secret value", text: $testSecretValue)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 190)
-              Button("Save") {
-                model.saveTestSecret(id: testSecretID, value: testSecretValue)
-                testSecretValue = ""
-              }
-              .disabled(
-                testSecretID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                  || testSecretValue.isEmpty)
+            Button(model.testSecretIDs.isEmpty ? "Set Authentication…" : "Add Authentication…") {
+              showsTestSecretSetup = true
+            }
+            .popover(isPresented: $showsTestSecretSetup, arrowEdge: .trailing) {
+              testAuthenticationPopover
             }
           }
           if !model.testSecretIDs.isEmpty {
@@ -6414,6 +6751,58 @@ private struct SettingsWorkspace: View {
     case .disconnected:
       return "Use a Team API key. The private key stays in this Mac's Keychain."
     }
+  }
+
+  private var testAuthenticationPopover: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text("Set Test Authentication")
+          .font(.system(size: 14, weight: .semibold))
+        Text("Save one credential value under the ID used by your test blueprint.")
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
+      VStack(alignment: .leading, spacing: 6) {
+        Text("Authentication ID")
+          .font(.system(size: 9.5, weight: .medium))
+          .foregroundStyle(Studio.secondary)
+        TextField("Example: auth.primary.password", text: $testSecretID)
+          .textFieldStyle(.roundedBorder)
+      }
+
+      VStack(alignment: .leading, spacing: 6) {
+        Text("Secret or password")
+          .font(.system(size: 9.5, weight: .medium))
+          .foregroundStyle(Studio.secondary)
+        SecureField("Stored in Keychain", text: $testSecretValue)
+          .textFieldStyle(.roundedBorder)
+      }
+
+      Label("The value is never shown to agents or included in diagnostics.", systemImage: "lock.fill")
+        .font(.system(size: 9))
+        .foregroundStyle(Studio.secondary)
+
+      HStack {
+        Button("Cancel") { showsTestSecretSetup = false }
+          .keyboardShortcut(.cancelAction)
+        Spacer()
+        Button("Save Authentication") {
+          model.saveTestSecret(id: testSecretID, value: testSecretValue)
+          testSecretID = ""
+          testSecretValue = ""
+          showsTestSecretSetup = false
+        }
+        .buttonStyle(.borderedProminent)
+        .keyboardShortcut(.defaultAction)
+        .disabled(
+          testSecretID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || testSecretValue.isEmpty)
+      }
+    }
+    .padding(18)
+    .frame(width: 330)
   }
   private var toolchainDetail: String {
     if let version = model.preflight?.xcodeVersion, let build = model.preflight?.xcodeBuild {

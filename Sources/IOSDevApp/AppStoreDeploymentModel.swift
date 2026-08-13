@@ -1044,15 +1044,19 @@ extension AppModel {
     do {
       let privateKey = try await appStoreCredentialSession.privateKey(for: connection.id)
       let client = try AppStoreConnectClient(connection: connection, privateKeyPEM: privateKey)
-      let deadline = Date().addingTimeInterval(10 * 60)
+      let deadline = Date().addingTimeInterval(30 * 60)
+      var attempt = 0
       while !Task.isCancelled, Date() < deadline {
-        try await Task.sleep(for: .seconds(15))
-        let builds = try await client.listBuilds(appID: expectedAppID)
+        let build = try await client.findBuild(
+          appID: expectedAppID, marketingVersion: target.marketingVersion,
+          buildNumber: target.buildNumber)
         guard selectedAppStoreApp?.id == expectedAppID else { throw CancellationError() }
-        appStoreBuilds = builds
-        if let build = builds.first(where: {
-          $0.version == target.buildNumber && $0.marketingVersion == target.marketingVersion
-        }) {
+        if let build {
+          if let index = appStoreBuilds.firstIndex(where: { $0.id == build.id }) {
+            appStoreBuilds[index] = build
+          } else {
+            appStoreBuilds.insert(build, at: 0)
+          }
           appStoreSelectedBuildID = build.id
           if build.processingState == "VALID" {
             appStoreUploadStatus = "Build \(target.marketingVersion) (\(target.buildNumber)) is ready."
@@ -1068,6 +1072,18 @@ extension AppModel {
             return
           }
         }
+        let delay = attempt < 12 ? 5 : (attempt < 30 ? 10 : 15)
+        if build != nil {
+          appStoreUploadStatus =
+            "Apple is processing build \(target.marketingVersion) (\(target.buildNumber)). "
+            + "Checking again in \(delay) seconds…"
+        } else {
+          appStoreUploadStatus =
+            "Upload accepted. Waiting for Apple to publish the build record; checking again in "
+            + "\(delay) seconds…"
+        }
+        attempt += 1
+        try await Task.sleep(for: .seconds(delay))
       }
       if Task.isCancelled { throw CancellationError() }
       appStoreUploadStatus = "Upload accepted; Apple is still processing the build."
@@ -1079,6 +1095,79 @@ extension AppModel {
       appStoreUploadError = error.localizedDescription
       appStoreUploadStatus = "Upload accepted; processing status is temporarily unavailable."
       appStoreUploadPhase = .uploaded
+    }
+  }
+
+  @discardableResult
+  func distributeAppStoreBuild(
+    buildID: String, betaGroupIDs: Set<String>, usesNonExemptEncryption: Bool?,
+    submitForBetaReview: Bool
+  ) async -> Bool {
+    guard let connection = appStoreConnection, selectedAppStoreApp != nil,
+      let build = appStoreBuilds.first(where: { $0.id == buildID })
+    else { return false }
+    guard build.processingState == "VALID", !build.expired else {
+      appStoreReleaseError = "Choose a processed, unexpired build before assigning testers."
+      appStoreReleasePhase = .failed
+      return false
+    }
+    let groups = appStoreBetaGroups.filter { betaGroupIDs.contains($0.id) }
+    let assignableGroups = groups.filter { !$0.hasAccessToAllBuilds }
+    guard !assignableGroups.isEmpty else {
+      appStoreReleaseError = "Choose at least one tester group that does not already receive every build."
+      appStoreReleasePhase = .failed
+      return false
+    }
+    if build.audienceType == "INTERNAL_ONLY", assignableGroups.contains(where: { !$0.isInternal }) {
+      appStoreReleaseError = "This build is permanently restricted to internal TestFlight groups."
+      appStoreReleasePhase = .failed
+      return false
+    }
+    if build.usesNonExemptEncryption == nil, usesNonExemptEncryption == nil {
+      appStoreReleaseError = "Answer the export-compliance question before assigning this build."
+      appStoreReleasePhase = .failed
+      return false
+    }
+
+    appStoreReleaseError = nil
+    isAppStoreMutationInProgress = true
+    defer { isAppStoreMutationInProgress = false }
+    do {
+      let privateKey = try await appStoreCredentialSession.privateKey(for: connection.id)
+      let client = try AppStoreConnectClient(connection: connection, privateKeyPEM: privateKey)
+      if build.usesNonExemptEncryption == nil, let usesNonExemptEncryption {
+        appStoreReleasePhase = .resolvingCompliance
+        appStoreReleaseStatus = "Saving export-compliance answer…"
+        try await client.setBuildUsesNonExemptEncryption(
+          usesNonExemptEncryption, buildID: build.id)
+      }
+
+      appStoreReleasePhase = .assigningTesters
+      appStoreReleaseStatus = "Assigning build to TestFlight groups…"
+      for group in assignableGroups.sorted(by: { $0.name < $1.name }) {
+        try await client.assignBuild(build.id, toBetaGroup: group.id)
+      }
+
+      if submitForBetaReview && assignableGroups.contains(where: { !$0.isInternal }) {
+        appStoreReleasePhase = .submittingBetaReview
+        appStoreReleaseStatus = "Submitting the build to TestFlight beta review…"
+        try await client.submitBuildForBetaReview(build.id)
+      }
+
+      appStoreSelectedBuildID = build.id
+      appStoreReleaseStatus = submitForBetaReview
+        ? "Build \(build.version) was assigned and submitted for external TestFlight review."
+        : "Build \(build.version) is available to the selected TestFlight groups."
+      appStoreReleasePhase = .complete
+      await refreshAppStoreDeploymentData(discoverTarget: false)
+      return true
+    } catch {
+      appStoreReleaseError = error.localizedDescription
+      appStoreReleaseStatus =
+        "TestFlight distribution stopped at the current step. Completed Apple changes were kept."
+      appStoreReleasePhase = .failed
+      await refreshAppStoreDeploymentData(discoverTarget: false)
+      return false
     }
   }
 
