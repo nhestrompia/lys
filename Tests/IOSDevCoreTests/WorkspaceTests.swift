@@ -59,6 +59,57 @@ import Testing
   #expect(!FileManager.default.fileExists(atPath: prepared.worktree.path))
 }
 
+@Test func taskReviewPreservesProjectMetadataAndExcludesLysInternals() async throws {
+  let base = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let repository = base.appending(path: "repo")
+  let taskRoot = base.appending(path: "tasks")
+  try FileManager.default.createDirectory(at: repository.appending(path: ".lys"), withIntermediateDirectories: true)
+  let runner = ProcessRunner()
+  let git = URL(fileURLWithPath: "/usr/bin/git")
+  func runGit(_ arguments: [String]) async throws {
+    let result = try await runner.run(
+      executable: git, arguments: ["-C", repository.path] + arguments)
+    guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
+  }
+  try await runGit(["init"])
+  try await runGit(["config", "user.email", "fixture@example.com"])
+  try await runGit(["config", "user.name", "Fixture"])
+  try Data("host metadata\n".utf8).write(to: repository.appending(path: ".lys/contract.json"))
+  try FileManager.default.createDirectory(
+    at: repository.appending(path: "Assets"), withIntermediateDirectories: true)
+  try Data([0, 1, 2]).write(to: repository.appending(path: "Assets/icon.png"))
+  try Data("let title = \"Before\"\nlet count = 1\n".utf8)
+    .write(to: repository.appending(path: "App.swift"))
+  try await runGit(["add", "."])
+  try await runGit(["-c", "commit.gpgsign=false", "commit", "-m", "baseline"])
+
+  let manager = WorkspaceManager()
+  let prepared = try await manager.createTask(repository: repository, taskRoot: taskRoot)
+  try FileManager.default.removeItem(at: prepared.worktree.appending(path: ".lys/contract.json"))
+  try FileManager.default.removeItem(at: prepared.worktree.appending(path: "Assets/icon.png"))
+  try Data("host-private\n".utf8)
+    .write(to: prepared.worktree.appending(path: ".lys/baseline/host-private.txt"))
+  try FileManager.default.createDirectory(
+    at: prepared.worktree.appending(path: ".lys/conflicts"), withIntermediateDirectories: true)
+  try Data("conflict-private\n".utf8)
+    .write(to: prepared.worktree.appending(path: ".lys/conflicts/manual.txt"))
+  try Data("let title = \"After\"\nlet count = 2\n".utf8)
+    .write(to: prepared.worktree.appending(path: "App.swift"))
+
+  let changes = try await manager.proposedChanges(
+    worktree: prepared.worktree, baseline: prepared.manifest)
+  #expect(changes.map(\.path) == [".lys/contract.json", "App.swift", "Assets/icon.png"])
+  #expect(changes.last?.binary == true)
+
+  let diff = try await manager.proposedDiff(
+    worktree: prepared.worktree, baseline: prepared.manifest,
+    change: try #require(changes.first { $0.path == "App.swift" }))
+  #expect(diff.addedLineCount == 2)
+  #expect(diff.removedLineCount == 2)
+  #expect(diff.lines.contains { $0.kind == .removed && $0.text.contains("Before") })
+  #expect(diff.lines.contains { $0.kind == .added && $0.text.contains("After") })
+}
+
 @Test func taskWorktreeCarriesIgnoredExpoBuildInputsWithoutMakingThemApplyEligible() async throws {
   let base = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   let repository = base.appending(path: "repo")
@@ -105,4 +156,51 @@ import Testing
   #expect(changes.map(\.path) == ["index.js"])
 
   try await manager.discard(worktree: prepared.worktree, repository: repository, taskRoot: taskRoot)
+}
+
+@Test func repositoryReviewReportsWorkingTreeAndBuildsHeadDiff() async throws {
+  let base = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let repository = base.appending(path: "repo")
+  try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+  let runner = ProcessRunner()
+  let git = URL(fileURLWithPath: "/usr/bin/git")
+  func runGit(_ arguments: [String]) async throws {
+    let result = try await runner.run(
+      executable: git, arguments: ["-C", repository.path] + arguments)
+    guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
+  }
+
+  try await runGit(["init"])
+  try await runGit(["config", "user.email", "fixture@example.com"])
+  try await runGit(["config", "user.name", "Fixture"])
+  try Data("one\ntwo\n".utf8).write(to: repository.appending(path: "README.md"))
+  try Data("remove me\n".utf8).write(to: repository.appending(path: "Deleted.txt"))
+  try await runGit(["add", "."])
+  try await runGit(["-c", "commit.gpgsign=false", "commit", "-m", "baseline"])
+
+  try Data("one\nchanged\n".utf8).write(to: repository.appending(path: "README.md"))
+  try FileManager.default.removeItem(at: repository.appending(path: "Deleted.txt"))
+  try FileManager.default.createDirectory(
+    at: repository.appending(path: ".lys"), withIntermediateDirectories: true)
+  try Data("project-owned contract\n".utf8)
+    .write(to: repository.appending(path: ".lys/contract.json"))
+
+  let manager = WorkspaceManager()
+  let changes = try await manager.repositoryChanges(repository: repository)
+  #expect(changes.map(\.path) == [".lys/contract.json", "Deleted.txt", "README.md"])
+  #expect(changes.first?.kind == .added)
+  #expect(changes[1].kind == .deleted)
+  #expect(changes[2].kind == .modified)
+
+  let diff = try await manager.repositoryDiff(
+    repository: repository, change: try #require(changes.first { $0.path == "README.md" }))
+  #expect(diff.addedLineCount == 1)
+  #expect(diff.removedLineCount == 1)
+  #expect(diff.lines.contains { $0.kind == .removed && $0.text == "two" })
+  #expect(diff.lines.contains { $0.kind == .added && $0.text == "changed" })
+
+  let deletedDiff = try await manager.repositoryDiff(
+    repository: repository, change: try #require(changes.first { $0.path == "Deleted.txt" }))
+  #expect(deletedDiff.removedLineCount == 1)
+  #expect(deletedDiff.addedLineCount == 0)
 }

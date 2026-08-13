@@ -196,12 +196,12 @@ public struct ACPContentBlock: Codable, Equatable, Sendable {
     uri = nil
   }
 
-  public init(imageData: Data, mimeType: String, uri: String? = nil) {
+  public init(imageData: Data, mimeType: String) {
     type = "image"
     text = nil
     data = imageData.base64EncodedString()
     self.mimeType = mimeType
-    self.uri = uri
+    uri = nil
   }
 }
 

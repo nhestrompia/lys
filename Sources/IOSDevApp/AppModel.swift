@@ -273,6 +273,9 @@ public final class AppModel: ObservableObject {
   @Published var hierarchyElements: [UIElement] = []
   @Published var notice: String?
   @Published var proposedChanges: [ProposedChange] = []
+  @Published private(set) var proposedChangesRevision = 0
+  @Published var repositoryChanges: [ProposedChange] = []
+  @Published private(set) var repositoryChangesRevision = 0
   @Published var applyConflicts: [ApplyConflict] = []
   @Published var isBusy = false
   @Published var selectedAppearance: SimulatorAppearance = .light
@@ -364,7 +367,11 @@ public final class AppModel: ObservableObject {
       && selectedDestination != nil && preflight?.isFullXcode == true && !isBusy
   }
   var canRun: Bool { canBuild && taskWorkspace != nil }
-  var changedFileCount: Int { proposedChanges.count }
+  var visibleChanges: [ProposedChange] {
+    activeWorktree == nil ? repositoryChanges : proposedChanges
+  }
+  var changedFileCount: Int { visibleChanges.count }
+  var isShowingTaskChanges: Bool { activeWorktree != nil }
   var verificationEvidence: [Evidence] {
     evidence.filter { $0.kind != .uiAction }
   }
@@ -639,6 +646,9 @@ public final class AppModel: ObservableObject {
     activeWorktree = nil
     baseline = nil
     proposedChanges = []
+    proposedChangesRevision += 1
+    repositoryChanges = []
+    repositoryChangesRevision += 1
     applyConflicts = []
     evidence = []
     verificationReport = nil
@@ -1790,10 +1800,92 @@ public final class AppModel: ObservableObject {
       do {
         proposedChanges = try await workspaceManager.proposedChanges(
           worktree: activeWorktree, baseline: baseline)
+        proposedChangesRevision += 1
         status = "Review"
         if plan.indices.contains(4) { plan[4].state = .active }
       } catch { notice = error.localizedDescription }
     }
+  }
+
+  func refreshRepositoryChanges() async {
+    guard let repository, isGitRepository else {
+      repositoryChanges = []
+      repositoryChangesRevision += 1
+      return
+    }
+    do {
+      let changes = try await workspaceManager.repositoryChanges(repository: repository)
+      guard self.repository == repository else { return }
+      repositoryChanges = changes
+      repositoryChangesRevision += 1
+    } catch {
+      notice = error.localizedDescription
+    }
+  }
+
+  func proposedDiff(for change: ProposedChange) async -> ProposedFileDiff? {
+    if designPreview { return Self.previewDiff(for: change) }
+    guard let activeWorktree, let baseline else { return nil }
+    return try? await workspaceManager.proposedDiff(
+      worktree: activeWorktree, baseline: baseline, change: change)
+  }
+
+  func repositoryDiff(for change: ProposedChange) async -> ProposedFileDiff? {
+    if designPreview { return Self.previewDiff(for: change) }
+    guard let repository else { return nil }
+    return try? await workspaceManager.repositoryDiff(repository: repository, change: change)
+  }
+
+  private static func previewDiff(for change: ProposedChange) -> ProposedFileDiff {
+    if change.binary {
+      return .init(
+        path: change.path, kind: change.kind, binary: true, lines: [], addedLineCount: 0,
+        removedLineCount: 0, message: "Binary file · line diff unavailable")
+    }
+
+    let sampleLines: [(ProposedDiffLineKind, Int?, Int?, String)]
+    switch change.path {
+    case "ProfileView.swift":
+      sampleLines = [
+        (.context, 1, 1, "import SwiftUI"),
+        (.context, 2, 2, ""),
+        (.context, 3, 3, "struct ProfileView: View {"),
+        (.removed, 4, nil, "  @State private var isEditing = false"),
+        (.added, nil, 4, "  @State private var isEditing = false"),
+        (.added, nil, 5, "  @State private var showsSavedState = false"),
+        (.context, 5, 6, ""),
+        (.context, 6, 7, "  var body: some View {"),
+        (.removed, 7, nil, "    ProfileHeader(isEditing: $isEditing)"),
+        (.added, nil, 8, "    ProfileHeader(isEditing: $isEditing, showsSavedState: showsSavedState)"),
+        (.context, 8, 9, "  }"),
+        (.context, 9, 10, "}"),
+      ]
+    case "ProfileTests.swift":
+      sampleLines = [
+        (.added, nil, 1, "import XCTest"),
+        (.added, nil, 2, "@testable import TravelApp"),
+        (.added, nil, 3, ""),
+        (.added, nil, 4, "final class ProfileTests: XCTestCase {"),
+        (.added, nil, 5, "  func testProfileSaveState() {"),
+        (.added, nil, 6, "    XCTAssertTrue(ProfileViewModel().canSave)"),
+        (.added, nil, 7, "  }"),
+        (.added, nil, 8, "}"),
+      ]
+    default:
+      sampleLines = [
+        (.context, 1, 1, "// Preview diff for the isolated task"),
+        (.removed, 2, nil, "let value = \"before\""),
+        (.added, nil, 2, "let value = \"after\""),
+      ]
+    }
+    let lines = sampleLines.enumerated().map { index, line in
+      ProposedDiffLine(
+        id: index, kind: line.0, oldLineNumber: line.1, newLineNumber: line.2, text: line.3)
+    }
+    return .init(
+      path: change.path, kind: change.kind, binary: false, lines: lines,
+      addedLineCount: lines.filter { $0.kind == .added }.count,
+      removedLineCount: lines.filter { $0.kind == .removed }.count)
   }
 
   func applyAll() {
@@ -1811,6 +1903,7 @@ public final class AppModel: ObservableObject {
             time: Self.now(), title: "Apply checked",
             detail: "\(report.applied.count) applied · \(report.conflicts.count) require review",
             state: report.conflicts.isEmpty ? .complete : .warning))
+        await refreshRepositoryChanges()
       } catch { notice = error.localizedDescription }
     }
   }
@@ -1836,6 +1929,7 @@ public final class AppModel: ObservableObject {
         baseline = nil
         files = Self.children(of: repository)
         proposedChanges = []
+        proposedChangesRevision += 1
         applyConflicts = []
         evidence = []
         verificationReport = nil
@@ -1844,6 +1938,7 @@ public final class AppModel: ObservableObject {
         activeJourney = nil
         plan = []
         status = "Ready"
+        await refreshRepositoryChanges()
       } catch { notice = error.localizedDescription }
     }
   }
@@ -2026,6 +2121,7 @@ public final class AppModel: ObservableObject {
       .init(path: "Assets.xcassets", kind: .modified, binary: true),
       .init(path: "ProfileTests.swift", kind: .added, binary: false),
     ]
+    proposedChangesRevision += 1
     let previewRoot = activeWorktree ?? URL(fileURLWithPath: "/Synthetic/Tasks/profile-dark-mode")
     files = [
       FileNode(
@@ -2233,6 +2329,7 @@ public final class AppModel: ObservableObject {
     }
     isGitRepository = gitRepository
     branchName = discoveredBranch
+    await refreshRepositoryChanges()
     await refreshProjectSelection()
     guard !Task.isCancelled, repositoryLoadID == loadID, self.repository == repository else {
       return
@@ -3436,6 +3533,7 @@ public final class AppModel: ObservableObject {
     guard let activeWorktree, let baseline else { return }
     proposedChanges = try await workspaceManager.proposedChanges(
       worktree: activeWorktree, baseline: baseline)
+    proposedChangesRevision += 1
   }
 
   func discoverAppStoreDistributionTarget() async throws -> AppTarget {

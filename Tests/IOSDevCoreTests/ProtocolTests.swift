@@ -63,9 +63,7 @@ private final class ACPUpdateRecorder: @unchecked Sendable {
     sessionID: "feedback-session",
     content: [
       .init(text: "Fix this TestFlight feedback."),
-      .init(
-        imageData: Data([0x89, 0x50, 0x4E, 0x47]), mimeType: "image/png",
-        uri: "https://example.com/feedback.png"),
+      .init(imageData: Data([0x89, 0x50, 0x4E, 0x47]), mimeType: "image/png"),
     ])
   let value = try jsonValue(prompt)
   let blocks = try #require(value["prompt"]?.arrayValue)
@@ -74,6 +72,16 @@ private final class ACPUpdateRecorder: @unchecked Sendable {
   #expect(blocks[1]["type"] == .string("image"))
   #expect(blocks[1]["data"] == .string("iVBORw=="))
   #expect(blocks[1]["mimeType"] == .string("image/png"))
+  #expect(blocks[1]["uri"] == nil)
+}
+
+@Test func rpcErrorSurfacesStructuredAdapterDiagnostics() {
+  let error = RPCError(
+    code: -32603, message: "Internal error",
+    data: .object(["details": .string("The embedded image could not be decoded")]))
+  #expect(
+    error.errorDescription
+      == "Internal error\n\nThe embedded image could not be decoded")
 }
 
 @Test func acpSessionConfigOptionsExposeModelAndReasoningValues() throws {

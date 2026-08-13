@@ -32,6 +32,59 @@ public struct ProposedChange: Codable, Identifiable, Sendable {
     self.binary = binary
   }
 }
+
+public enum ProposedDiffLineKind: String, Codable, Sendable, Hashable {
+  case context
+  case added
+  case removed
+}
+
+public struct ProposedDiffLine: Codable, Identifiable, Sendable, Hashable {
+  public var id: Int
+  public var kind: ProposedDiffLineKind
+  public var oldLineNumber: Int?
+  public var newLineNumber: Int?
+  public var text: String
+
+  public init(
+    id: Int, kind: ProposedDiffLineKind, oldLineNumber: Int?, newLineNumber: Int?, text: String
+  ) {
+    self.id = id
+    self.kind = kind
+    self.oldLineNumber = oldLineNumber
+    self.newLineNumber = newLineNumber
+    self.text = text
+  }
+}
+
+public struct ProposedFileDiff: Codable, Sendable {
+  public var path: String
+  public var kind: ProposedChangeKind
+  public var binary: Bool
+  public var lines: [ProposedDiffLine]
+  public var addedLineCount: Int
+  public var removedLineCount: Int
+  public var message: String?
+
+  public init(
+    path: String,
+    kind: ProposedChangeKind,
+    binary: Bool,
+    lines: [ProposedDiffLine],
+    addedLineCount: Int,
+    removedLineCount: Int,
+    message: String? = nil
+  ) {
+    self.path = path
+    self.kind = kind
+    self.binary = binary
+    self.lines = lines
+    self.addedLineCount = addedLineCount
+    self.removedLineCount = removedLineCount
+    self.message = message
+  }
+}
+
 public struct ApplyConflict: Codable, Identifiable, Sendable {
   public var id: String { path }
   public var path: String
@@ -165,34 +218,104 @@ public actor WorkspaceManager {
         let path = url.standardizedFileURL.pathComponents.dropFirst(
           canonicalWorktree.pathComponents.count
         ).joined(separator: "/")
-        if path == ".lys" || path == ".git" {
+        if path == ".git" || path == ".lys/baseline" || path == ".lys/conflicts" {
           enumerator.skipDescendants()
           continue
         }
-        if path == ".lys-baseline.json" || path.hasPrefix(".lys/")
-          || path.hasPrefix(".git/")
-          || baseline.ignoredOverlayPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }
-          )
-          || baseline.submodulePaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
-        {
+        if isReviewExcludedPath(path, baseline: baseline) {
           continue
         }
         if let entry = try fileEntry(at: url, relativePath: path) { current[path] = entry }
       }
     }
-    let paths = Set(current.keys).union(baseline.entries.keys)
+    let baselinePaths = baseline.entries.keys.filter {
+      !isReviewExcludedPath($0, baseline: baseline)
+    }
+    let paths = Set(current.keys).union(baselinePaths)
+    let baselineRoot = canonicalWorktree.appending(path: ".lys/baseline", directoryHint: .isDirectory)
     return paths.compactMap { path in
       switch (baseline.entries[path], current[path]) {
       case (nil, _?):
         return .init(
-          path: path, kind: .added, binary: isBinary(canonicalWorktree.appending(path: path)))
-      case (_?, nil): return .init(path: path, kind: .deleted, binary: false)
+          path: path, kind: .added, binary: isBinary(at: path, under: canonicalWorktree))
+      case (_?, nil):
+        return .init(path: path, kind: .deleted, binary: isBinary(at: path, under: baselineRoot))
       case (let before?, let after?) where before != after:
         return .init(
-          path: path, kind: .modified, binary: isBinary(canonicalWorktree.appending(path: path)))
+          path: path, kind: .modified, binary: isBinary(at: path, under: canonicalWorktree))
       default: return nil
       }
     }.sorted { $0.path < $1.path }
+  }
+
+  public func repositoryChanges(repository: URL) async throws -> [ProposedChange] {
+    let result = try await runner.run(
+      executable: git,
+      arguments: [
+        "-C", repository.path, "status", "--porcelain=v1", "--untracked-files=all", "-z",
+      ])
+    guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
+
+    let records = result.stdout.split(separator: "\0", omittingEmptySubsequences: true)
+      .map(String.init)
+    var changes: [ProposedChange] = []
+    var index = 0
+    while index < records.count {
+      let record = records[index]
+      index += 1
+      guard record.count >= 3 else { continue }
+      let status = String(record.prefix(2))
+      let path = String(record.dropFirst(3))
+      guard !path.isEmpty else { continue }
+
+      let kind = repositoryChangeKind(status)
+      let binary: Bool
+      if kind == .deleted {
+        binary = try await repositoryBlobIsBinary(repository: repository, path: path)
+      } else {
+        binary = isBinary(at: path, under: repository)
+      }
+      changes.append(.init(path: path, kind: kind, binary: binary))
+
+      // -z emits a second pathname for rename/copy records. The new path is the first
+      // pathname in the porcelain-v1 form; the old path is only consumed here.
+      if status.first == "R" || status.first == "C", index < records.count { index += 1 }
+    }
+    return changes.sorted { $0.path < $1.path }
+  }
+
+  public func proposedDiff(
+    worktree: URL, baseline: BaselineManifest, change: ProposedChange
+  ) throws -> ProposedFileDiff {
+    let baselineRoot = worktree.appending(path: ".lys/baseline", directoryHint: .isDirectory)
+    let before = try safeURL(change.path, under: baselineRoot)
+    let after = try safeURL(change.path, under: worktree)
+    return makeFileDiff(
+      path: change.path, kind: change.kind, binaryHint: change.binary,
+      beforeData: try dataIfPresent(at: before), afterData: try dataIfPresent(at: after))
+  }
+
+  public func repositoryDiff(
+    repository: URL, change: ProposedChange
+  ) async throws -> ProposedFileDiff {
+    let after = try safeURL(change.path, under: repository)
+    let afterData = try dataIfPresent(at: after)
+    if change.kind == .added {
+      return makeFileDiff(
+        path: change.path, kind: change.kind, binaryHint: change.binary,
+        beforeData: nil, afterData: afterData)
+    }
+    let binary: Bool
+    if change.binary {
+      binary = true
+    } else {
+      binary = try await repositoryBlobIsBinary(repository: repository, path: change.path)
+    }
+    let beforeData = binary ? nil : try await repositoryBlobData(
+      repository: repository, path: change.path)
+    return makeFileDiff(
+      path: change.path, kind: change.kind, binaryHint: binary,
+      beforeData: beforeData, afterData: afterData)
   }
 
   public func apply(
@@ -248,6 +371,26 @@ public actor WorkspaceManager {
       executable: git,
       arguments: ["-C", repository.path, "worktree", "remove", "--force", worktree.path])
     guard outcome.succeeded else { throw WorkspaceError.gitFailure(outcome.stderr) }
+  }
+
+  private func repositoryBlobData(repository: URL, path: String) async throws -> Data? {
+    let result = try await runner.run(
+      executable: git,
+      arguments: ["-C", repository.path, "show", "HEAD:\(path)"],
+      maximumOutputBytes: 2_000_000)
+    guard result.succeeded else { return nil }
+    return Data(result.stdout.utf8)
+  }
+
+  private func repositoryBlobIsBinary(repository: URL, path: String) async throws -> Bool {
+    let result = try await runner.run(
+      executable: git,
+      arguments: ["-C", repository.path, "diff", "--numstat", "HEAD", "--", path],
+      maximumOutputBytes: 64 * 1_024)
+    guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
+    return result.stdout.split(separator: "\n").contains { line in
+      line.hasPrefix("-\t-\t")
+    }
   }
 
   private func overlayCheckoutState(from sourceRoot: URL, to targetRoot: URL) async throws
@@ -378,6 +521,147 @@ public actor WorkspaceManager {
     guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
     return result.stdout.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
   }
+}
+
+private func repositoryChangeKind(_ status: String) -> ProposedChangeKind {
+  if status == "??" || status.contains("A") { return .added }
+  if status.contains("D") { return .deleted }
+  return .modified
+}
+
+private func makeFileDiff(
+  path: String,
+  kind: ProposedChangeKind,
+  binaryHint: Bool,
+  beforeData: Data?,
+  afterData: Data?
+) -> ProposedFileDiff {
+  let binary = binaryHint || (beforeData.map(isBinaryData) ?? false)
+    || (afterData.map(isBinaryData) ?? false)
+
+  if binary {
+    return .init(
+      path: path, kind: kind, binary: true, lines: [], addedLineCount: 0,
+      removedLineCount: 0, message: "Binary file · line diff unavailable")
+  }
+
+  let maxBytes = 1_000_000
+  if (beforeData?.count ?? 0) > maxBytes || (afterData?.count ?? 0) > maxBytes {
+    return .init(
+      path: path, kind: kind, binary: false, lines: [], addedLineCount: 0,
+      removedLineCount: 0, message: "Diff unavailable for files larger than 1 MB")
+  }
+
+  guard beforeData == nil || beforeData.flatMap({ String(data: $0, encoding: .utf8) }) != nil,
+    afterData == nil || afterData.flatMap({ String(data: $0, encoding: .utf8) }) != nil
+  else {
+    return .init(
+      path: path, kind: kind, binary: true, lines: [], addedLineCount: 0,
+      removedLineCount: 0, message: "Text preview unavailable for this file")
+  }
+
+  let beforeText = beforeData.flatMap({ String(data: $0, encoding: .utf8) }) ?? ""
+  let afterText = afterData.flatMap({ String(data: $0, encoding: .utf8) }) ?? ""
+  let lines = makeDiffLines(before: splitLines(beforeText), after: splitLines(afterText))
+  let added = lines.reduce(into: 0) { count, line in
+    if line.kind == .added { count += 1 }
+  }
+  let removed = lines.reduce(into: 0) { count, line in
+    if line.kind == .removed { count += 1 }
+  }
+  return .init(
+    path: path, kind: kind, binary: false, lines: lines,
+    addedLineCount: added, removedLineCount: removed,
+    message: lines.isEmpty ? "No text lines to display" : nil)
+}
+
+private func isReviewExcludedPath(_ path: String, baseline: BaselineManifest) -> Bool {
+  path == ".lys/baseline" || path.hasPrefix(".lys/baseline/")
+    || path == ".lys/conflicts" || path.hasPrefix(".lys/conflicts/")
+    || path == ".lys-baseline.json" || path == ".git" || path.hasPrefix(".git/")
+    || baseline.ignoredOverlayPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+    || baseline.submodulePaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+}
+
+private func dataIfPresent(at url: URL) throws -> Data? {
+  guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+  return try Data(contentsOf: url, options: .mappedIfSafe)
+}
+
+private func isBinaryData(_ data: Data) -> Bool {
+  data.prefix(8_192).contains(0)
+}
+
+private func isBinary(at path: String, under root: URL) -> Bool {
+  guard let url = try? safeURL(path, under: root) else { return false }
+  return isBinary(url)
+}
+
+private func splitLines(_ text: String) -> [String] {
+  text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+}
+
+private func makeDiffLines(before: [String], after: [String]) -> [ProposedDiffLine] {
+  let maxCells = 1_500_000
+  guard before.count.multipliedReportingOverflow(by: after.count).overflow == false,
+    before.count * after.count <= maxCells
+  else {
+    return fallbackDiffLines(before: before, after: after)
+  }
+
+  var lcs = Array(
+    repeating: Array(repeating: 0, count: after.count + 1), count: before.count + 1)
+  if !before.isEmpty, !after.isEmpty {
+    for oldIndex in stride(from: before.count - 1, through: 0, by: -1) {
+      for newIndex in stride(from: after.count - 1, through: 0, by: -1) {
+        lcs[oldIndex][newIndex] = before[oldIndex] == after[newIndex]
+          ? lcs[oldIndex + 1][newIndex + 1] + 1
+          : max(lcs[oldIndex + 1][newIndex], lcs[oldIndex][newIndex + 1])
+      }
+    }
+  }
+
+  var oldIndex = 0
+  var newIndex = 0
+  var lines: [ProposedDiffLine] = []
+  while oldIndex < before.count || newIndex < after.count {
+    if oldIndex < before.count, newIndex < after.count, before[oldIndex] == after[newIndex] {
+      lines.append(
+        .init(
+          id: lines.count, kind: .context, oldLineNumber: oldIndex + 1,
+          newLineNumber: newIndex + 1, text: before[oldIndex]))
+      oldIndex += 1
+      newIndex += 1
+    } else if newIndex == after.count
+      || (oldIndex < before.count && lcs[oldIndex + 1][newIndex] >= lcs[oldIndex][newIndex + 1])
+    {
+      lines.append(
+        .init(
+          id: lines.count, kind: .removed, oldLineNumber: oldIndex + 1, newLineNumber: nil,
+          text: before[oldIndex]))
+      oldIndex += 1
+    } else {
+      lines.append(
+        .init(
+          id: lines.count, kind: .added, oldLineNumber: nil, newLineNumber: newIndex + 1,
+          text: after[newIndex]))
+      newIndex += 1
+    }
+  }
+  return lines
+}
+
+private func fallbackDiffLines(before: [String], after: [String]) -> [ProposedDiffLine] {
+  var lines: [ProposedDiffLine] = []
+  for (index, text) in before.enumerated() {
+    lines.append(
+      .init(id: lines.count, kind: .removed, oldLineNumber: index + 1, newLineNumber: nil, text: text))
+  }
+  for (index, text) in after.enumerated() {
+    lines.append(
+      .init(id: lines.count, kind: .added, oldLineNumber: nil, newLineNumber: index + 1, text: text))
+  }
+  return lines
 }
 
 private func safeURL(_ path: String, under root: URL) throws -> URL {

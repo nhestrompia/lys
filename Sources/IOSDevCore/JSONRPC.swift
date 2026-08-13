@@ -31,12 +31,43 @@ public struct RPCError: Codable, Error, LocalizedError, Sendable {
   }
 
   public var errorDescription: String? {
-    guard let detail = data?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+    guard let detail = data.flatMap(Self.errorDetail)?.trimmingCharacters(in: .whitespacesAndNewlines),
       !detail.isEmpty, detail != message
     else { return message }
     let limit = 3_000
     let concise = detail.count > limit ? "…\n" + String(detail.suffix(limit)) : detail
     return "\(message)\n\n\(concise)"
+  }
+
+  private static func errorDetail(_ value: JSONValue) -> String? {
+    switch value {
+    case .string(let detail):
+      return detail
+    case .object(let object):
+      for key in ["message", "details", "detail", "error", "reason"] {
+        if let value = object[key], let detail = errorDetail(value), !detail.isEmpty {
+          return detail
+        }
+      }
+      return encodedDetail(value)
+    case .array:
+      return encodedDetail(value)
+    case .number(let number):
+      return String(number)
+    case .bool(let value):
+      return String(value)
+    case .null:
+      return nil
+    }
+  }
+
+  private static func encodedDetail(_ value: JSONValue) -> String? {
+    guard let data = try? JSONEncoder().encode(value),
+      let object = try? JSONSerialization.jsonObject(with: data),
+      let formatted = try? JSONSerialization.data(
+        withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+    else { return nil }
+    return String(data: formatted, encoding: .utf8)
   }
 }
 

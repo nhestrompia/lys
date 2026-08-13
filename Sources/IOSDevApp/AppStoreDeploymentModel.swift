@@ -1307,8 +1307,7 @@ extension AppModel {
           (200..<300).contains(response.statusCode), data.count <= 12 * 1_024 * 1_024,
           let mimeType = response.mimeType?.lowercased(), mimeType.hasPrefix("image/")
         else { continue }
-        attachments.append(
-          .init(imageData: data, mimeType: mimeType, uri: url.absoluteString))
+        attachments.append(.init(imageData: data, mimeType: mimeType))
       } catch {
         continue
       }

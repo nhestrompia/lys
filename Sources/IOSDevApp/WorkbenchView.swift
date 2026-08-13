@@ -1187,7 +1187,7 @@ private struct AppStage: View {
   var body: some View {
     GeometryReader { geometry in
       let compact = geometry.size.height < 560
-      let emptyState = model.repository == nil
+      let emptyState = model.currentScreenshotImage == nil
       let previewViewportWidth = max(0, geometry.size.width - 58)
       let widthFittedDeviceHeight = landscape
         ? max(300, previewViewportWidth - 44)
@@ -1226,12 +1226,19 @@ private struct AppStage: View {
             Button {
               model.startDevServerOnRun.toggle()
             } label: {
-              Label(
-                model.startDevServerOnRun ? "Metro on Run" : "Metro off",
-                systemImage: model.startDevServerOnRun
-                  ? "bolt.horizontal.circle.fill" : "bolt.slash.circle"
-              )
-              .font(.system(size: 10, weight: .medium))
+              HStack(alignment: .center, spacing: 8) {
+                Image(
+                  systemName: model.startDevServerOnRun
+                    ? "bolt.horizontal.circle.fill" : "bolt.slash.circle"
+                )
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 18, height: 18)
+                Text(model.startDevServerOnRun ? "Metro on Run" : "Metro off")
+                  .font(.system(size: 10, weight: .medium))
+                  .lineLimit(2)
+                  .multilineTextAlignment(.leading)
+                  .fixedSize(horizontal: false, vertical: true)
+              }
               .foregroundStyle(model.startDevServerOnRun ? Studio.success : Studio.secondary)
             }
             .buttonStyle(.plain)
@@ -1239,23 +1246,38 @@ private struct AppStage: View {
           }
           Spacer()
           orientationControls
-          Button(action: model.refreshApp) {
-            Image(systemName: "arrow.clockwise")
-              .font(.system(size: 13, weight: .medium))
-              .frame(width: 30, height: 30)
-              .contentShape(Rectangle())
+          Divider().frame(height: 20).padding(.horizontal, 8)
+          HStack(spacing: 2) {
+            Button(action: model.refreshApp) {
+              Image(systemName: "arrow.clockwise")
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(
+              model.selectedTarget == nil || model.isBusy ? Studio.tertiary : Studio.secondary)
+            .disabled(model.selectedTarget == nil || model.isBusy)
+            .accessibilityLabel("Refresh app")
+            .help("Relaunch the installed app and capture a fresh screenshot")
+
+            Button(action: model.stop) {
+              Image(systemName: "stop.fill")
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.isBusy ? Studio.warning : Studio.tertiary)
+            .disabled(!model.isBusy)
+            .accessibilityLabel("Stop current operation")
+            .help("Stop the current operation")
           }
-          .buttonStyle(.plain)
-          .disabled(model.selectedTarget == nil || model.isBusy)
-          .help("Relaunch the installed app and capture a fresh screenshot")
           Menu {
-            Button("Refresh App", systemImage: "arrow.clockwise", action: model.refreshApp)
-              .disabled(model.selectedTarget == nil || model.isBusy)
             Button(
               "Capture Screenshot", systemImage: "camera", action: model.captureCurrentScreenshot
             )
             .disabled(model.selectedTarget == nil)
-            Button("Stop", action: model.stop).disabled(!model.isBusy)
           } label: {
             Image(systemName: "ellipsis")
               .frame(width: 32, height: 32)
@@ -1281,11 +1303,10 @@ private struct AppStage: View {
             ScrollView([.horizontal, .vertical]) {
               DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
                 .padding(.horizontal, 22)
-                .padding(.top, compact ? 120 : 8)
-                .padding(.bottom, compact ? 0 : 8)
+                .padding(.vertical, 8)
                 .frame(
                   minWidth: max(0, previewViewportWidth - 44),
-                  minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .top)
+                  minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .center)
             }
             .frame(
               minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
@@ -1325,18 +1346,6 @@ private struct AppStage: View {
     HStack(spacing: 2) {
       orientationButton("Portrait", selected: !landscape) { landscape = false }
       orientationButton("Landscape", selected: landscape) { landscape = true }
-      Divider().frame(height: 20).padding(.horizontal, 8)
-      Button {
-        landscape.toggle()
-      } label: {
-        Image(systemName: "arrow.triangle.2.circlepath")
-          .font(.system(size: 13, weight: .medium))
-          .frame(width: 28, height: 28)
-          .contentShape(Rectangle())
-      }
-      .buttonStyle(.plain)
-      .foregroundStyle(Studio.secondary)
-      .help("Rotate the preview")
     }
     .fixedSize()
   }
@@ -1362,11 +1371,6 @@ private struct AppStage: View {
       Image(systemName: "sun.max").foregroundStyle(Studio.secondary).frame(width: 30)
       appearanceButton(.light, title: "Light")
       appearanceButton(.dark, title: "Dark")
-      Divider().frame(height: 20).padding(.horizontal, 6)
-      Image(systemName: "iphone").foregroundStyle(Studio.secondary)
-      Text(landscape ? "Landscape" : "Portrait")
-        .font(.system(size: 11, weight: .medium))
-        .fixedSize()
     }
     .fixedSize()
   }
@@ -2834,19 +2838,18 @@ private struct TaskActionBar: View {
       Spacer().frame(width: 156)
       Button(action: showChanges) {
         HStack(spacing: 10) {
-          Image(systemName: model.activeWorktree == nil ? "checkmark.circle" : "shippingbox.fill")
-            .foregroundStyle(model.activeWorktree == nil ? Studio.success : Studio.accent)
-          Text(model.activeWorktree == nil ? "All changes committed" :
-            "\(model.changedFileCount) \(model.changedFileCount == 1 ? "file" : "files") changed")
+          Image(systemName: statusSymbol)
+            .foregroundStyle(statusColor)
+          Text(statusTitle)
           .font(.system(size: 12, weight: .semibold)).monospacedDigit()
-          if model.activeWorktree != nil {
+          if canShowChanges {
             Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
               .foregroundStyle(Studio.secondary)
           }
         }
       }
       .buttonStyle(.plain)
-      .disabled(model.activeWorktree == nil)
+      .disabled(!canShowChanges)
       Spacer()
       HStack(spacing: 10) {
         if model.activeWorktree != nil {
@@ -2900,8 +2903,34 @@ private struct TaskActionBar: View {
     }
   }
   private func showChanges() {
-    if model.proposedChanges.isEmpty { model.reviewChanges() }
+    if model.activeWorktree != nil, model.proposedChanges.isEmpty { model.reviewChanges() }
     model.section = .changes
+  }
+
+  private var canShowChanges: Bool {
+    model.activeWorktree != nil || !model.repositoryChanges.isEmpty
+  }
+
+  private var statusTitle: String {
+    if model.activeWorktree != nil {
+      return "\(model.proposedChanges.count) \(model.proposedChanges.count == 1 ? "file" : "files") changed"
+    }
+    if model.repository == nil { return "No project" }
+    if !model.isGitRepository { return "Repository status unavailable" }
+    if model.repositoryChanges.isEmpty { return "Working tree clean" }
+    return "\(model.repositoryChanges.count) uncommitted \(model.repositoryChanges.count == 1 ? "file" : "files")"
+  }
+
+  private var statusSymbol: String {
+    if model.activeWorktree != nil { return "shippingbox.fill" }
+    if !model.repositoryChanges.isEmpty { return "exclamationmark.circle" }
+    return model.repository == nil ? "folder" : "checkmark.circle"
+  }
+
+  private var statusColor: Color {
+    if model.activeWorktree != nil { return Studio.accent }
+    if !model.repositoryChanges.isEmpty { return Studio.warning }
+    return model.repository == nil ? Studio.secondary : Studio.success
   }
 }
 
@@ -6581,6 +6610,9 @@ private struct FileTreeNodeRow: View {
 
 private struct GitWorkspace: View {
   @EnvironmentObject var model: AppModel
+  @State private var selectedPath: String?
+  @State private var selectedDiff: ProposedFileDiff?
+  @State private var isLoadingDiff = false
 
   var body: some View {
     VStack(spacing: 0) {
@@ -6588,21 +6620,30 @@ private struct GitWorkspace: View {
         WorkspaceHeader(
           symbol: "arrow.triangle.branch",
           title: "Changes",
-          detail: "Review the isolated task against its exact baseline"
+          detail: model.activeWorktree == nil
+            ? "Review uncommitted files in the repository checkout"
+            : "Review the isolated task against its exact baseline"
         )
         Spacer(minLength: 0)
         StatusBadge(
-          title: model.activeWorktree == nil ? "No task" : "Task worktree",
-          state: model.activeWorktree == nil ? .neutral : .active
+          title: scopeBadgeTitle,
+          state: scopeBadgeState
         )
         Button {
-          model.reviewChanges()
+          if model.activeWorktree == nil {
+            Task { await model.refreshRepositoryChanges() }
+          } else {
+            model.reviewChanges()
+          }
         } label: {
           Label("Refresh", systemImage: "arrow.clockwise")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .help("Refresh the baseline-relative change set")
+        .help(
+          model.activeWorktree == nil
+            ? "Refresh the repository working-tree status"
+            : "Refresh the baseline-relative change set")
       }
       .padding(.horizontal, 24)
       .frame(height: 72)
@@ -6616,71 +6657,55 @@ private struct GitWorkspace: View {
         Divider().frame(height: 26).overlay(Studio.separator)
         changeMetric("Deleted", count: deletedCount, color: .red)
         Spacer()
-        Text(model.activeWorktree?.lastPathComponent ?? "No isolated task selected")
-          .font(.system(size: 10, design: .monospaced))
-          .foregroundStyle(Studio.tertiary)
-          .lineLimit(1)
-          .truncationMode(.middle)
-          .padding(.trailing, 24)
+        HStack(spacing: 7) {
+          Image(systemName: model.activeWorktree == nil ? "arrow.triangle.branch" : "checkmark.seal")
+          Text(
+            model.activeWorktree == nil
+              ? "Working tree compared with HEAD" : "Showing only task-scoped changes")
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(Studio.secondary)
+        .padding(.trailing, 24)
       }
       .padding(.leading, 24)
       .frame(height: 58)
       .background(Studio.surface)
       Divider().overlay(Studio.separator)
 
-      if model.proposedChanges.isEmpty {
+      if model.visibleChanges.isEmpty {
         WorkspaceEmpty(
-          symbol: "arrow.triangle.branch", title: "No proposed changes",
-          detail: "Create an isolated task or refresh the baseline-relative change set.")
+          symbol: "arrow.triangle.branch",
+          title: model.activeWorktree == nil ? "No uncommitted changes" : "No proposed changes",
+          detail: model.activeWorktree == nil
+            ? "The repository checkout currently matches HEAD."
+            : "The active task currently matches its baseline.")
       } else {
-        ScrollView {
-          LazyVStack(spacing: 0) {
-            ForEach(model.proposedChanges) { change in
-              HStack(spacing: 12) {
-                Text(change.kind.rawValue.uppercased())
-                  .font(.system(size: 9, weight: .bold).monospaced())
-                  .foregroundStyle(changeColor(change.kind))
-                  .frame(width: 62, alignment: .leading)
-                Image(systemName: change.binary ? "shippingbox" : "doc.text")
-                  .foregroundStyle(Studio.secondary)
-                Text(change.path)
-                  .font(.system(size: 11.5, design: .monospaced))
-                  .lineLimit(1)
-                  .truncationMode(.middle)
-                Spacer(minLength: 0)
-                if change.binary {
-                  Text("Binary")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Studio.warning)
-                }
-              }
-              .padding(.horizontal, 24)
-              .frame(height: 48)
-              .background(Studio.surface)
-              .overlay(alignment: .bottom) { Divider().overlay(Studio.separator) }
-            }
-            ForEach(model.applyConflicts) { conflict in
-              VStack(alignment: .leading, spacing: 5) {
-                Label(
-                  "Manual resolution required · \(conflict.path)",
-                  systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.system(size: 12, weight: .semibold)).foregroundStyle(Studio.warning)
-                Text(conflict.reason).font(.system(size: 11)).foregroundStyle(Studio.secondary)
-                if let artifact = conflict.resolutionArtifact {
-                  Text(artifact).font(.system(size: 10).monospaced()).textSelection(.enabled)
-                }
-              }
-              .padding(16)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .background(Color.orange.opacity(0.08))
-            }
-          }
-          .padding(20)
+        HStack(spacing: 0) {
+          changeFileList
+            .frame(width: 310)
+          Divider().overlay(Studio.separator)
+          changeDetail
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Studio.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
+        .overlay {
+          RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1)
+        }
+        .padding(20)
       }
     }
     .background(Studio.backdrop)
+    .task(id: diffTaskID) {
+      await loadSelectedDiff()
+    }
+    .onChange(of: changes.map(\.path)) { _, paths in
+      if let selectedPath, !paths.contains(selectedPath) {
+        self.selectedPath = nil
+      }
+      selectedDiff = nil
+    }
   }
 
   private func changeMetric(_ title: String, count: Int, color: Color) -> some View {
@@ -6692,16 +6717,328 @@ private struct GitWorkspace: View {
     .frame(width: 112, alignment: .leading)
   }
 
-  private var addedCount: Int { model.proposedChanges.filter { $0.kind == .added }.count }
-  private var modifiedCount: Int { model.proposedChanges.filter { $0.kind == .modified }.count }
-  private var deletedCount: Int { model.proposedChanges.filter { $0.kind == .deleted }.count }
+  private var changes: [ProposedChange] { model.visibleChanges }
 
-  private func changeColor(_ kind: ProposedChangeKind) -> Color {
-    switch kind {
-    case .added: Studio.success
-    case .modified: Studio.accent
-    case .deleted: .red
+  private var addedCount: Int { changes.filter { $0.kind == .added }.count }
+  private var modifiedCount: Int { changes.filter { $0.kind == .modified }.count }
+  private var deletedCount: Int { changes.filter { $0.kind == .deleted }.count }
+
+  private var selectedChange: ProposedChange? {
+    if let selectedPath {
+      return changes.first { $0.path == selectedPath }
     }
+    return changes.first
+  }
+
+  private var diffTaskID: String {
+    let files = changes.map {
+      "\($0.path):\($0.kind.rawValue):\($0.binary)"
+    }.joined(separator: "|")
+    let revision = model.activeWorktree == nil
+      ? model.repositoryChangesRevision : model.proposedChangesRevision
+    return "\(revision)::\(model.generation)::\(selectedChange?.path ?? "none")::\(files)"
+  }
+
+  private var scopeBadgeTitle: String {
+    if model.activeWorktree != nil { return "Task worktree" }
+    if model.repository == nil { return "No project" }
+    if !model.isGitRepository { return "Read-only folder" }
+    return model.repositoryChanges.isEmpty ? "Clean checkout" : "Uncommitted work"
+  }
+
+  private var scopeBadgeState: StatusBadge.State {
+    if model.activeWorktree != nil { return .active }
+    return model.repositoryChanges.isEmpty ? .neutral : .warning
+  }
+
+  private var changeFileList: some View {
+    VStack(spacing: 0) {
+      HStack {
+        Text("Changed files")
+          .font(.system(size: 11, weight: .semibold))
+        Spacer()
+        Text("\(changes.count)")
+          .font(.system(size: 10, weight: .semibold).monospacedDigit())
+          .foregroundStyle(Studio.secondary)
+      }
+      .padding(.horizontal, 16)
+      .frame(height: 44)
+      Divider().overlay(Studio.separator)
+
+      ScrollView {
+        LazyVStack(spacing: 3) {
+          ForEach(changes) { change in
+            Button {
+              selectedPath = change.path
+            } label: {
+              ChangeFileRow(
+                change: change, selected: selectedChange?.path == change.path)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(change.kind.rawValue) \(change.path)")
+            .accessibilityValue(change.binary ? "Binary file" : "Text file")
+          }
+
+          if !model.applyConflicts.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+              Label("Apply needs review", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Studio.warning)
+              ForEach(model.applyConflicts) { conflict in
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(conflict.path)
+                    .font(.system(size: 10, weight: .semibold).monospaced())
+                  Text(conflict.reason)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Studio.secondary)
+                    .lineLimit(3)
+                }
+                if let artifact = conflict.resolutionArtifact {
+                  Text(artifact)
+                    .font(.system(size: 9).monospaced())
+                    .foregroundStyle(Studio.secondary)
+                    .textSelection(.enabled)
+                }
+              }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .padding(.top, 8)
+          }
+        }
+        .padding(8)
+      }
+    }
+    .background(Studio.surface)
+  }
+
+  @ViewBuilder
+  private var changeDetail: some View {
+    if let change = selectedChange {
+      VStack(spacing: 0) {
+        HStack(alignment: .top, spacing: 12) {
+          VStack(alignment: .leading, spacing: 5) {
+            Text(change.path)
+              .font(.system(size: 12, weight: .semibold).monospaced())
+              .lineLimit(1)
+              .truncationMode(.middle)
+            HStack(spacing: 10) {
+              DiffKindBadge(kind: change.kind)
+              if change.binary || selectedDiff?.binary == true {
+                Text("Binary")
+                  .font(.system(size: 9.5, weight: .medium))
+                  .foregroundStyle(Studio.warning)
+              } else if let selectedDiff {
+                Text("+\(selectedDiff.addedLineCount)")
+                  .foregroundStyle(Studio.success)
+                Text("−\(selectedDiff.removedLineCount)")
+                  .foregroundStyle(.red)
+              } else {
+                Text(model.activeWorktree == nil ? "HEAD → working tree" : "Baseline → task")
+                  .foregroundStyle(Studio.secondary)
+              }
+            }
+            .font(.system(size: 10, weight: .medium).monospacedDigit())
+          }
+          Spacer(minLength: 0)
+          Text(model.activeWorktree == nil ? "HEAD diff" : "Task diff")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Studio.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 15)
+        Divider().overlay(Studio.separator)
+
+        if isLoadingDiff {
+          VStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(
+              model.activeWorktree == nil
+                ? "Reading HEAD and working-tree file…" : "Reading baseline and task file…")
+              .font(.system(size: 10.5))
+              .foregroundStyle(Studio.secondary)
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let selectedDiff {
+          if let message = selectedDiff.message, selectedDiff.lines.isEmpty {
+            VStack(spacing: 10) {
+              Image(systemName: selectedDiff.binary ? "shippingbox" : "doc.text.magnifyingglass")
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(Studio.tertiary)
+              Text(message)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Studio.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          } else {
+            diffLines(selectedDiff.lines)
+          }
+        } else {
+          VStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+              .font(.system(size: 26, weight: .light))
+              .foregroundStyle(Studio.tertiary)
+            Text("Diff unavailable")
+              .font(.system(size: 11, weight: .medium))
+              .foregroundStyle(Studio.secondary)
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+      }
+      .background(Studio.surface)
+    } else {
+      WorkspaceEmpty(
+        symbol: "doc.text.magnifyingglass", title: "Select a changed file",
+        detail: model.activeWorktree == nil
+          ? "Choose a file to compare the working tree with HEAD."
+          : "Choose a file to compare the task worktree with its baseline.")
+    }
+  }
+
+  private func diffLines(_ lines: [ProposedDiffLine]) -> some View {
+    ScrollView([.vertical, .horizontal]) {
+      LazyVStack(spacing: 0) {
+        ForEach(lines) { line in
+          DiffLineRow(line: line)
+        }
+      }
+      .padding(.vertical, 8)
+    }
+    .background(Studio.raised.opacity(0.42))
+  }
+
+  private func loadSelectedDiff() async {
+    guard let change = selectedChange else {
+      selectedDiff = nil
+      isLoadingDiff = false
+      return
+    }
+    isLoadingDiff = true
+    let diff = model.activeWorktree == nil
+      ? await model.repositoryDiff(for: change)
+      : await model.proposedDiff(for: change)
+    guard !Task.isCancelled else { return }
+    selectedDiff = diff
+    isLoadingDiff = false
+  }
+}
+
+private struct ChangeFileRow: View {
+  let change: ProposedChange
+  let selected: Bool
+
+  var body: some View {
+    HStack(spacing: 10) {
+      Image(systemName: change.binary ? "shippingbox" : "doc.text")
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(proposedChangeColor(change.kind))
+        .frame(width: 28, height: 28)
+        .background(proposedChangeColor(change.kind).opacity(0.11))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text(fileName)
+          .font(.system(size: 11, weight: selected ? .semibold : .medium))
+          .lineLimit(1)
+          .truncationMode(.middle)
+        Text(directory)
+          .font(.system(size: 9.5, weight: .medium).monospaced())
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+      }
+      Spacer(minLength: 5)
+      Text(change.kind.rawValue.capitalized)
+        .font(.system(size: 8.5, weight: .bold).monospaced())
+        .foregroundStyle(proposedChangeColor(change.kind))
+    }
+    .padding(.horizontal, 10)
+    .frame(minHeight: 58)
+    .background(selected ? Studio.accentSoft : Color.clear)
+    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    .contentShape(Rectangle())
+  }
+
+  private var fileName: String { change.path.split(separator: "/").last.map(String.init) ?? change.path }
+
+  private var directory: String {
+    let components = change.path.split(separator: "/")
+    guard components.count > 1 else { return "Project root" }
+    return components.dropLast().joined(separator: "/")
+  }
+}
+
+private struct DiffKindBadge: View {
+  let kind: ProposedChangeKind
+
+  var body: some View {
+    HStack(spacing: 5) {
+      Circle().fill(proposedChangeColor(kind)).frame(width: 6, height: 6)
+      Text(kind.rawValue.capitalized)
+    }
+    .foregroundStyle(proposedChangeColor(kind))
+  }
+}
+
+private struct DiffLineRow: View {
+  let line: ProposedDiffLine
+
+  var body: some View {
+    HStack(spacing: 0) {
+      Text(line.oldLineNumber.map(String.init) ?? "")
+        .frame(width: 42, alignment: .trailing)
+        .foregroundStyle(Studio.tertiary)
+      Text(line.newLineNumber.map(String.init) ?? "")
+        .frame(width: 42, alignment: .trailing)
+        .foregroundStyle(Studio.tertiary)
+      Text(prefix)
+        .frame(width: 24)
+        .foregroundStyle(prefixColor)
+      Text(line.text.isEmpty ? " " : line.text)
+        .frame(minWidth: 420, alignment: .leading)
+        .foregroundStyle(Color(nsColor: .labelColor).opacity(0.82))
+        .textSelection(.enabled)
+    }
+    .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+    .foregroundStyle(Studio.secondary)
+    .padding(.horizontal, 10)
+    .frame(minHeight: 23, alignment: .center)
+    .background(rowColor)
+    .overlay(alignment: .bottom) { Divider().overlay(Studio.separator.opacity(0.5)) }
+  }
+
+  private var prefix: String {
+    switch line.kind {
+    case .context: " "
+    case .added: "+"
+    case .removed: "−"
+    }
+  }
+
+  private var prefixColor: Color {
+    switch line.kind {
+    case .context: Studio.tertiary
+    case .added: Studio.success
+    case .removed: .red
+    }
+  }
+
+  private var rowColor: Color {
+    switch line.kind {
+    case .context: .clear
+    case .added: Studio.success.opacity(0.09)
+    case .removed: Color.red.opacity(0.08)
+    }
+  }
+}
+
+private func proposedChangeColor(_ kind: ProposedChangeKind) -> Color {
+  switch kind {
+  case .added: Studio.success
+  case .modified: Studio.accent
+  case .deleted: .red
   }
 }
 
