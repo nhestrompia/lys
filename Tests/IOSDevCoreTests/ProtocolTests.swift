@@ -58,6 +58,24 @@ private final class ACPUpdateRecorder: @unchecked Sendable {
     ]))
 }
 
+@Test func acpPromptEncodesFeedbackImagesWithTextContext() throws {
+  let prompt = ACPPrompt(
+    sessionID: "feedback-session",
+    content: [
+      .init(text: "Fix this TestFlight feedback."),
+      .init(
+        imageData: Data([0x89, 0x50, 0x4E, 0x47]), mimeType: "image/png",
+        uri: "https://example.com/feedback.png"),
+    ])
+  let value = try jsonValue(prompt)
+  let blocks = try #require(value["prompt"]?.arrayValue)
+  #expect(value["sessionId"] == .string("feedback-session"))
+  #expect(blocks[0]["type"] == .string("text"))
+  #expect(blocks[1]["type"] == .string("image"))
+  #expect(blocks[1]["data"] == .string("iVBORw=="))
+  #expect(blocks[1]["mimeType"] == .string("image/png"))
+}
+
 @Test func acpSessionConfigOptionsExposeModelAndReasoningValues() throws {
   let payload: JSONValue = .array([
     .object([

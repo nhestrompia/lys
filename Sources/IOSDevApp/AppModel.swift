@@ -289,6 +289,10 @@ public final class AppModel: ObservableObject {
   @Published var appStoreUploadError: String?
   @Published var appStoreUploadArchiveInspection: AppStoreArchiveInspection?
   @Published var appStoreUploadArchiveURL: URL?
+  @Published var appStoreReleasePhase: AppStoreReleasePhase = .idle
+  @Published var appStoreReleaseStatus = ""
+  @Published var appStoreReleaseError: String?
+  @Published var isPreparingFeedbackAgentTask = false
   @Published var designPreview = false
   @Published var pendingAgentPermission: AgentPermissionRequest?
   @Published var startDevServerOnRun = true
@@ -462,6 +466,7 @@ public final class AppModel: ObservableObject {
   private var agentToolContexts: [String: AgentToolContext] = [:]
   private var agentToolTimelineIDs: [String: UUID] = [:]
   private var pendingAgentConfigValues: [String: String] = [:]
+  var pendingAgentPromptAttachments: [ACPContentBlock] = []
   private var pendingPreviewInteractions: [PreviewInteractionRequest] = []
   private var previewTapWorker: Task<Void, Never>?
   private var previewWarmupTask: Task<Void, Never>?
@@ -891,6 +896,8 @@ public final class AppModel: ObservableObject {
         "Editing requires a Git repository. You can still ask the agent to inspect or test the running app."
       return
     }
+    let promptAttachments = pendingAgentPromptAttachments
+    pendingAgentPromptAttachments = []
     taskPrompt = ""
     taskTitle = prompt
     activeTaskIntent = intent
@@ -947,7 +954,8 @@ public final class AppModel: ObservableObject {
         }
         plan[2].state = .active
         try await connectAgent(
-          adapter: adapter, workspace: workspace, prompt: prompt, intent: intent)
+          adapter: adapter, workspace: workspace, prompt: prompt, intent: intent,
+          attachments: promptAttachments)
         guard !agentStopRequested else { return }
         plan[2].state = .complete
         status =
@@ -1074,6 +1082,8 @@ public final class AppModel: ObservableObject {
     }
     guard let client = activeACPClient, let sessionID = activeACPSessionID else { return }
     let prompt = taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    let promptAttachments = pendingAgentPromptAttachments
+    pendingAgentPromptAttachments = []
     taskPrompt = ""
     isBusy = true
     status = "Agent working"
@@ -1085,7 +1095,10 @@ public final class AppModel: ObservableObject {
         _ = try? await runtime.request(method: "session.resume")
         let result = try await client.request(
           method: "session/prompt",
-          params: try jsonValue(ACPPrompt(sessionID: sessionID, text: prompt)))
+          params: try jsonValue(
+            ACPPrompt(
+              sessionID: sessionID,
+              content: [.init(text: prompt)] + promptAttachments)))
         let reason = result.result?["stopReason"]?.stringValue ?? "completed"
         guard !agentStopRequested else { return }
         finishAgentMessage()
@@ -2221,7 +2234,8 @@ public final class AppModel: ObservableObject {
   }
 
   private func connectAgent(
-    adapter: DetectedAdapter, workspace: URL, prompt: String, intent: AgentTaskIntent
+    adapter: DetectedAdapter, workspace: URL, prompt: String, intent: AgentTaskIntent,
+    attachments: [ACPContentBlock] = []
   ) async throws {
     guard let executable = adapter.executable else {
       throw RPCError(code: -32090, message: "The selected ACP adapter is unavailable")
@@ -2288,7 +2302,8 @@ public final class AppModel: ObservableObject {
     let context = agentContext(prompt: prompt, workspace: workspace, intent: intent)
     let result = try await client.request(
       method: "session/prompt",
-      params: try jsonValue(ACPPrompt(sessionID: sessionID, text: context)))
+      params: try jsonValue(
+        ACPPrompt(sessionID: sessionID, content: [.init(text: context)] + attachments)))
     guard !agentStopRequested else { return }
     let reason = result.result?["stopReason"]?.stringValue ?? "completed"
     finishAgentMessage()

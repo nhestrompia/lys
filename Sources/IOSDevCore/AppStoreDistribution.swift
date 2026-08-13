@@ -230,6 +230,40 @@ public enum AppStoreDistributionSupport {
     }
   }
 
+  public static func actionableFailureDetail(
+    stdout: String, stderr: String, status: Int32
+  ) -> String {
+    let lines = (stderr + "\n" + stdout)
+      .components(separatedBy: .newlines)
+      .map(stripANSIEscapes)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    let diagnosticTerms = [
+      "error:", "requires a development team", "no accounts", "no signing certificate",
+      "signing certificate", "provisioning profile", "codesign", "authentication",
+    ]
+    let diagnostics = unique(
+      lines.filter { line in
+        let normalized = line.lowercased()
+        return diagnosticTerms.contains { normalized.contains($0) }
+      })
+    if !diagnostics.isEmpty { return diagnostics.suffix(10).joined(separator: "\n") }
+
+    let genericTerms = [
+      "** archive failed **", "** export failed **", "the following build commands failed:",
+      "archiving workspace", "archiving project", "(1 failure)",
+    ]
+    let meaningful = unique(
+      lines.filter { line in
+        let normalized = line.lowercased()
+        return !genericTerms.contains { normalized.contains($0) }
+      })
+    let detail = meaningful.suffix(12).joined(separator: "\n")
+    return detail.isEmpty
+      ? "xcodebuild exited with status \(status). Open the build log for details."
+      : detail
+  }
+
   private static func appendAuthentication(
     to arguments: inout [String], authentication: AppStoreDistributionAuthentication?,
     allowProvisioningUpdates: Bool
@@ -247,5 +281,15 @@ public enum AppStoreDistributionSupport {
   private static func normalized(_ value: String?) -> String? {
     let value = value?.trimmingCharacters(in: .whitespacesAndNewlines)
     return value.flatMap { $0.isEmpty ? nil : $0 }
+  }
+
+  private static func stripANSIEscapes(_ value: String) -> String {
+    value.replacingOccurrences(
+      of: "\u{001B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+  }
+
+  private static func unique(_ values: [String]) -> [String] {
+    var seen = Set<String>()
+    return values.filter { seen.insert($0).inserted }
   }
 }

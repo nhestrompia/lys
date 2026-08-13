@@ -77,6 +77,12 @@ public struct AppStoreVersion: Codable, Identifiable, Hashable, Sendable {
   }
 }
 
+public enum AppStoreReleaseType: String, Codable, CaseIterable, Hashable, Sendable {
+  case manual = "MANUAL"
+  case automatic = "AFTER_APPROVAL"
+  case scheduled = "SCHEDULED"
+}
+
 public struct AppStoreBuild: Codable, Identifiable, Hashable, Sendable {
   public var id: String
   public var version: String
@@ -614,6 +620,162 @@ public actor AppStoreConnectClient {
     }
   }
 
+  @discardableResult
+  public func createAppStoreVersion(
+    appID: String, versionString: String, releaseType: AppStoreReleaseType,
+    earliestReleaseDate: Date? = nil
+  ) async throws -> AppStoreVersion {
+    let version = versionString.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !version.isEmpty else {
+      throw AppStoreConnectError.invalidConnection("Enter the version number to release.")
+    }
+    guard releaseType == .scheduled || earliestReleaseDate == nil else {
+      throw AppStoreConnectError.invalidConnection(
+        "A release date can only be used with a scheduled release.")
+    }
+    let request = AppStoreVersionCreateRequest(
+      data: .init(
+        type: "appStoreVersions",
+        attributes: .init(
+          platform: "IOS", versionString: version, releaseType: releaseType.rawValue,
+          earliestReleaseDate: earliestReleaseDate.map(AppStoreDateParser.string)),
+        relationships: .init(
+          app: .init(data: .init(type: "apps", id: try safeResourceID(appID))))))
+    let response: AppStoreVersionDocument = try await send(
+      try endpoint("v1/appStoreVersions", query: []), method: "POST", body: request)
+    return response.data.version
+  }
+
+  @discardableResult
+  public func updateAppStoreVersion(
+    versionID: String, releaseType: AppStoreReleaseType, earliestReleaseDate: Date? = nil
+  ) async throws -> AppStoreVersion {
+    guard releaseType == .scheduled || earliestReleaseDate == nil else {
+      throw AppStoreConnectError.invalidConnection(
+        "A release date can only be used with a scheduled release.")
+    }
+    let id = try safeResourceID(versionID)
+    let request = AppStoreVersionUpdateRequest(
+      data: .init(
+        type: "appStoreVersions", id: id,
+        attributes: .init(
+          releaseType: releaseType.rawValue,
+          earliestReleaseDate: earliestReleaseDate.map(AppStoreDateParser.string))))
+    let response: AppStoreVersionDocument = try await send(
+      try endpoint("v1/appStoreVersions/\(id)", query: []), method: "PATCH", body: request)
+    return response.data.version
+  }
+
+  public func attachBuild(_ buildID: String, toVersion versionID: String) async throws {
+    let request = ToOneRelationshipRequest(
+      data: .init(type: "builds", id: try safeResourceID(buildID)))
+    try await sendWithoutResponse(
+      try endpoint(
+        "v1/appStoreVersions/\(safeResourceID(versionID))/relationships/build", query: []),
+      method: "PATCH", body: request)
+  }
+
+  public func setBuildUsesNonExemptEncryption(_ value: Bool, buildID: String) async throws {
+    let id = try safeResourceID(buildID)
+    let request = BuildUpdateRequest(
+      data: .init(
+        type: "builds", id: id,
+        attributes: .init(usesNonExemptEncryption: value)))
+    let _: IdentifierDocument = try await send(
+      try endpoint("v1/builds/\(id)", query: []), method: "PATCH", body: request)
+  }
+
+  public func assignBuild(_ buildID: String, toBetaGroup groupID: String) async throws {
+    let request = RelationshipLinkagesRequest(
+      data: [.init(type: "builds", id: try safeResourceID(buildID))])
+    try await sendWithoutResponse(
+      try endpoint(
+        "v1/betaGroups/\(safeResourceID(groupID))/relationships/builds", query: []),
+      method: "POST", body: request)
+  }
+
+  public func submitBuildForBetaReview(_ buildID: String) async throws {
+    let request = BetaAppReviewSubmissionCreateRequest(
+      data: .init(
+        type: "betaAppReviewSubmissions",
+        relationships: .init(
+          build: .init(data: .init(type: "builds", id: try safeResourceID(buildID))))))
+    let _: IdentifierDocument = try await send(
+      try endpoint("v1/betaAppReviewSubmissions", query: []), method: "POST", body: request)
+  }
+
+  public func submitVersionForAppReview(appID: String, versionID: String) async throws {
+    let appID = try safeResourceID(appID)
+    let versionID = try safeResourceID(versionID)
+    let submissionRequest = ReviewSubmissionCreateRequest(
+      data: .init(
+        type: "reviewSubmissions",
+        relationships: .init(app: .init(data: .init(type: "apps", id: appID)))))
+    let submission: IdentifierDocument = try await send(
+      try endpoint("v1/reviewSubmissions", query: []), method: "POST",
+      body: submissionRequest)
+    let itemRequest = ReviewSubmissionItemCreateRequest(
+      data: .init(
+        type: "reviewSubmissionItems",
+        relationships: .init(
+          reviewSubmission: .init(data: submission.data),
+          appStoreVersion: .init(
+            data: .init(type: "appStoreVersions", id: versionID)))))
+    let _: IdentifierDocument = try await send(
+      try endpoint("v1/reviewSubmissionItems", query: []), method: "POST", body: itemRequest)
+    let submitRequest = ReviewSubmissionUpdateRequest(
+      data: .init(
+        type: "reviewSubmissions", id: submission.data.id,
+        attributes: .init(submitted: true)))
+    let _: IdentifierDocument = try await send(
+      try endpoint("v1/reviewSubmissions/\(submission.data.id)", query: []), method: "PATCH",
+      body: submitRequest)
+  }
+
+  public func releaseApprovedVersion(_ versionID: String) async throws {
+    let request = AppStoreVersionReleaseRequestCreateRequest(
+      data: .init(
+        type: "appStoreVersionReleaseRequests",
+        relationships: .init(
+          appStoreVersion: .init(
+            data: .init(
+              type: "appStoreVersions", id: try safeResourceID(versionID))))))
+    let _: IdentifierDocument = try await send(
+      try endpoint("v1/appStoreVersionReleaseRequests", query: []), method: "POST", body: request)
+  }
+
+  public func setVersionWhatsNew(
+    versionID: String, locale: String, whatsNew: String
+  ) async throws {
+    let locale = locale.trimmingCharacters(in: .whitespacesAndNewlines)
+    let whatsNew = whatsNew.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !locale.isEmpty, !whatsNew.isEmpty else {
+      throw AppStoreConnectError.invalidConnection(
+        "Enter the primary locale and What's New text before saving release notes.")
+    }
+    if let localization = try await listVersionLocalizations(versionID: versionID).first(where: {
+      $0.locale.caseInsensitiveCompare(locale) == .orderedSame
+    }) {
+      let request = VersionLocalizationUpdateRequest(
+        data: .init(
+          type: "appStoreVersionLocalizations", id: localization.id,
+          attributes: .init(whatsNew: whatsNew)))
+      let _: VersionLocalizationDocument = try await send(
+        try endpoint("v1/appStoreVersionLocalizations/\(safeResourceID(localization.id))", query: []),
+        method: "PATCH", body: request)
+    } else {
+      let request = VersionLocalizationCreateRequest(
+        data: .init(
+          type: "appStoreVersionLocalizations",
+          attributes: .init(locale: locale, whatsNew: whatsNew),
+          relationships: .init(
+            appStoreVersion: .init(
+              data: .init(type: "appStoreVersions", id: try safeResourceID(versionID))))))
+      let _: VersionLocalizationDocument = try await send(
+        try endpoint("v1/appStoreVersionLocalizations", query: []), method: "POST", body: request)
+    }
+  }
+
   public func listBuilds(appID: String) async throws -> [AppStoreBuild] {
     let safeAppID = try safeResourceID(appID)
     let buildURL = try endpoint(
@@ -1025,6 +1187,139 @@ private struct ResourceIdentifier: Codable {
   var id: String
 }
 private struct RelationshipLinkagesRequest: Encodable { var data: [ResourceIdentifier] }
+private struct ToOneRelationshipRequest: Encodable { var data: ResourceIdentifier }
+
+private struct IdentifierDocument: Decodable { var data: ResourceIdentifier }
+private struct AppStoreVersionDocument: Decodable { var data: AppStoreVersionResource }
+private struct VersionLocalizationDocument: Decodable { var data: VersionLocalizationResource }
+
+private struct AppStoreVersionCreateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Attributes: Encodable {
+      var platform: String
+      var versionString: String
+      var releaseType: String
+      var earliestReleaseDate: String?
+    }
+    struct Relationships: Encodable {
+      struct App: Encodable { var data: ResourceIdentifier }
+      var app: App
+    }
+    var type: String
+    var attributes: Attributes
+    var relationships: Relationships
+  }
+  var data: DataValue
+}
+
+private struct AppStoreVersionUpdateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Attributes: Encodable {
+      var releaseType: String
+      var earliestReleaseDate: String?
+    }
+    var type: String
+    var id: String
+    var attributes: Attributes
+  }
+  var data: DataValue
+}
+
+private struct BuildUpdateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Attributes: Encodable { var usesNonExemptEncryption: Bool }
+    var type: String
+    var id: String
+    var attributes: Attributes
+  }
+  var data: DataValue
+}
+
+private struct BetaAppReviewSubmissionCreateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Relationships: Encodable {
+      struct Build: Encodable { var data: ResourceIdentifier }
+      var build: Build
+    }
+    var type: String
+    var relationships: Relationships
+  }
+  var data: DataValue
+}
+
+private struct ReviewSubmissionCreateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Relationships: Encodable {
+      struct App: Encodable { var data: ResourceIdentifier }
+      var app: App
+    }
+    var type: String
+    var relationships: Relationships
+  }
+  var data: DataValue
+}
+
+private struct ReviewSubmissionItemCreateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Relationships: Encodable {
+      struct Link: Encodable { var data: ResourceIdentifier }
+      var reviewSubmission: Link
+      var appStoreVersion: Link
+    }
+    var type: String
+    var relationships: Relationships
+  }
+  var data: DataValue
+}
+
+private struct ReviewSubmissionUpdateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Attributes: Encodable { var submitted: Bool }
+    var type: String
+    var id: String
+    var attributes: Attributes
+  }
+  var data: DataValue
+}
+
+private struct AppStoreVersionReleaseRequestCreateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Relationships: Encodable {
+      struct Version: Encodable { var data: ResourceIdentifier }
+      var appStoreVersion: Version
+    }
+    var type: String
+    var relationships: Relationships
+  }
+  var data: DataValue
+}
+
+private struct VersionLocalizationCreateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Attributes: Encodable {
+      var locale: String
+      var whatsNew: String
+    }
+    struct Relationships: Encodable {
+      struct Version: Encodable { var data: ResourceIdentifier }
+      var appStoreVersion: Version
+    }
+    var type: String
+    var attributes: Attributes
+    var relationships: Relationships
+  }
+  var data: DataValue
+}
+
+private struct VersionLocalizationUpdateRequest: Encodable {
+  struct DataValue: Encodable {
+    struct Attributes: Encodable { var whatsNew: String }
+    var type: String
+    var id: String
+    var attributes: Attributes
+  }
+  var data: DataValue
+}
 
 private struct BetaTesterCreateRequest: Encodable {
   struct DataValue: Encodable {
@@ -1389,6 +1684,12 @@ private struct CrashFeedbackResource: Decodable {
 }
 
 private enum AppStoreDateParser {
+  static func string(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+  }
+
   static func date(_ value: String?) -> Date? {
     guard let value else { return nil }
     let formatter = ISO8601DateFormatter()

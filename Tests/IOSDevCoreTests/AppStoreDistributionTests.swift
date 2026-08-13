@@ -92,6 +92,20 @@ import Testing
   ])
 }
 
+@Test func appStoreDistributionFailurePrefersActionableSigningDiagnostics() {
+  let detail = AppStoreDistributionSupport.actionableFailureDetail(
+    stdout: """
+      The following build commands failed:
+      Archiving workspace Ellinix with scheme Ellinix
+      error: Signing for "Ellinix" requires a development team. Select a development team in the Signing & Capabilities editor.
+      (1 failure)
+      """,
+    stderr: "** ARCHIVE FAILED **", status: 65)
+  #expect(detail.contains("requires a development team"))
+  #expect(!detail.contains("ARCHIVE FAILED"))
+  #expect(!detail.contains("Archiving workspace"))
+}
+
 @Test func appStoreTemporaryCredentialIsOwnerOnlyAndRecoverablyRemoved() throws {
   let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

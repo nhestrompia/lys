@@ -1,6 +1,6 @@
 # App Store Connect and TestFlight Implementation
 
-Updated: 2026-08-12
+Updated: 2026-08-13
 
 This document is the implementation ledger for Lys's Deploy workspace. Checkboxes describe code
 that exists in the repository and is covered by tests or a real integration path. The Deploy UI
@@ -9,6 +9,9 @@ is unavailable.
 
 ## Product boundary
 
+- Deploy starts from an existing App Store Connect app record that the connected team can access.
+- Developer enrollment, agreements, initial bundle-ID registration, certificate/account setup, and
+  creation of the first app record stay outside this update-release workflow.
 - Lys never asks for or stores an Apple Account password, app-specific password, or two-factor
   authentication code.
 - Apple Account web authentication remains in App Store Connect and Xcode.
@@ -82,7 +85,11 @@ is unavailable.
 - [ ] Compare local entitlements with the selected provisioning path.
 - [ ] Report missing agreements or developer-account actions as external prerequisites rather than
   claiming a false machine-verified result.
-- [ ] Present a single ordered signing-readiness checklist with direct recovery actions.
+- [x] Block archive when the Release target has no development team or has neither a local
+  distribution identity nor explicit approval for Xcode signing updates.
+- [x] Present signing blockers separately from warnings, open the selected project directly in
+  Xcode, and rerun preflight without closing the upload sheet.
+- [x] Present a single ordered signing-readiness checklist with direct recovery actions.
 - [x] Present a protected archive/upload review with the exact source, scheme, bundle ID,
   version/build, team, signing style, local distribution identity, and actionable warnings.
 
@@ -110,6 +117,9 @@ is unavailable.
 - [x] Load TestFlight screenshot feedback.
 - [x] Preserve every image attached to TestFlight screenshot feedback, show a list thumbnail, and
   provide a full-size viewer with Copy and Save actions.
+- [x] Start a source-editing task in the selected coding agent from a feedback row, carrying the
+  tester comment, app/build/device/OS identifiers, screenshot URLs, and downloaded screenshots as
+  ACP image blocks while keeping App Store credentials host-only.
 - [x] Load TestFlight crash-feedback metadata.
 - [ ] Load and symbolize TestFlight crash logs.
 - [ ] Add pagination, sparse-field requests, cancellation, and background refresh.
@@ -138,6 +148,8 @@ is unavailable.
 - [x] Support the explicit TestFlight Internal Only option and explain its permanent restriction.
 - [x] Stream bounded distribution output into the terminal surface while redacting the temporary
   authentication-key path.
+- [x] Prefer actionable compiler/signing/provisioning diagnostics over Xcode's terminal
+  `ARCHIVE FAILED` summary and expose the full build log from the failure state.
 - [ ] Persist Xcode distribution logs and structured diagnostics.
 - [x] Poll processed builds by exact marketing version/build number until ready, failed, cancelled,
   or the bounded foreground wait expires.
@@ -150,19 +162,20 @@ is unavailable.
 - [x] Remove a tester from a selected beta group behind destructive confirmation without deleting
   the tester from the entire Apple account.
 - [ ] Edit localized What to Test text.
-- [ ] Assign a ready build to an internal group with confirmation.
+- [x] Assign a ready build to an internal group from the protected update-release flow.
 - [ ] Create and manage internal groups when permitted.
-- [ ] Assign a ready build to an external group with confirmation.
+- [x] Assign a ready build to an external group from the protected update-release flow.
 - [ ] Create and manage external groups when permitted.
-- [ ] Submit a build for TestFlight beta review when required.
+- [x] Submit a build for TestFlight beta review as a separate explicit choice.
 - [ ] Make tester notification a separate explicit choice.
 - [ ] Expire a build behind destructive confirmation.
 - [ ] Record every remote mutation as a deployment event.
 
 ### 7. App Store release
 
-- [ ] Create and edit App Store version metadata.
+- [x] Create an iOS App Store update version and edit its release policy.
 - [ ] Manage version localizations.
+- [x] Create or update the primary-locale What's New text from the release flow.
 - [x] Reserve, chunk-upload, checksum, and commit new App Store screenshots to an existing locale
   and display-type set.
 - [x] Replace a committed screenshot by uploading its replacement first and deleting the old asset
@@ -170,11 +183,26 @@ is unavailable.
 - [x] Delete an App Store screenshot behind destructive confirmation.
 - [ ] Create new locale/display-type screenshot sets and poll committed assets to terminal
   `COMPLETE` or `FAILED` processing state.
-- [ ] Select a processed build for the version.
-- [ ] Configure manual, automatic, or scheduled release.
-- [ ] Use Review Submissions and Review Submission Items for App Review.
+- [x] Select a processed, version-matched build for the version.
+- [x] Configure manual, automatic, or scheduled release.
+- [x] Use Review Submissions and Review Submission Items for App Review with explicit confirmation.
 - [ ] Track review, rejection, pending-release, processing, and ready-for-distribution states.
 - [ ] Keep TestFlight fully usable when App Store release functionality is unavailable.
+
+### 8. Product boundary and conditional compliance
+
+- [x] Assume an accessible App Store Connect app already exists; do not present app-record creation
+  as part of Deploy.
+- [x] Keep enrollment, agreements, initial bundle-ID registration, and first app creation out of the
+  update-release workflow.
+- [x] Ask the build encryption question only when Apple returns no compliance determination.
+- [x] Save the build's `usesNonExemptEncryption` answer through the App Store Connect API.
+- [ ] Create, upload, and attach formal App Encryption Declarations when a non-exempt build requires
+  supporting documentation; Apple may require legal/compliance material that the user must supply.
+- [ ] Load App Review detail validation proactively (contact, demo account, notes, attachments) so
+  missing fields can be corrected before Apple rejects the Review Submission request.
+- [x] Manually release an approved version in Pending Developer Release from Lys with explicit
+  confirmation.
 
 ## Data ownership
 

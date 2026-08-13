@@ -183,19 +183,40 @@ public struct ACPConfigOption: Codable, Equatable, Identifiable, Sendable {
 
 public struct ACPContentBlock: Codable, Equatable, Sendable {
   public var type: String
-  public var text: String
+  public var text: String?
+  public var data: String?
+  public var mimeType: String?
+  public var uri: String?
+
   public init(text: String) {
     type = "text"
     self.text = text
+    data = nil
+    mimeType = nil
+    uri = nil
+  }
+
+  public init(imageData: Data, mimeType: String, uri: String? = nil) {
+    type = "image"
+    text = nil
+    data = imageData.base64EncodedString()
+    self.mimeType = mimeType
+    self.uri = uri
   }
 }
 
 public struct ACPPrompt: Codable, Equatable, Sendable {
   public var sessionId: String
   public var prompt: [ACPContentBlock]
+
   public init(sessionID: String, text: String) {
     sessionId = sessionID
     prompt = [.init(text: text)]
+  }
+
+  public init(sessionID: String, content: [ACPContentBlock]) {
+    sessionId = sessionID
+    prompt = content
   }
 }
 

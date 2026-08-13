@@ -2913,6 +2913,8 @@ private struct DeployWorkspace: View {
   @State private var screenshotRemoval: ScreenshotRemoval?
   @State private var feedbackScreenshot: AppStoreFeedback?
   @State private var showsBuildUpload = false
+  @State private var showsReleaseUpdate = false
+  @State private var confirmsManualRelease = false
 
   var body: some View {
     GeometryReader { geometry in
@@ -2969,6 +2971,10 @@ private struct DeployWorkspace: View {
       AppStoreUploadSheet()
         .environmentObject(model)
     }
+    .sheet(isPresented: $showsReleaseUpdate) {
+      AppStoreReleaseSheet()
+        .environmentObject(model)
+    }
     .alert(
       "App does not match this repository",
       isPresented: Binding(
@@ -2987,6 +2993,16 @@ private struct DeployWorkspace: View {
           Task { await model.removeAppStoreScreenshot(removal.id) }
         },
         secondaryButton: .cancel())
+    }
+    .alert("Release this version now?", isPresented: $confirmsManualRelease) {
+      Button("Cancel", role: .cancel) {}
+      Button("Release to Customers") {
+        Task { await model.releaseApprovedAppStoreVersion() }
+      }
+    } message: {
+      Text(
+        "Version \(model.selectedAppStoreVersion?.versionString ?? "") is approved and will become available to customers."
+      )
     }
     .task(id: deploymentContextKey) {
       guard model.appStoreConnectionPhase == .connected else { return }
@@ -3304,6 +3320,28 @@ private struct DeployWorkspace: View {
           }
           Spacer(minLength: 8)
           if model.selectedAppStoreApp != nil {
+            if model.selectedAppStoreVersion?.state == "PENDING_DEVELOPER_RELEASE" {
+              Button {
+                confirmsManualRelease = true
+              } label: {
+                Label("Release Now", systemImage: "shippingbox.fill")
+              }
+              .buttonStyle(.borderedProminent)
+              .controlSize(.small)
+              .disabled(model.isAppStoreMutationInProgress)
+            }
+            Button {
+              model.appStoreReleasePhase = .idle
+              model.appStoreReleaseError = nil
+              showsReleaseUpdate = true
+            } label: {
+              Label("Release Update", systemImage: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(
+              model.appStoreDeploymentPhase == .loading || model.appStoreUploadPhase.isRunning
+                || model.appStoreReleasePhase.isRunning)
             Button {
               showsBuildUpload = true
               if !model.appStoreUploadPhase.isRunning {
@@ -3319,7 +3357,7 @@ private struct DeployWorkspace: View {
                 Label("Upload Build", systemImage: "arrow.up.circle.fill")
               }
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(model.appStoreDeploymentPhase == .loading)
             Button {
@@ -4174,6 +4212,20 @@ private struct DeployWorkspace: View {
         }
         .font(.system(size: compact ? 8.5 : 9.5))
         .foregroundStyle(Studio.secondary)
+        if !compact {
+          Button {
+            Task { await model.startAgentTask(for: feedback) }
+          } label: {
+            Label(
+              model.isPreparingFeedbackAgentTask ? "Preparing…" : "Fix with Agent",
+              systemImage: "wand.and.sparkles")
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .font(.system(size: 9.5, weight: .medium))
+          .disabled(model.isBusy || model.isPreparingFeedbackAgentTask)
+          .help("Start a task in the selected coding agent with this feedback and its screenshots")
+        }
       }
       Spacer(minLength: 0)
       if let imageURL = feedback.imageURL {
@@ -4420,6 +4472,423 @@ private struct FeedbackScreenshotViewer: View {
   }
 }
 
+private struct AppStoreReleaseSheet: View {
+  @Environment(\.dismiss) private var dismiss
+  @EnvironmentObject var model: AppModel
+  @State private var existingVersionID = ""
+  @State private var versionString = ""
+  @State private var buildID = ""
+  @State private var releaseType: AppStoreReleaseType = .manual
+  @State private var scheduledDate = Date().addingTimeInterval(86_400)
+  @State private var locale = "en-US"
+  @State private var whatsNew = ""
+  @State private var usesNonExemptEncryption: Bool?
+  @State private var betaGroupIDs: Set<String> = []
+  @State private var submitForBetaReview = false
+  @State private var submitForAppReview = false
+  @State private var confirmsAppReview = false
+  @State private var didInitialize = false
+
+  private var editableVersions: [AppStoreVersion] {
+    model.appStoreVersions.filter {
+      ["PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED"]
+        .contains($0.state)
+    }
+  }
+
+  private var validBuilds: [AppStoreBuild] {
+    model.appStoreBuilds.filter { $0.processingState == "VALID" && !$0.expired }
+  }
+
+  private var selectedBuild: AppStoreBuild? {
+    model.appStoreBuilds.first { $0.id == buildID }
+  }
+
+  private var isAppStoreEligibleBuild: Bool {
+    selectedBuild?.audienceType != "INTERNAL_ONLY"
+  }
+
+  private var needsComplianceAnswer: Bool {
+    selectedBuild?.usesNonExemptEncryption == nil
+  }
+
+  private var selectedExternalGroup: Bool {
+    model.appStoreBetaGroups.contains {
+      betaGroupIDs.contains($0.id) && !$0.isInternal && !$0.hasAccessToAllBuilds
+    }
+  }
+
+  private var canContinue: Bool {
+    !versionString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !buildID.isEmpty
+      && !whatsNew.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && (!needsComplianceAnswer || usesNonExemptEncryption != nil)
+      && !model.appStoreReleasePhase.isRunning
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .top, spacing: 14) {
+        Image(systemName: "paperplane.fill")
+          .font(.system(size: 16, weight: .medium))
+          .foregroundStyle(Studio.accent)
+          .frame(width: 38, height: 38)
+          .background(Studio.accentSoft)
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Release an Update")
+            .font(.system(size: 17, weight: .bold))
+          Text("Prepare the version, TestFlight access, and App Review without leaving Lys.")
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        if !model.appStoreReleasePhase.isRunning {
+          Button("Close") { dismiss() }
+            .keyboardShortcut(.cancelAction)
+        }
+      }
+      .padding(20)
+
+      Divider().overlay(Studio.separator)
+
+      if model.appStoreReleasePhase == .complete {
+        releaseResult
+      } else {
+        releaseForm
+      }
+    }
+    .frame(width: 680, height: 760)
+    .background(Studio.surface)
+    .interactiveDismissDisabled(model.appStoreReleasePhase.isRunning)
+    .onAppear(perform: initialize)
+    .onChange(of: buildID) { _, _ in updateNewVersionFromBuild() }
+    .onChange(of: model.appStoreLocalizations) { _, localizations in
+      guard !existingVersionID.isEmpty, whatsNew.isEmpty else { return }
+      whatsNew = preferredWhatsNew(in: localizations) ?? ""
+    }
+    .onChange(of: existingVersionID) { _, newValue in
+      guard let version = editableVersions.first(where: { $0.id == newValue }) else {
+        updateNewVersionFromBuild()
+        return
+      }
+      versionString = version.versionString
+      releaseType = AppStoreReleaseType(rawValue: version.releaseType ?? "") ?? .manual
+      if let date = version.earliestReleaseDate { scheduledDate = date }
+      if let build = model.appStoreBuilds.first(where: { $0.id == version.buildID }) {
+        buildID = build.id
+      }
+      if model.appStoreSelectedVersionID != version.id {
+        model.selectAppStoreVersion(version.id)
+        whatsNew = ""
+      } else {
+        whatsNew = preferredWhatsNew(in: model.appStoreLocalizations) ?? whatsNew
+      }
+    }
+    .alert("Submit this update to App Review?", isPresented: $confirmsAppReview) {
+      Button("Cancel", role: .cancel) {}
+      Button("Submit to Apple") { performRelease() }
+    } message: {
+      Text(
+        "Apple will begin reviewing version \(versionString). If required metadata is missing, Lys will stop and show Apple's exact validation message."
+      )
+    }
+  }
+
+  private var releaseForm: some View {
+    VStack(spacing: 0) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 22) {
+          releaseSection("Version & build") {
+            Picker("Version record", selection: $existingVersionID) {
+              Text("Create a new version").tag("")
+              ForEach(editableVersions) { version in
+                Text("Continue version \(version.versionString)").tag(version.id)
+              }
+            }
+            if existingVersionID.isEmpty {
+              TextField("Version number", text: $versionString)
+                .textFieldStyle(.roundedBorder)
+            } else {
+              releaseValue("Version", versionString)
+            }
+            Picker("Processed build", selection: $buildID) {
+              Text("Choose a build").tag("")
+              ForEach(validBuilds) { build in
+                Text(buildLabel(build)).tag(build.id)
+              }
+            }
+            if validBuilds.isEmpty {
+              Label("Upload a build and wait for Apple processing before releasing.", systemImage: "info.circle")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.secondary)
+            }
+          }
+
+          releaseSection("Release notes") {
+            HStack {
+              Text("Locale")
+              Spacer()
+              TextField("Locale", text: $locale)
+                .frame(width: 110)
+                .textFieldStyle(.roundedBorder)
+            }
+            TextEditor(text: $whatsNew)
+              .font(.system(size: 10.5))
+              .frame(minHeight: 90)
+              .padding(6)
+              .background(Studio.backdrop.opacity(0.7))
+              .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+              .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                  .stroke(Studio.separator, lineWidth: 1)
+              }
+            Text("What's New is saved to the selected app's primary locale.")
+              .font(.system(size: 9))
+              .foregroundStyle(Studio.secondary)
+          }
+
+          releaseSection("Customer release") {
+            Picker("After approval", selection: $releaseType) {
+              Text("Release manually").tag(AppStoreReleaseType.manual)
+              Text("Release automatically").tag(AppStoreReleaseType.automatic)
+              Text("Release on a date").tag(AppStoreReleaseType.scheduled)
+            }
+            if releaseType == .scheduled {
+              DatePicker(
+                "Release date", selection: $scheduledDate, in: Date()...,
+                displayedComponents: [.date, .hourAndMinute])
+            }
+          }
+
+          if needsComplianceAnswer {
+            releaseSection("Export compliance required") {
+              Text("Does this build use non-exempt encryption?")
+                .font(.system(size: 10.5, weight: .semibold))
+              Picker("Encryption", selection: $usesNonExemptEncryption) {
+                Text("Choose an answer").tag(Optional<Bool>.none)
+                Text("No — exempt or no encryption").tag(Optional(false))
+                Text("Yes — non-exempt encryption").tag(Optional(true))
+              }
+              Text(
+                usesNonExemptEncryption == true
+                  ? "Apple may require an approved encryption declaration or supporting document before review."
+                  : "Lys asks only because Apple marked this build's compliance answer as missing."
+              )
+              .font(.system(size: 9))
+              .foregroundStyle(usesNonExemptEncryption == true ? Studio.warning : Studio.secondary)
+            }
+          }
+
+          releaseSection("TestFlight groups") {
+            if model.appStoreBetaGroups.isEmpty {
+              Text("Apple returned no tester groups for this app.")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.secondary)
+            } else {
+              ForEach(model.appStoreBetaGroups) { group in
+                Toggle(isOn: groupBinding(group)) {
+                  VStack(alignment: .leading, spacing: 2) {
+                    Text(group.name).font(.system(size: 10.5, weight: .medium))
+                    Text(
+                      group.hasAccessToAllBuilds
+                        ? "Already receives every build"
+                        : "\(group.isInternal ? "Internal" : "External") · \(group.testerCount ?? group.testers.count) testers"
+                    )
+                    .font(.system(size: 9))
+                    .foregroundStyle(Studio.secondary)
+                  }
+                }
+                .disabled(
+                  group.hasAccessToAllBuilds
+                    || (!isAppStoreEligibleBuild && !group.isInternal))
+              }
+            }
+            Toggle("Submit for TestFlight beta review", isOn: $submitForBetaReview)
+              .disabled(!selectedExternalGroup)
+            Text("External groups require Apple's beta review; internal groups do not.")
+              .font(.system(size: 9))
+              .foregroundStyle(Studio.secondary)
+          }
+
+          releaseSection("App Review") {
+            Toggle("Submit this version to App Review now", isOn: $submitForAppReview)
+              .disabled(!isAppStoreEligibleBuild)
+            if !isAppStoreEligibleBuild {
+              Text("This build was uploaded as internal-only and can never be submitted to the App Store.")
+                .font(.system(size: 9.5))
+                .foregroundStyle(Studio.warning)
+            }
+            HStack(spacing: 6) {
+              Image(
+                systemName: existingVersionID.isEmpty
+                  ? "info.circle" : (model.appStoreScreenshotSets.isEmpty
+                    ? "exclamationmark.triangle" : "checkmark.circle"))
+                .foregroundStyle(
+                  existingVersionID.isEmpty ? Studio.accent
+                    : (model.appStoreScreenshotSets.isEmpty ? Studio.warning : Studio.success))
+              Text(
+                existingVersionID.isEmpty
+                  ? "Lys will verify the new version after creation. Edit carried-forward assets in the Screenshots tab."
+                  : (model.appStoreScreenshotSets.isEmpty
+                    ? "No screenshots are loaded for this version. Add them in the Screenshots tab before review."
+                    : "\(model.appStoreScreenshotSets.reduce(0) { $0 + $1.screenshots.count }) screenshots are loaded.")
+              )
+            }
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.secondary)
+          }
+        }
+        .padding(20)
+        .disabled(model.appStoreReleasePhase.isRunning)
+      }
+
+      Divider().overlay(Studio.separator)
+      VStack(alignment: .leading, spacing: 10) {
+        if let error = model.appStoreReleaseError {
+          Label(error, systemImage: "exclamationmark.triangle.fill")
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.warning)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+        } else if model.appStoreReleasePhase.isRunning {
+          HStack(spacing: 8) {
+            ProgressView().controlSize(.mini)
+            Text(model.appStoreReleaseStatus)
+          }
+          .font(.system(size: 9.5, weight: .medium))
+        }
+        HStack {
+          Text("Each remote change is saved step by step; a failure never rolls back completed Apple changes.")
+            .font(.system(size: 9))
+            .foregroundStyle(Studio.secondary)
+          Spacer()
+          Button("Cancel") { dismiss() }
+            .disabled(model.appStoreReleasePhase.isRunning)
+          Button(submitForAppReview ? "Review & Submit" : "Prepare Update") {
+            if submitForAppReview { confirmsAppReview = true } else { performRelease() }
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(!canContinue)
+        }
+      }
+      .padding(16)
+    }
+  }
+
+  private var releaseResult: some View {
+    VStack(spacing: 16) {
+      Image(systemName: "checkmark.circle.fill")
+        .font(.system(size: 34))
+        .foregroundStyle(Studio.success)
+      Text(submitForAppReview ? "Update submitted" : "Update prepared")
+        .font(.system(size: 16, weight: .bold))
+      Text(model.appStoreReleaseStatus)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+      Button("Done") { dismiss() }
+        .buttonStyle(.borderedProminent)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .padding(32)
+  }
+
+  private func releaseSection<Content: View>(
+    _ title: String, @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text(title).font(.system(size: 11.5, weight: .semibold))
+      content()
+    }
+    .padding(16)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Studio.backdrop.opacity(0.55))
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+  }
+
+  private func releaseValue(_ label: String, _ value: String) -> some View {
+    HStack {
+      Text(label).foregroundStyle(Studio.secondary)
+      Spacer()
+      Text(value).fontWeight(.medium)
+    }
+    .font(.system(size: 10))
+  }
+
+  private func groupBinding(_ group: AppStoreBetaGroup) -> Binding<Bool> {
+    Binding(
+      get: { group.hasAccessToAllBuilds || betaGroupIDs.contains(group.id) },
+      set: { selected in
+        if selected { betaGroupIDs.insert(group.id) } else { betaGroupIDs.remove(group.id) }
+        if !selectedExternalGroup { submitForBetaReview = false }
+      })
+  }
+
+  private func initialize() {
+    guard !didInitialize else { return }
+    didInitialize = true
+    locale = model.selectedAppStoreApp?.primaryLocale ?? "en-US"
+    if let selected = editableVersions.first(where: { $0.id == model.appStoreSelectedVersionID }) {
+      existingVersionID = selected.id
+      versionString = selected.versionString
+      releaseType = AppStoreReleaseType(rawValue: selected.releaseType ?? "") ?? .manual
+      if let date = selected.earliestReleaseDate { scheduledDate = date }
+      if let selectedBuildID = selected.buildID { buildID = selectedBuildID }
+      whatsNew = preferredWhatsNew(in: model.appStoreLocalizations) ?? ""
+    }
+    if let build = validBuilds.first {
+      if buildID.isEmpty { buildID = build.id }
+      if versionString.isEmpty { versionString = build.marketingVersion ?? "" }
+    }
+    usesNonExemptEncryption = selectedBuild?.usesNonExemptEncryption
+    betaGroupIDs = Set(model.appStoreBetaGroups.filter(\.hasAccessToAllBuilds).map(\.id))
+  }
+
+  private func updateNewVersionFromBuild() {
+    guard let build = selectedBuild else { return }
+    if existingVersionID.isEmpty, let marketingVersion = build.marketingVersion {
+      versionString = marketingVersion
+    }
+    usesNonExemptEncryption = build.usesNonExemptEncryption
+    if !isAppStoreEligibleBuild {
+      let externalIDs = Set(model.appStoreBetaGroups.filter { !$0.isInternal }.map(\.id))
+      betaGroupIDs.subtract(externalIDs)
+      submitForBetaReview = false
+      submitForAppReview = false
+    }
+  }
+
+  private func buildLabel(_ build: AppStoreBuild) -> String {
+    if let marketingVersion = build.marketingVersion {
+      return "Version \(marketingVersion) · build \(build.version)"
+    }
+    return "Build \(build.version)"
+  }
+
+  private func preferredWhatsNew(
+    in localizations: [AppStoreVersionLocalization]
+  ) -> String? {
+    localizations.first {
+      $0.locale.caseInsensitiveCompare(locale) == .orderedSame
+    }?.whatsNew?.nonempty ?? localizations.first?.whatsNew?.nonempty
+  }
+
+  private func performRelease() {
+    let configuration = AppStoreReleaseConfiguration(
+      existingVersionID: existingVersionID.nonempty, versionString: versionString,
+      releaseType: releaseType,
+      earliestReleaseDate: releaseType == .scheduled ? scheduledDate : nil,
+      locale: locale, whatsNew: whatsNew, buildID: buildID,
+      usesNonExemptEncryption: usesNonExemptEncryption,
+      betaGroupIDs: Set(betaGroupIDs.filter { groupID in
+        model.appStoreBetaGroups.first(where: { $0.id == groupID })?.hasAccessToAllBuilds != true
+      }),
+      submitForBetaReview: submitForBetaReview, submitForAppReview: submitForAppReview)
+    Task { await model.releaseAppStoreUpdate(configuration) }
+  }
+}
+
 private struct AppStoreUploadSheet: View {
   @Environment(\.dismiss) private var dismiss
   @EnvironmentObject var model: AppModel
@@ -4520,6 +4989,42 @@ private struct AppStoreUploadSheet: View {
               }
             }
 
+            let unresolvedIssues = preflight.unresolvedIssues(
+              allowProvisioningUpdates: model.appStoreUploadOptions.allowProvisioningUpdates)
+            if !unresolvedIssues.isEmpty {
+              VStack(alignment: .leading, spacing: 12) {
+                Label("Signing setup required", systemImage: "exclamationmark.shield.fill")
+                  .font(.system(size: 11, weight: .semibold))
+                  .foregroundStyle(.red)
+                ForEach(unresolvedIssues, id: \.self) { issue in
+                  Text(issue)
+                    .font(.system(size: 9.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 10) {
+                  Button {
+                    NSWorkspace.shared.open(preflight.target.container)
+                  } label: {
+                    Label("Open Project in Xcode", systemImage: "hammer")
+                  }
+                  Button {
+                    Task { await model.prepareAppStoreUpload() }
+                  } label: {
+                    Label("Run Preflight Again", systemImage: "arrow.clockwise")
+                  }
+                }
+                .controlSize(.small)
+              }
+              .padding(14)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(Color.red.opacity(0.055))
+              .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+              .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                  .stroke(Color.red.opacity(0.16), lineWidth: 1)
+              }
+            }
+
             VStack(alignment: .leading, spacing: 12) {
               Toggle(
                 "Allow Xcode to update signing and provisioning",
@@ -4561,8 +5066,8 @@ private struct AppStoreUploadSheet: View {
           Button("Archive & Upload") { model.startAppStoreUpload() }
             .buttonStyle(.borderedProminent)
             .disabled(
-              preflight.distributionIdentities.isEmpty
-                && !model.appStoreUploadOptions.allowProvisioningUpdates)
+              !preflight.canArchive(
+                allowProvisioningUpdates: model.appStoreUploadOptions.allowProvisioningUpdates))
         }
         .padding(16)
       }
@@ -4668,6 +5173,12 @@ private struct AppStoreUploadSheet: View {
         .frame(maxWidth: 430)
       HStack {
         Button("Close") { dismiss() }
+        Button {
+          model.isEvidenceWorkspaceOpen = true
+          model.evidenceWorkspaceTab = .terminal
+        } label: {
+          Label("View Build Log", systemImage: "terminal")
+        }
         Button(model.appStoreUploadPreflight == nil ? "Run Preflight" : "Try Again") {
           if model.appStoreUploadPreflight == nil {
             Task { await model.prepareAppStoreUpload() }

@@ -172,6 +172,14 @@ import Testing
         """
         {"data":[{"type":"appStoreVersionLocalizations","id":"localization-1","attributes":{"locale":"en-US","whatsNew":"Faster launch.","promotionalText":"Built for teams."}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/appStoreVersions/version-1/appStoreVersionLocalizations"}}
         """)
+    case "/v1/appStoreVersionLocalizations/localization-1":
+      #expect(request.httpMethod == "PATCH")
+      #expect(String(data: requestBodyData(request), encoding: .utf8)?.contains("A focused update") == true)
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"appStoreVersionLocalizations","id":"localization-1","attributes":{"locale":"en-US","whatsNew":"A focused update"}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/appStoreVersionLocalizations/localization-1"}}
+        """)
     case "/v1/appStoreVersionLocalizations/localization-1/appScreenshotSets":
       return fixtureResponse(
         request,
@@ -218,6 +226,77 @@ import Testing
       }
       #expect(request.httpMethod == "DELETE")
       return fixtureResponse(request, "", status: 204)
+    case "/v1/appStoreVersions":
+      #expect(request.httpMethod == "POST")
+      let body = String(data: requestBodyData(request), encoding: .utf8) ?? ""
+      #expect(body.contains("2.5"))
+      #expect(body.contains("MANUAL"))
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"appStoreVersions","id":"version-new","attributes":{"platform":"IOS","versionString":"2.5","appVersionState":"PREPARE_FOR_SUBMISSION","releaseType":"MANUAL"}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/appStoreVersions/version-new"}}
+        """, status: 201)
+    case "/v1/appStoreVersions/version-new":
+      #expect(request.httpMethod == "PATCH")
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"appStoreVersions","id":"version-new","attributes":{"platform":"IOS","versionString":"2.5","appVersionState":"PREPARE_FOR_SUBMISSION","releaseType":"AFTER_APPROVAL"}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/appStoreVersions/version-new"}}
+        """)
+    case "/v1/appStoreVersions/version-new/relationships/build":
+      #expect(request.httpMethod == "PATCH")
+      return fixtureResponse(request, "", status: 204)
+    case "/v1/builds/build-1":
+      #expect(request.httpMethod == "PATCH")
+      #expect(String(data: requestBodyData(request), encoding: .utf8)?.contains("usesNonExemptEncryption") == true)
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"builds","id":"build-1","attributes":{"usesNonExemptEncryption":false}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/builds/build-1"}}
+        """)
+    case "/v1/betaGroups/group-1/relationships/builds":
+      #expect(request.httpMethod == "POST")
+      return fixtureResponse(request, "", status: 204)
+    case "/v1/betaAppReviewSubmissions":
+      #expect(request.httpMethod == "POST")
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"betaAppReviewSubmissions","id":"beta-review-1"},"links":{"self":"https://api.appstoreconnect.apple.com/v1/betaAppReviewSubmissions/beta-review-1"}}
+        """,
+        status: 201)
+    case "/v1/reviewSubmissions":
+      #expect(request.httpMethod == "POST")
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"reviewSubmissions","id":"review-1"},"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/review-1"}}
+        """,
+        status: 201)
+    case "/v1/reviewSubmissionItems":
+      #expect(request.httpMethod == "POST")
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"reviewSubmissionItems","id":"item-1"},"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissionItems/item-1"}}
+        """,
+        status: 201)
+    case "/v1/reviewSubmissions/review-1":
+      #expect(request.httpMethod == "PATCH")
+      #expect(String(data: requestBodyData(request), encoding: .utf8)?.contains("submitted") == true)
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"reviewSubmissions","id":"review-1","attributes":{"submittedDate":"2026-08-12T12:00:00Z","state":"WAITING_FOR_REVIEW"}},"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/review-1"}}
+        """)
+    case "/v1/appStoreVersionReleaseRequests":
+      #expect(request.httpMethod == "POST")
+      return fixtureResponse(
+        request,
+        """
+        {"data":{"type":"appStoreVersionReleaseRequests","id":"release-1"},"links":{"self":"https://api.appstoreconnect.apple.com/v1/appStoreVersionReleaseRequests/release-1"}}
+        """,
+        status: 201)
     default:
       Issue.record("Unexpected App Store fixture request: \(path)")
       return fixtureResponse(request, "{\"data\":[]}", status: 404)
@@ -244,6 +323,18 @@ import Testing
   let uploadedScreenshot = try await client.uploadScreenshot(
     data: Data("abc".utf8), fileName: "new.png", screenshotSetID: "set-1")
   try await client.deleteScreenshot(id: uploadedScreenshot.id)
+  let createdVersion = try await client.createAppStoreVersion(
+    appID: "app-1", versionString: "2.5", releaseType: .manual)
+  _ = try await client.updateAppStoreVersion(
+    versionID: createdVersion.id, releaseType: .automatic)
+  try await client.setVersionWhatsNew(
+    versionID: "version-1", locale: "en-US", whatsNew: "A focused update")
+  try await client.attachBuild("build-1", toVersion: createdVersion.id)
+  try await client.setBuildUsesNonExemptEncryption(false, buildID: "build-1")
+  try await client.assignBuild("build-1", toBetaGroup: "group-1")
+  try await client.submitBuildForBetaReview("build-1")
+  try await client.submitVersionForAppReview(appID: "app-1", versionID: createdVersion.id)
+  try await client.releaseApprovedVersion(createdVersion.id)
 
   #expect(versions.first?.versionString == "2.4")
   #expect(versions.first?.buildID == "build-1")
@@ -265,6 +356,7 @@ import Testing
   #expect(screenshots.first?.screenshots.first?.downloadURL?.absoluteString == "https://example.invalid/1290x2796.png")
   #expect(addedTester.email == "ada+new@example.com")
   #expect(uploadedScreenshot.deliveryState == "UPLOAD_COMPLETE")
+  #expect(createdVersion.versionString == "2.5")
 }
 
 private func jsonObject(_ encoded: String) throws -> [String: Any] {
