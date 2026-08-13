@@ -37,6 +37,12 @@ Users open existing Xcode projects or workspaces, select an application scheme a
 - `xcodebuild`, `xcresulttool`, `simctl`, Simulator, XCTest/WebDriverAgent, and runtime logs remain Apple-toolchain-backed.
 - TestFlight, real devices, LLDB UI, Instruments, Interface Builder, project generation, exhaustive crawling, and team collaboration are deferred.
 - The app is not a containment boundary against a malicious local CLI.
+- App Store deployment assumes the app record already exists and the connected team can access it.
+- The recurring release path is in scope: create an update version, upload and attach a build,
+  maintain release notes and screenshots, assign TestFlight groups, resolve build export compliance,
+  submit for beta or App Review, and choose the customer release policy.
+- Apple Developer Program enrollment, agreements, certificates/account onboarding, bundle-ID
+  registration, and creating the first App Store Connect app record are out of scope.
 
 ## Brand Commitments
 

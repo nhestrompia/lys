@@ -91,6 +91,35 @@ public actor SQLiteStore {
       payload: snapshot)
   }
 
+  public func saveAppStoreConnection(_ connection: AppStoreConnection) throws {
+    try write(
+      table: "app_store_connections", id: connection.id.uuidString, taskID: nil,
+      kind: connection.keyKind.rawValue, date: connection.validatedAt, payload: connection)
+  }
+
+  public func appStoreConnections() throws -> [AppStoreConnection] {
+    let statement = try prepare(
+      "SELECT payload FROM app_store_connections ORDER BY created_at DESC, id")
+    defer { sqlite3_finalize(statement) }
+    var values: [AppStoreConnection] = []
+    while sqlite3_step(statement) == SQLITE_ROW {
+      if let text = sqlite3_column_text(statement, 0) {
+        values.append(
+          try decoder.decode(AppStoreConnection.self, from: Data(String(cString: text).utf8)))
+      }
+    }
+    return values
+  }
+
+  public func deleteAppStoreConnection(id: UUID) throws {
+    let statement = try prepare("DELETE FROM app_store_connections WHERE id = ?")
+    defer { sqlite3_finalize(statement) }
+    try bind(id.uuidString, at: 1, statement: statement)
+    guard sqlite3_step(statement) == SQLITE_DONE else {
+      throw SQLiteStoreError.execute(errorMessage)
+    }
+  }
+
   public func appGraph(key: String) throws -> AppGraphSnapshot? {
     let statement = try prepare("SELECT payload FROM app_graph WHERE id = ? LIMIT 1")
     defer { sqlite3_finalize(statement) }
@@ -137,7 +166,8 @@ public actor SQLiteStore {
     CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL, payload TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS evidence_task_time ON evidence(task_id, created_at);
     CREATE TABLE IF NOT EXISTS app_graph (id TEXT PRIMARY KEY, task_id TEXT, kind TEXT NOT NULL, created_at REAL NOT NULL, payload TEXT NOT NULL);
-    PRAGMA user_version=1;
+    CREATE TABLE IF NOT EXISTS app_store_connections (id TEXT PRIMARY KEY, task_id TEXT, kind TEXT NOT NULL, created_at REAL NOT NULL, payload TEXT NOT NULL);
+    PRAGMA user_version=2;
     """
 
   private func write<T: Encodable>(

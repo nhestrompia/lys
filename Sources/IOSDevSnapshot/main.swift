@@ -28,7 +28,7 @@ enum IOSDevSnapshotMain {
       model.loadDesignBuildPreview()
     } else if arguments.contains("--failure") {
       model.loadDesignFailurePreview()
-    } else if !arguments.contains("--empty") {
+    } else if !arguments.contains("--empty") && !arguments.contains("--app-store-connection") {
       model.loadDesignPreview()
     }
 
@@ -50,10 +50,23 @@ enum IOSDevSnapshotMain {
     } else if arguments.contains("--evidence") {
       model.showSnapshotWorkspaceTab("evidence")
     }
-    let content = WorkbenchView().environmentObject(model).frame(
-      width: size.width, height: size.height
-    )
-    .preferredColorScheme(.light)
+    let content: AnyView
+    if arguments.contains("--app-store-connection") {
+      content = AnyView(
+        AppStoreConnectionSnapshotView()
+          .environmentObject(model)
+          .frame(width: size.width, height: size.height)
+          .background(Color(nsColor: .windowBackgroundColor))
+          .preferredColorScheme(.light)
+      )
+    } else {
+      content = AnyView(
+        WorkbenchView().environmentObject(model).frame(
+          width: size.width, height: size.height
+        )
+        .preferredColorScheme(.light)
+      )
+    }
     let hosting = NSHostingView(rootView: content)
     hosting.frame = NSRect(origin: .zero, size: size)
     hosting.layoutSubtreeIfNeeded()

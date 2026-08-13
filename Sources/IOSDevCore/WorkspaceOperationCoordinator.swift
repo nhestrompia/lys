@@ -6,6 +6,7 @@ public enum WorkspaceOperationKind: String, Codable, Sendable {
   case cocoaPodsInstall
   case build
   case test
+  case archive
   case projectDiscovery
   case targetDiscovery
   case testDiscovery

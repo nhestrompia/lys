@@ -189,6 +189,158 @@ public enum ToolchainDiscovery {
     }
   }
 
+  public static func distributionTarget(
+    container: URL, scheme: String, xcodebuild: URL, developerDirectory: URL,
+    derivedData: URL
+  ) async throws -> LocalDistributionTarget {
+    let flag = container.pathExtension == "xcworkspace" ? "-workspace" : "-project"
+    let outcome = try await ProcessRunner().run(
+      executable: xcodebuild,
+      arguments: [
+        flag, container.path, "-scheme", scheme, "-configuration", "Release",
+        "-destination", "generic/platform=iOS", "-derivedDataPath", derivedData.path,
+        "-showBuildSettings", "-json",
+      ], workingDirectory: container.deletingLastPathComponent(),
+      environment: ["DEVELOPER_DIR": developerDirectory.path])
+    guard outcome.succeeded else {
+      throw AppStoreDistributionError.commandFailed(
+        stage: "Release build-settings discovery",
+        detail: outcome.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    struct Entry: Decodable {
+      var target: String
+      var buildSettings: [String: JSONValue]
+    }
+    let entries = try JSONDecoder().decode([Entry].self, from: Data(outcome.stdout.utf8))
+    guard let entry = entries.first(where: {
+      $0.buildSettings["WRAPPER_EXTENSION"]?.stringValue == "app"
+        && $0.buildSettings["PRODUCT_BUNDLE_IDENTIFIER"]?.stringValue != nil
+    }) else {
+      throw AppStoreDistributionError.missingBuildSetting("iOS application target")
+    }
+    func required(_ key: String) throws -> String {
+      guard let value = entry.buildSettings[key]?.stringValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty
+      else { throw AppStoreDistributionError.missingBuildSetting(key) }
+      return value
+    }
+    func optional(_ key: String) -> String? {
+      let value = entry.buildSettings[key]?.stringValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      return value.flatMap { $0.isEmpty ? nil : $0 }
+    }
+    let stringBuildSettings = entry.buildSettings.compactMapValues(\.stringValue)
+    let bundleVersions = effectiveBundleVersions(
+      buildSettings: stringBuildSettings, container: container)
+    guard let marketingVersion = bundleVersions.marketingVersion else {
+      throw AppStoreDistributionError.missingBuildSetting(
+        "CFBundleShortVersionString or MARKETING_VERSION")
+    }
+    guard let buildNumber = bundleVersions.buildNumber else {
+      throw AppStoreDistributionError.missingBuildSetting(
+        "CFBundleVersion or CURRENT_PROJECT_VERSION")
+    }
+    return try .init(
+      container: container, scheme: scheme, target: entry.target,
+      bundleID: required("PRODUCT_BUNDLE_IDENTIFIER"),
+      productName: required("PRODUCT_NAME"), marketingVersion: marketingVersion,
+      buildNumber: buildNumber,
+      developmentTeam: optional("DEVELOPMENT_TEAM"), codeSignStyle: optional("CODE_SIGN_STYLE"),
+      codeSignIdentity: optional("CODE_SIGN_IDENTITY"),
+      provisioningProfileSpecifier: optional("PROVISIONING_PROFILE_SPECIFIER"),
+      entitlementsPath: optional("CODE_SIGN_ENTITLEMENTS"))
+  }
+
+  static func effectiveBundleVersions(
+    buildSettings: [String: String], infoPlist: [String: Any]?
+  ) -> (marketingVersion: String?, buildNumber: String?) {
+    (
+      effectiveBundleValue(
+        plistKey: "CFBundleShortVersionString", fallbackBuildSetting: "MARKETING_VERSION",
+        buildSettings: buildSettings, infoPlist: infoPlist),
+      effectiveBundleValue(
+        plistKey: "CFBundleVersion", fallbackBuildSetting: "CURRENT_PROJECT_VERSION",
+        buildSettings: buildSettings, infoPlist: infoPlist)
+    )
+  }
+
+  static func effectiveBundleVersions(
+    buildSettings: [String: String], container: URL
+  ) -> (marketingVersion: String?, buildNumber: String?) {
+    effectiveBundleVersions(
+      buildSettings: buildSettings,
+      infoPlist: resolvedInfoPlist(buildSettings: buildSettings, container: container))
+  }
+
+  private static func effectiveBundleValue(
+    plistKey: String, fallbackBuildSetting: String, buildSettings: [String: String],
+    infoPlist: [String: Any]?
+  ) -> String? {
+    if let value = infoPlist?[plistKey] as? String,
+      let resolved = normalizedBuildValue(expand(value, with: buildSettings)),
+      !resolved.contains("$("), !resolved.contains("${")
+    {
+      return resolved
+    }
+    return normalizedBuildValue(buildSettings[fallbackBuildSetting])
+  }
+
+  private static func resolvedInfoPlist(
+    buildSettings: [String: String], container: URL
+  ) -> [String: Any]? {
+    guard let rawPath = normalizedBuildValue(buildSettings["INFOPLIST_FILE"]) else {
+      return nil
+    }
+    let path = expand(rawPath, with: buildSettings)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+    let baseURL = ["SRCROOT", "PROJECT_DIR"]
+      .compactMap { normalizedBuildValue(buildSettings[$0]) }
+      .map { URL(fileURLWithPath: expand($0, with: buildSettings), isDirectory: true) }
+      .first ?? container.deletingLastPathComponent()
+    let plistURL = path.hasPrefix("/")
+      ? URL(fileURLWithPath: path)
+      : baseURL.appending(path: path)
+    guard let data = try? Data(contentsOf: plistURL.standardizedFileURL),
+      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
+        as? [String: Any]
+    else {
+      return nil
+    }
+    return plist
+  }
+
+  private static func expand(_ rawValue: String, with buildSettings: [String: String]) -> String {
+    var value = rawValue
+    for _ in 0..<4 {
+      let previous = value
+      for (key, replacement) in buildSettings {
+        value = value.replacingOccurrences(of: "$(\(key))", with: replacement)
+        value = value.replacingOccurrences(of: "${\(key)}", with: replacement)
+      }
+      if value == previous { break }
+    }
+    return value
+  }
+
+  private static func normalizedBuildValue(_ value: String?) -> String? {
+    let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return normalized.flatMap { $0.isEmpty ? nil : $0 }
+  }
+
+  public static func signingIdentities(
+    security: URL = URL(fileURLWithPath: "/usr/bin/security")
+  ) async throws -> [DistributionSigningIdentity] {
+    let outcome = try await ProcessRunner().run(
+      executable: security, arguments: ["find-identity", "-v", "-p", "codesigning"],
+      maximumOutputBytes: 1_000_000)
+    guard outcome.succeeded else {
+      throw AppStoreDistributionError.commandFailed(
+        stage: "Signing identity discovery",
+        detail: outcome.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    return AppStoreDistributionSupport.parseSigningIdentities(outcome.stdout)
+  }
+
   public static func appTargets(
     container: URL, scheme: String, configuration: String, destination: String,
     xcodebuild: URL, developerDirectory: URL, derivedData: URL

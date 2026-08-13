@@ -1,6 +1,6 @@
 # Public Alpha Implementation Status
 
-Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Partial** has production code but lacks part of the contract; **Gated** is deliberately unavailable until its compatibility/security prerequisite passes; **Deferred** belongs to the PRD's later scope.
+Updated 2026-08-12. Status meanings: **Implemented** is exercised locally; **Partial** has production code but lacks part of the contract; **Gated** is deliberately unavailable until its compatibility/security prerequisite passes; **Deferred** belongs to the PRD's later scope.
 
 ## Feasibility gates
 
@@ -23,6 +23,7 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 | SQLite metadata and artifact files | **Partial** | Actor-isolated schema/store is tested and App Graph snapshots are loaded and saved by runtime session fingerprint. Connect repositories, tasks, timeline events, and all evidence to application lifecycle. |
 | Diagnostics export | **Partial** | Secret/path redaction is tested. Add explicit export packaging, artifact selection, size bounds, and user preview. |
 | Telemetry | **Implemented** | No third-party telemetry or analytics dependency is present. |
+| App Store Connect / TestFlight | **Partial** | Team-key import, one-read-per-process Keychain sessions, JWT authentication, Release target discovery, switchable exact app matching, and live App Store versions, localizations, screenshots, processed builds, beta groups/tester counts, and screenshot/crash feedback are implemented with section-level permission errors and no sample records. Add full signing preflight, build-upload diagnostics, read-through caching, archive/upload, processing recovery, and tester distribution. Track the full sequence in `APP_STORE_DEPLOYMENT.md`. |
 
 ## Runtime and process isolation
 
@@ -82,4 +83,4 @@ Updated 2026-08-11. Status meanings: **Implemented** is exercised locally; **Par
 
 ## Explicitly deferred
 
-TestFlight/App Store Connect, real devices, LLDB UI, Instruments, previews, Interface Builder, Xcode project editing, project generation, SourceKit-LSP completion/refactoring, automatic test generation, exhaustive crawling, image-diff/CV scoring, and team collaboration remain out of the public alpha.
+App Store Connect archive/upload and TestFlight mutations remain gated while the connection and read-only data foundation is implemented. Real devices, LLDB UI, Instruments, previews, Interface Builder, Xcode project editing, project generation, SourceKit-LSP completion/refactoring, automatic test generation, exhaustive crawling, image-diff/CV scoring, and team collaboration remain out of the public alpha.
