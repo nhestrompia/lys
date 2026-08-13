@@ -190,6 +190,12 @@ The rail switches between Develop, Code, Deploy, and Settings workspaces. Develo
 
 **The Decision-Boundary Rule.** Changed-file count, discard, review, and apply stay in the persistent bottom bar so the transition from work to acceptance is always visible.
 
+### Apps/Docs Web Surface
+
+`Apps/Docs` uses the approved composition B: a vertical proof ledger whose connected trail carries readers through installation, instrumentation, export, and verified execution. It extends the luminous studio into a light-only web surface with a cool-gray canvas, opaque white working surfaces, native blue reserved for agency, compact system typography, a narrow prose measure, and primary touch targets of at least 44px. The proof trail remains connected and readable responsively as secondary navigation condenses.
+
+Agent-facing access is stable at `/agent-skill`, `/llms.txt`, `/llms-full.txt`, and each page's `.mdx` route. SDK documentation must reflect repository truth; never invent release URLs or package behavior that the repository does not establish.
+
 ## Elevation & Depth
 
 The system is softly layered, not flat and not theatrical. White panels separate from the cool canvas with low-opacity ambient shadows; hairline dividers carry most internal structure. Toolbar controls use the shallowest lift, primary panels use a broad quiet lift, floating palettes use a slightly stronger compact shadow, and the phone hardware alone receives pronounced depth. There are no gradients, translucent glass layers, or shadow stacks.

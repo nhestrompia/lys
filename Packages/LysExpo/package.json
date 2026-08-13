@@ -2,12 +2,19 @@
   "name": "@lys/testkit",
   "version": "0.3.0",
   "description": "Small semantic test contract for Lys and Expo/React Native apps",
-  "license": "Apache-2.0",
+  "license": "MIT",
+  "homepage": "https://github.com/nhestrompia/lys#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nhestrompia/lys.git",
+    "directory": "Packages/LysExpo"
+  },
+  "bugs": "https://github.com/nhestrompia/lys/issues",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
     },
@@ -19,6 +26,9 @@
     "./app.plugin": "./app.plugin.js"
   },
   "files": ["dist", "src", "ios", "app.plugin.js", "expo-module.config.json"],
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "expo": ">=52",
     "expo-modules-core": ">=2",
@@ -32,6 +42,7 @@
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "test": "node scripts/test.mjs",
-    "check": "npm run build && node scripts/check.mjs && node scripts/test.mjs"
+    "check": "npm run build && node scripts/check.mjs && node scripts/test.mjs",
+    "prepack": "npm run check"
   }
 }

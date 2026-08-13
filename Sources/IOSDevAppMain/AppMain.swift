@@ -17,6 +17,7 @@ struct IOSDevWorkbenchApp: App {
     // SwiftPM launches do not have an app bundle to establish this automatically. A regular
     // activation policy gives Lys a Dock presence and lets AppKit text views receive input.
     NSApplication.shared.setActivationPolicy(.regular)
+    LysBrand.installApplicationIcon()
     DispatchQueue.main.async {
       NSApplication.shared.activate(ignoringOtherApps: true)
     }

@@ -1,0 +1,39 @@
+---
+title: The semantic contract
+description: Understand the small, typed graph that connects real application controls to deterministic Lys flows.
+---
+
+The canonical file is `.lys/contract.json`, schema version 2. Generate it through an SDK; do not
+hand-edit the JSON as a second source of truth.
+
+## Model
+
+| Field | Meaning |
+| --- | --- |
+| `app.entryRoutes` | Real bootstrap or restoration screens where testing can begin. |
+| `routes` | Stable, mutually exclusive observable screens. |
+| `capabilities` | Real controls with stable selectors and optional `route` → `resultsIn` transitions. |
+| `contexts` | Deterministic preparation using `uiFlow` or `authenticatedSession`. |
+| `flows` | Bounded steps, supported entry routes, and terminal acceptance predicates. |
+
+## Reachability is part of correctness
+
+Every guaranteed entry route must reach a flow's start through safe declared actions. Export
+validates that graph and symbolically executes flow steps, so a wrong-screen action fails before an
+agent run.
+
+Navigation to `flow.startRoute` belongs to the host. Begin the flow body at its declared start route;
+do not duplicate entry navigation inside the flow.
+
+## Completion is evidence-backed
+
+A trusted green result requires the declared flow to finish, every current-generation acceptance
+criterion to pass, no unacknowledged crash, and the required launch and screenshot evidence.
+
+Exploratory runs without a matching contract remain exploratory. A model ending its response is not
+a test result.
+
+## Secrets
+
+Contracts hold logical secret IDs, never secret values. Use `authenticatedSession` when identity is
+setup for another journey. Use a separate `uiFlow` when the login interface itself is under test.

@@ -1,9 +1,13 @@
 .build/
 .swiftpm/
 node_modules/
+.next/
+.source/
+*.tsbuildinfo
 .DS_Store
 *.xcresult
 DerivedData/
+dist/
 .lys/cache/
 .lys/artifacts/
 .lys-baseline.json

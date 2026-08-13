@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-expo-sdk:
+    name: Verify npm release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run release:check -- "${GITHUB_REF_NAME}"
+      - run: npm run build:expo-sdk
+      - run: npm run check:expo-sdk
+      - run: npm run check:contract
+      - run: npm pack --workspace @lys/testkit --dry-run
+
+  verify-swift-sdk:
+    name: Verify Swift release
+    runs-on: macos-26
+    env:
+      CLANG_MODULE_CACHE_PATH: ${{ runner.temp }}/lys-clang-module-cache
+      SWIFTPM_MODULECACHE_OVERRIDE: ${{ runner.temp }}/lys-swiftpm-module-cache
+    steps:
+      - uses: actions/checkout@v6
+      - run: swift test --package-path Packages/LysSwift --disable-sandbox
+      - name: Verify a real standalone package consumer
+        run: |
+          swift run --package-path IntegrationTests/LysSwiftConsumer --disable-sandbox \
+            LysSwiftConsumer "$RUNNER_TEMP/lys-release-consumer-contract.json"
+
+  publish-swift-sdk:
+    name: Publish Lys Swift SDK tag
+    needs:
+      - verify-expo-sdk
+      - verify-swift-sdk
+    runs-on: ubuntu-latest
+    environment: swift-release
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.SWIFT_SDK_RELEASE_TOKEN }}
+      SWIFT_SDK_REPOSITORY: ${{ vars.SWIFT_SDK_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Configure GitHub authentication
+        run: gh auth setup-git
+      - name: Mirror and tag the standalone Swift package
+        run: ./Scripts/publish-swift-sdk.sh "$GITHUB_REF_NAME"
+
+  publish-npm:
+    name: Publish @lys/testkit
+    needs:
+      - verify-expo-sdk
+      - verify-swift-sdk
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build:expo-sdk
+      - name: Publish with npm trusted publishing
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          if npm view "@lys/testkit@$version" version >/dev/null 2>&1; then
+            echo "@lys/testkit@$version is already published"
+          else
+            npm publish --workspace @lys/testkit --access public
+          fi
+
+  release-macos:
+    name: Sign, notarize, and release DMG
+    needs:
+      - verify-expo-sdk
+      - verify-swift-sdk
+    runs-on: macos-26
+    environment: apple-release
+    permissions:
+      contents: write
+    env:
+      APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+      APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+      APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APPLE_API_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_BASE64 }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Import Developer ID signing identity
+        run: ./Scripts/import-apple-certificate.sh
+      - name: Build and sign the app and DMG
+        env:
+          LYS_VERSION: ${{ github.ref_name }}
+          LYS_BUILD_NUMBER: ${{ github.run_number }}
+          LYS_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          LYS_VERSION=${LYS_VERSION#v}
+          export LYS_VERSION
+          ./Scripts/package-macos.sh
+      - name: Notarize and staple the DMG
+        run: |
+          : "${APPLE_API_PRIVATE_KEY_BASE64:?Missing APPLE_API_PRIVATE_KEY_BASE64}"
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          export APPLE_API_KEY_PATH="$key_path"
+          ./Scripts/notarize-macos.sh "dist/Lys-${GITHUB_REF_NAME#v}-arm64.dmg"
+          rm -f "$key_path"
+      - name: Create checksum
+        run: |
+          cd dist
+          shasum -a 256 "Lys-${GITHUB_REF_NAME#v}-arm64.dmg" > "Lys-${GITHUB_REF_NAME#v}-arm64.dmg.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Lys-${{ github.ref_name }}-arm64
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "Lys $GITHUB_REF_NAME"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*.sha256 --clobber

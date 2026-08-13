@@ -12,7 +12,7 @@ enum PrimarySection: String, CaseIterable, Identifiable {
   var id: String { rawValue }
   var symbol: String {
     switch self {
-    case .agent: "sparkles"
+    case .agent: "hammer"
     case .code: "chevron.left.forwardslash.chevron.right"
     case .git: "paperplane"
     case .changes: "square.and.pencil"
@@ -30,11 +30,47 @@ enum EvidenceWorkspaceTab: String, CaseIterable, Identifiable {
   var id: String { rawValue }
 }
 
-struct FileNode: Identifiable, Hashable {
+struct FileNode: Identifiable, Hashable, Sendable {
   var id: String { url.path }
   var url: URL
   var name: String { url.lastPathComponent }
-  var children: [FileNode]?
+  var isDirectory: Bool
+}
+
+enum FileTreeLoader {
+  enum LoadResult: Sendable {
+    case success([FileNode])
+    case failure(String)
+  }
+
+  private static let hiddenGeneratedDirectories = [".build", "DerivedData", "Pods"]
+
+  nonisolated static func loadContents(of directory: URL) -> LoadResult {
+    do {
+      return .success(try contents(of: directory))
+    } catch {
+      return .failure(error.localizedDescription)
+    }
+  }
+
+  nonisolated static func contents(of directory: URL) throws -> [FileNode] {
+    let urls = try FileManager.default.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+      options: [.skipsHiddenFiles])
+
+    return urls.compactMap { item in
+      guard !hiddenGeneratedDirectories.contains(item.lastPathComponent) else { return nil }
+      let values = try? item.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+      // Treat directory symlinks as leaves. Expanding them can recurse outside the repository or
+      // cycle back into an ancestor.
+      let isDirectory = values?.isDirectory == true && values?.isSymbolicLink != true
+      return FileNode(url: item, isDirectory: isDirectory)
+    }
+    .sorted {
+      $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    }
+  }
 }
 
 struct TimelineItem: Identifiable {
@@ -623,7 +659,7 @@ public final class AppModel: ObservableObject {
     containers = ToolchainDiscovery.projectContainers(in: openedRepository)
     selectedContainer = containers.first
     prepareAppStoreForProjectIdentityChange()
-    files = Self.children(of: openedRepository, depth: 0)
+    files = Self.children(of: openedRepository)
     selectedFile = nil
     source = ""
     taskTitle = ""
@@ -763,7 +799,7 @@ public final class AppModel: ObservableObject {
             message: "Expo completed without producing an .xcworkspace or .xcodeproj")
         }
         selectedContainer = first
-        files = Self.children(of: repository, depth: 0)
+        files = Self.children(of: repository)
         lease.release()
         await refreshProjectSelection()
         status = "Expo iOS project ready"
@@ -922,7 +958,7 @@ public final class AppModel: ObservableObject {
             repository: repository, taskRoot: taskRoot)
           activeWorktree = prepared.worktree
           baseline = prepared.manifest
-          files = Self.children(of: prepared.worktree, depth: 0)
+          files = Self.children(of: prepared.worktree)
           selectedFile = nil
           source = ""
           workspace = prepared.worktree
@@ -1787,7 +1823,7 @@ public final class AppModel: ObservableObject {
           worktree: activeWorktree, repository: repository, taskRoot: taskRoot)
         self.activeWorktree = nil
         baseline = nil
-        files = Self.children(of: repository, depth: 0)
+        files = Self.children(of: repository)
         proposedChanges = []
         applyConflicts = []
         evidence = []
@@ -1812,7 +1848,7 @@ public final class AppModel: ObservableObject {
     isGitRepository = true
     containers = ToolchainDiscovery.projectContainers(in: original)
     selectedContainer = containers.first
-    files = Self.children(of: recovered.worktree, depth: 0)
+    files = Self.children(of: recovered.worktree)
     taskTitle = "Recovered task"
     status = "Recovering"
     timeline = [
@@ -1964,6 +2000,40 @@ public final class AppModel: ObservableObject {
       .init(path: "Assets.xcassets", kind: .modified, binary: true),
       .init(path: "ProfileTests.swift", kind: .added, binary: false),
     ]
+    let previewRoot = activeWorktree ?? URL(fileURLWithPath: "/Synthetic/Tasks/profile-dark-mode")
+    files = [
+      FileNode(
+        url: previewRoot.appending(path: "App", directoryHint: .isDirectory), isDirectory: true),
+      FileNode(
+        url: previewRoot.appending(path: "Assets", directoryHint: .isDirectory),
+        isDirectory: true),
+      FileNode(
+        url: previewRoot.appending(path: "Components", directoryHint: .isDirectory),
+        isDirectory: true),
+      FileNode(url: previewRoot.appending(path: "README.md"), isDirectory: false),
+      FileNode(url: previewRoot.appending(path: "package.json"), isDirectory: false),
+    ]
+    selectedFile = files[4].url
+    source = """
+      {
+        "name": "travel-app",
+        "main": "expo-router/entry",
+        "version": "1.0.0",
+        "scripts": {
+          "start": "expo start",
+          "ios": "expo run:ios",
+          "test": "jest --watchAll"
+        },
+        "dependencies": {
+          "@react-native-async-storage/async-storage": "^2.1.2",
+          "expo": "53.0.22",
+          "expo-router": "~5.1.5",
+          "react": "19.0.0",
+          "react-native": "0.79.5"
+        },
+        "private": true
+      }
+      """
   }
 
   public func loadTaskSummaryPreview() {
@@ -4122,19 +4192,8 @@ public final class AppModel: ObservableObject {
     return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
   }
 
-  private static func children(of url: URL, depth: Int) -> [FileNode] {
-    guard depth < 4,
-      let urls = try? FileManager.default.contentsOfDirectory(
-        at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
-    else { return [] }
-    return urls.filter { ![".build", "DerivedData", "Pods"].contains($0.lastPathComponent) }
-      .sorted {
-        $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
-      }
-      .map { item in
-        let directory = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-        return FileNode(url: item, children: directory ? children(of: item, depth: depth + 1) : nil)
-      }
+  private static func children(of url: URL) -> [FileNode] {
+    (try? FileTreeLoader.contents(of: url)) ?? []
   }
 
   private static func packageUsesExpo(at directory: URL) -> Bool {

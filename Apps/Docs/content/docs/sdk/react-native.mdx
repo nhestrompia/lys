@@ -1,0 +1,165 @@
+---
+title: React Native and Expo SDK
+description: Install @lys/testkit, bind stable semantics to real React Native controls, and export a validated contract.
+---
+
+`@lys/testkit` supports Expo 52+, React Native 0.76+, React 18+, and `expo-modules-core` 2+. The
+native module exposes only the test-session flag and a requested launch credential; it is not an
+automation server.
+
+## Install
+
+```package-install
+@lys/testkit
+```
+
+Add the Expo config plugin, then rebuild the native iOS app:
+
+```json title="app.json"
+{
+  "expo": {
+    "plugins": ["@lys/testkit"]
+  }
+}
+```
+
+```sh title="Terminal"
+npx expo prebuild --platform ios
+```
+
+## Define shared semantics
+
+Keep declarations in one module imported by both the UI and exporter. The helpers require shared
+objects rather than copied string IDs.
+
+```tsx title="src/testing/lys-semantics.ts"
+import {
+  action,
+  application,
+  flow,
+  invoke,
+  route,
+  screen,
+} from '@lys/testkit';
+
+export const home = screen('home', 'Home');
+export const quizSetup = screen('quiz.setup', 'Quiz setup');
+export const quizQuestion = screen('quiz.question', 'Quiz question', true);
+
+export const openQuiz = action('home.openQuiz', 'Open quiz', {
+  route: home,
+  resultsIn: quizSetup,
+  risk: 'readOnly',
+});
+
+export const startQuiz = action('quiz.start', 'Start quiz', {
+  route: quizSetup,
+  resultsIn: quizQuestion,
+  risk: 'readOnly',
+});
+
+export const app = application({
+  bundleIdentifier: 'com.example.quiz',
+  entryRoutes: [home],
+});
+
+export const completeQuiz = flow({
+  id: 'quiz.complete',
+  title: 'Complete a quiz',
+  startRoute: quizSetup,
+  entryRoutes: [home],
+  steps: [invoke('quiz.start', 'Start quiz', startQuiz)],
+  acceptance: [route(quizQuestion)],
+});
+```
+
+## Bind the real UI
+
+```tsx title="src/screens/Quiz.tsx"
+import { actionProps, screenProps, stateProps } from '@lys/testkit';
+import { useState } from 'react';
+import { Pressable, Text, View } from 'react-native';
+import { quizSetup, startQuiz } from '../testing/lys-semantics';
+
+export function QuizSetupScreen({ beginQuiz }: { beginQuiz: () => void }) {
+  const [status, setStatus] = useState<'ready' | 'active'>('ready');
+
+  return (
+    <View {...screenProps(quizSetup)}>
+      <Pressable
+        {...actionProps(startQuiz)}
+        onPress={() => {
+          setStatus('active');
+          beginQuiz();
+        }}
+      >
+        <Text>Start quiz</Text>
+      </Pressable>
+      <Text {...stateProps('quiz.status', status)}>{status}</Text>
+    </View>
+  );
+}
+```
+
+`screenProps` intentionally returns `accessible: false` and `collapsable: false`. Do not override
+it with `accessible={true}`: React Native would group the screen and hide nested Pressables from
+XCTest. Put `actionProps` on the Pressable, TextInput, Switch, or other real control—not its card or
+label.
+
+## Export the contract
+
+```ts title="scripts/export-lys-contract.ts"
+import { defineContract } from '@lys/testkit';
+import { writeContract } from '@lys/testkit/node';
+import {
+  app,
+  completeQuiz,
+  home,
+  openQuiz,
+  quizQuestion,
+  quizSetup,
+  startQuiz,
+} from '../src/testing/lys-semantics';
+
+const contract = defineContract({
+  app,
+  routes: [home, quizSetup, quizQuestion],
+  capabilities: [openQuiz, startQuiz],
+  contexts: [],
+  flows: [completeQuiz],
+});
+
+await writeContract(contract);
+```
+
+Run the exporter with the TypeScript runner used by your project. For example:
+
+```sh title="Terminal"
+npx tsx scripts/export-lys-contract.ts
+```
+
+The Node export does not load `expo-modules-core`. Do not mock the module or patch Node's loader; a
+need for either indicates an incorrect SDK installation.
+
+## Authenticated test setup
+
+Read a host-injected credential only through the protected bridge:
+
+```tsx
+import { testSession } from '@lys/testkit';
+
+const token = testSession.credential('LYS_TEST_SESSION_TOKEN');
+if (token) await auth.restoreTestSession(token);
+```
+
+The value is available only on a host launch carrying `-LysTesting`. Never log, persist, or include
+the token value in a contract.
+
+## Verify
+
+```sh title="Lys monorepo"
+npm run build:expo-sdk
+npm run check:expo-sdk
+node Skills/lys-integrate/scripts/check-contract-goal.mjs \
+  .lys/contract.json "complete a quiz"
+```

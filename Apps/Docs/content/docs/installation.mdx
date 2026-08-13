@@ -1,0 +1,57 @@
+---
+title: Install Lys
+description: Build and run the Lys public alpha from the monorepo with the supported Apple toolchain.
+---
+
+Lys currently documents a source installation. This repository does not contain a public binary
+download URL, so the steps below deliberately avoid implying one.
+
+## Requirements
+
+- Apple Silicon Mac
+- macOS 26.2 or newer
+- Swift 6.2 or newer
+- Full Xcode with an iOS Simulator runtime
+- [AXe 1.8.0](https://github.com/cameroncooke/axe) for the in-app Simulator surface
+
+## Clone and verify
+
+```sh title="Terminal"
+git clone https://github.com/nhestrompia/lys.git
+cd lys
+swift build
+swift test
+```
+
+Run the repository validation harness when you need the app, SDK, contract, and binary smoke checks
+together:
+
+```sh title="Terminal"
+./Scripts/test-local.sh
+```
+
+## Launch the app
+
+```sh title="Terminal"
+swift run --skip-build Lys
+```
+
+If the selected Xcode toolchain needs the repository's local workaround, use:
+
+```sh title="Terminal"
+./Scripts/run-local.sh
+```
+
+## First project
+
+Open an existing Git repository that contains an Xcode project or workspace, then select its app
+scheme and an installed Simulator. Git repositories support isolated task worktrees; non-Git
+folders are browse/build-only.
+
+Lys uses Xcode as the compiler, SDK, Simulator, test, and signing infrastructure. It does not
+replace the Apple toolchain.
+
+## Next
+
+Instrument the application with the [React Native SDK](/docs/sdk/react-native) or
+[Swift SDK](/docs/sdk/swift), then export `.lys/contract.json` before asking Lys for a trusted run.

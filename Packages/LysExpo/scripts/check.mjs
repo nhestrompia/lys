@@ -20,7 +20,10 @@ for (const symbol of required) {
 }
 if (manifest.name !== "@lys/testkit") throw new Error("Unexpected package name");
 if (manifest.main !== "dist/index.js") throw new Error("Package must load compiled JavaScript");
+if (manifest.types !== "dist/index.d.ts") throw new Error("Package types must load built declarations");
+if (manifest.publishConfig?.access !== "public") throw new Error("Scoped package must publish publicly");
 await readFile(resolve(root, manifest.main), "utf8");
+await readFile(resolve(root, manifest.types), "utf8");
 if (!moduleConfig.apple.modules.includes("LysModule")) throw new Error("Native module is not linked");
 if (!podspec.includes("s.dependency 'ExpoModulesCore'")) {
   throw new Error("Native module podspec must depend on ExpoModulesCore");

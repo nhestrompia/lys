@@ -3,14 +3,15 @@ import SwiftUI
 
 @MainActor struct CodeEditor: NSViewRepresentable {
   @Binding var text: String
+  var fileURL: URL?
   var readOnly = false
 
-  func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+  func makeCoordinator() -> Coordinator {
+    Coordinator(text: $text, language: SyntaxLanguage(fileURL: fileURL))
+  }
   func makeNSView(context: Context) -> NSScrollView {
     let scroll = NSScrollView()
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = true
-    scroll.autohidesScrollers = true
+    CodeEditorScrollConfiguration.apply(to: scroll)
     let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     editor.delegate = context.coordinator
     editor.isEditable = !readOnly
@@ -19,13 +20,15 @@ import SwiftUI
     editor.isVerticallyResizable = true
     editor.isHorizontallyResizable = false
     editor.minSize = NSSize(width: 0, height: 0)
-    editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+    editor.maxSize = NSSize(
+      width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
     editor.autoresizingMask = [.width]
     editor.textContainer?.widthTracksTextView = true
     editor.textContainer?.lineFragmentPadding = 0
-    editor.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-    editor.textColor = NSColor(white: 0.9, alpha: 1)
-    editor.backgroundColor = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
+    editor.font = CodeEditorTheme.baseFont
+    editor.textColor = CodeEditorTheme.baseText
+    editor.backgroundColor = CodeEditorTheme.background
+    editor.selectedTextAttributes = CodeEditorTheme.selectionAttributes
     editor.insertionPointColor = NSColor.white
     editor.isAutomaticQuoteSubstitutionEnabled = false
     editor.isAutomaticDashSubstitutionEnabled = false
@@ -35,23 +38,26 @@ import SwiftUI
     editor.textStorage?.setAttributedString(
       NSAttributedString(
         string: text,
-        attributes: [
-          .foregroundColor: NSColor(white: 0.86, alpha: 1),
-          .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
-        ]))
+        attributes: CodeEditorTheme.baseAttributes))
+    editor.typingAttributes = CodeEditorTheme.baseAttributes
     scroll.documentView = editor
     scroll.hasVerticalRuler = true
     scroll.rulersVisible = true
     scroll.verticalRulerView = LineNumberRuler(scrollView: scroll, textView: editor)
+    (scroll.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     context.coordinator.editor = editor
-    context.coordinator.highlight()
+    context.coordinator.highlightImmediately()
     return scroll
   }
   func updateNSView(_ scroll: NSScrollView, context: Context) {
     guard let editor = scroll.documentView as? NSTextView else { return }
+    let languageChanged = context.coordinator.setLanguage(SyntaxLanguage(fileURL: fileURL))
     if editor.string != text {
       editor.string = text
-      context.coordinator.highlight()
+      (scroll.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
+      context.coordinator.highlightImmediately()
+    } else if languageChanged {
+      context.coordinator.highlightImmediately()
     }
     editor.isEditable = !readOnly
   }
@@ -59,54 +65,197 @@ import SwiftUI
   @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
     @Binding var text: String
     weak var editor: NSTextView?
-    init(text: Binding<String>) { _text = text }
+    private var language: SyntaxLanguage
+    private var highlightRevision = 0
+    private var highlightTask: Task<Void, Never>?
+
+    init(text: Binding<String>, language: SyntaxLanguage) {
+      _text = text
+      self.language = language
+    }
+
+    func setLanguage(_ language: SyntaxLanguage) -> Bool {
+      guard self.language != language else { return false }
+      self.language = language
+      return true
+    }
+
     func textDidChange(_ notification: Notification) {
       guard let editor else { return }
       text = editor.string
-      highlight()
-      editor.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+      scheduleHighlight()
+      (editor.enclosingScrollView?.verticalRulerView as? LineNumberRuler)?.reloadLineNumbers()
     }
-    func highlight() {
-    guard let editor, let storage = editor.textStorage else { return }
-    let range = NSRange(location: 0, length: storage.length)
-    storage.beginEditing()
-    editor.textColor = NSColor(white: 0.86, alpha: 1)
-    storage.setAttributes(
-        [
-          .foregroundColor: NSColor(white: 0.86, alpha: 1),
-          .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
-        ], range: range)
-      let source = storage.string as NSString
-      for pattern in [
-        "\\b(import|struct|class|enum|actor|func|let|var|if|else|guard|return|async|await|throws|public|private)\\b"
-      ] {
-        if let regex = try? NSRegularExpression(pattern: pattern) {
-          regex.enumerateMatches(in: storage.string, range: range) { match, _, _ in
-            if let match {
-              storage.addAttribute(
-                .foregroundColor, value: NSColor(red: 0.38, green: 0.69, blue: 0.94, alpha: 1),
-                range: match.range)
-            }
-          }
-        }
+
+    func highlightImmediately() {
+      guard let editor else { return }
+      highlightTask?.cancel()
+      highlightRevision += 1
+      let source = editor.string
+      applyBaseAttributes()
+
+      if (source as NSString).length <= 250_000 {
+        apply(SyntaxHighlighter.tokens(in: source, language: language), to: source)
+      } else {
+        scheduleHighlight(delayMilliseconds: 0)
       }
-      if let comments = try? NSRegularExpression(pattern: "//.*$", options: .anchorsMatchLines) {
-        comments.enumerateMatches(in: storage.string, range: range) { match, _, _ in
-          if let match {
-            storage.addAttribute(
-              .foregroundColor, value: NSColor(red: 0.38, green: 0.64, blue: 0.47, alpha: 1),
-              range: match.range)
-          }
+    }
+
+    private func scheduleHighlight(delayMilliseconds: Int = 55) {
+      guard let editor else { return }
+      highlightTask?.cancel()
+      highlightRevision += 1
+      let revision = highlightRevision
+      let source = editor.string
+      let language = language
+
+      highlightTask = Task { [weak self] in
+        if delayMilliseconds > 0 {
+          try? await Task.sleep(for: .milliseconds(delayMilliseconds))
         }
+        guard !Task.isCancelled else { return }
+        let tokens = await Task.detached(priority: .userInitiated) {
+          SyntaxHighlighter.tokens(in: source, language: language)
+        }.value
+        guard !Task.isCancelled, let self, self.highlightRevision == revision else { return }
+        self.apply(tokens, to: source)
       }
-      _ = source
+    }
+
+    private func applyBaseAttributes() {
+      guard let editor, let storage = editor.textStorage else { return }
+      let range = NSRange(location: 0, length: storage.length)
+      storage.beginEditing()
+      storage.setAttributes(CodeEditorTheme.baseAttributes, range: range)
       storage.endEditing()
+      editor.typingAttributes = CodeEditorTheme.baseAttributes
     }
+
+    private func apply(_ tokens: [SyntaxToken], to source: String) {
+      guard let editor, editor.string == source, let storage = editor.textStorage else { return }
+      let fullRange = NSRange(location: 0, length: storage.length)
+      storage.beginEditing()
+      storage.setAttributes(CodeEditorTheme.baseAttributes, range: fullRange)
+      for token in tokens where NSMaxRange(token.range) <= storage.length {
+        storage.addAttributes(CodeEditorTheme.attributes(for: token.kind), range: token.range)
+      }
+      storage.endEditing()
+      editor.typingAttributes = CodeEditorTheme.baseAttributes
+    }
+  }
+}
+
+@MainActor enum CodeEditorScrollConfiguration {
+  static func apply(to scroll: NSScrollView) {
+    // Overlay scrollers follow the system's auto-hide preference. The editor needs a stable,
+    // discoverable position indicator, so reserve a narrow persistent gutter instead.
+    scroll.scrollerStyle = .legacy
+    scroll.autohidesScrollers = false
+    scroll.hasVerticalScroller = true
+    scroll.hasHorizontalScroller = true
+    scroll.verticalScroller = CodeEditorScroller()
+    scroll.horizontalScroller = CodeEditorScroller()
+  }
+}
+
+@MainActor enum CodeEditorTheme {
+  static let background = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
+  static let baseText = NSColor(white: 0.86, alpha: 1)
+  static let baseFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+  static let headingFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .semibold)
+  static let selectionBackground = NSColor(
+    red: 0.23, green: 0.26, blue: 0.30, alpha: 1)
+  static let selectionText = NSColor(white: 0.96, alpha: 1)
+  static let baseAttributes: [NSAttributedString.Key: Any] = [
+    .foregroundColor: baseText,
+    .font: baseFont,
+  ]
+  static let selectionAttributes: [NSAttributedString.Key: Any] = [
+    .backgroundColor: selectionBackground,
+    .foregroundColor: selectionText,
+  ]
+
+  static func attributes(for kind: SyntaxTokenKind) -> [NSAttributedString.Key: Any] {
+    let color: NSColor
+    let font: NSFont
+    switch kind {
+    case .keyword:
+      color = NSColor(red: 0.39, green: 0.70, blue: 0.96, alpha: 1)
+      font = baseFont
+    case .type:
+      color = NSColor(red: 0.50, green: 0.79, blue: 0.76, alpha: 1)
+      font = baseFont
+    case .string, .code:
+      color = NSColor(red: 0.88, green: 0.70, blue: 0.46, alpha: 1)
+      font = baseFont
+    case .number:
+      color = NSColor(red: 0.77, green: 0.65, blue: 0.92, alpha: 1)
+      font = baseFont
+    case .comment:
+      color = NSColor(red: 0.48, green: 0.68, blue: 0.54, alpha: 1)
+      font = baseFont
+    case .property:
+      color = NSColor(red: 0.61, green: 0.79, blue: 0.94, alpha: 1)
+      font = baseFont
+    case .punctuation:
+      color = NSColor(red: 0.65, green: 0.68, blue: 0.72, alpha: 1)
+      font = baseFont
+    case .heading:
+      color = NSColor(red: 0.43, green: 0.72, blue: 0.98, alpha: 1)
+      font = headingFont
+    case .emphasis:
+      color = NSColor(red: 0.82, green: 0.66, blue: 0.89, alpha: 1)
+      font = baseFont
+    case .link:
+      color = NSColor(red: 0.44, green: 0.75, blue: 0.95, alpha: 1)
+      font = baseFont
+    }
+    return [.foregroundColor: color, .font: font]
+  }
+}
+
+@MainActor final class CodeEditorScroller: NSScroller {
+  static let knobColor = NSColor(red: 0.38, green: 0.41, blue: 0.45, alpha: 0.96)
+  static let trackColor = NSColor(red: 0.12, green: 0.14, blue: 0.16, alpha: 1)
+
+  override class var isCompatibleWithOverlayScrollers: Bool { true }
+
+  override func draw(_ dirtyRect: NSRect) {
+    Self.trackColor.setFill()
+    bounds.fill()
+    drawKnob()
+  }
+
+  override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {
+    Self.trackColor.setFill()
+    slotRect.fill()
+  }
+
+  override func drawKnob() {
+    var knob = rect(for: .knob)
+    guard !knob.isEmpty else { return }
+
+    if bounds.height >= bounds.width {
+      knob = knob.insetBy(dx: 3, dy: 1)
+    } else {
+      knob = knob.insetBy(dx: 1, dy: 3)
+    }
+    guard knob.width > 0, knob.height > 0 else { return }
+
+    Self.knobColor.setFill()
+    NSBezierPath(
+      roundedRect: knob,
+      xRadius: min(knob.width, knob.height) / 2,
+      yRadius: min(knob.width, knob.height) / 2
+    ).fill()
   }
 }
 
 @MainActor final class LineNumberRuler: NSRulerView {
   weak var textView: NSTextView?
+  private var lineStarts = [0]
+  var numberOfLines: Int { lineStarts.count }
+
   init(scrollView: NSScrollView, textView: NSTextView) {
     self.textView = textView
     super.init(scrollView: scrollView, orientation: .verticalRuler)
@@ -114,37 +263,98 @@ import SwiftUI
     ruleThickness = 38
   }
   required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  func reloadLineNumbers() {
+    guard let textView else { return }
+    let text = textView.string as NSString
+    var starts = [0]
+    var searchLocation = 0
+    while searchLocation < text.length {
+      let newline = text.range(
+        of: "\n", options: [],
+        range: NSRange(location: searchLocation, length: text.length - searchLocation))
+      guard newline.location != NSNotFound else { break }
+      searchLocation = NSMaxRange(newline)
+      starts.append(searchLocation)
+    }
+    lineStarts = starts
+
+    let digits = max(2, String(starts.count).count)
+    let digitWidth = ("0" as NSString).size(
+      withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)]
+    ).width
+    ruleThickness = max(38, ceil(CGFloat(digits) * digitWidth + 14))
+    needsDisplay = true
+  }
+
   override func drawHashMarksAndLabels(in rect: NSRect) {
     guard let textView, let layout = textView.layoutManager, let container = textView.textContainer
     else { return }
     NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1).setFill()
-    rect.fill()
-    let visible = textView.enclosingScrollView?.contentView.bounds ?? .zero
-    let glyphRange = layout.glyphRange(forBoundingRect: visible, in: container)
-    let text = textView.string as NSString
-    var line = 1
-    if glyphRange.location > 0 {
-      line = text.substring(to: layout.characterIndexForGlyph(at: glyphRange.location)).reduce(1) {
-        $1 == "\n" ? $0 + 1 : $0
-      }
-    }
-    var glyph = glyphRange.location
+    // AppKit passes this hook a client-space dirty rect that can be as wide as the document.
+    // Painting that rect lets the ruler cover the text view itself, so constrain the fill to the
+    // ruler's own bounds.
+    bounds.fill()
+    let visible = textView.visibleRect
+    let origin = textView.textContainerOrigin
+    let visibleContainerRect = visible.offsetBy(dx: -origin.x, dy: -origin.y)
+    let glyphRange = layout.glyphRange(forBoundingRect: visibleContainerRect, in: container)
+    let firstCharacter =
+      layout.numberOfGlyphs == 0
+      ? 0
+      : layout.characterIndexForGlyph(at: min(glyphRange.location, layout.numberOfGlyphs - 1))
+    var lineIndex = lowerBound(for: firstCharacter)
+    if lineIndex > 0 { lineIndex -= 1 }
+
     let attributes: [NSAttributedString.Key: Any] = [
       .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
       .foregroundColor: NSColor(white: 0.48, alpha: 1),
     ]
-    while glyph < NSMaxRange(glyphRange) {
-      let character = layout.characterIndexForGlyph(at: glyph)
-      let lineRange = text.lineRange(for: NSRange(location: character, length: 0))
-      let rect = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-      let label = "\(line)" as NSString
+
+    while lineIndex < lineStarts.count {
+      let character = lineStarts[lineIndex]
+      let fragment: NSRect
+      if character < textView.string.utf16.count, layout.numberOfGlyphs > 0 {
+        let glyph = layout.glyphIndexForCharacter(at: character)
+        fragment = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+      } else if character == textView.string.utf16.count,
+        layout.extraLineFragmentTextContainer != nil
+      {
+        fragment = layout.extraLineFragmentRect
+      } else {
+        break
+      }
+
+      let textY = fragment.minY + origin.y
+      if textY > visible.maxY { break }
+      if fragment.maxY + origin.y < visible.minY {
+        lineIndex += 1
+        continue
+      }
+
+      let label = "\(lineIndex + 1)" as NSString
+      let labelSize = label.size(withAttributes: attributes)
+      let rulerPoint = convert(NSPoint(x: 0, y: textY), from: textView)
       label.draw(
         at: NSPoint(
-          x: ruleThickness - label.size(withAttributes: attributes).width - 7,
-          y: rect.minY + textView.textContainerInset.height), withAttributes: attributes)
-      glyph = layout.glyphIndexForCharacter(at: NSMaxRange(lineRange))
-      if lineRange.length == 0 { break }
-      line += 1
+          x: ruleThickness - labelSize.width - 7,
+          y: floor(rulerPoint.y + (fragment.height - labelSize.height) / 2)),
+        withAttributes: attributes)
+      lineIndex += 1
     }
+  }
+
+  private func lowerBound(for character: Int) -> Int {
+    var lower = 0
+    var upper = lineStarts.count
+    while lower < upper {
+      let middle = (lower + upper) / 2
+      if lineStarts[middle] < character {
+        lower = middle + 1
+      } else {
+        upper = middle
+      }
+    }
+    return lower
   }
 }

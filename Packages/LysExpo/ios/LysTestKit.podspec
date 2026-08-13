@@ -9,10 +9,13 @@ Pod::Spec.new do |s|
   s.description      = package['description']
   s.license          = package['license']
   s.author           = 'Lys'
-  s.homepage         = 'https://lys.dev'
+  s.homepage         = 'https://github.com/nhestrompia/lys'
   s.platforms        = { :ios => '15.1' }
   s.swift_version    = '5.4'
-  s.source           = { :git => 'https://github.com/lys-dev/lys.git' }
+  s.source           = {
+    :git => 'https://github.com/nhestrompia/lys.git',
+    :tag => "v#{s.version}"
+  }
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'

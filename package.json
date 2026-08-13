@@ -1,14 +1,21 @@
 {
   "name": "lys-monorepo",
   "private": true,
-  "workspaces": ["Packages/LysExpo"],
+  "license": "MIT",
+  "workspaces": ["Packages/LysExpo", "Apps/Docs"],
   "devDependencies": {
     "ajv": "^8.17.1"
   },
   "scripts": {
+    "docs:dev": "npm run dev --workspace @lys/docs",
+    "docs:build": "npm run build --workspace @lys/docs",
+    "docs:typecheck": "npm run typecheck --workspace @lys/docs",
     "test:swift-sdk": "swift test --package-path Packages/LysSwift",
     "build:expo-sdk": "tsc --project Packages/LysExpo/tsconfig.json",
     "check:expo-sdk": "node Packages/LysExpo/scripts/check.mjs && node Packages/LysExpo/scripts/test.mjs",
-    "check:contract": "node Scripts/validate-contract.mjs"
+    "check:contract": "node Scripts/validate-contract.mjs",
+    "release:check": "node Scripts/validate-release.mjs",
+    "release:prepare": "./Scripts/prepare-release.sh",
+    "package:macos": "./Scripts/package-macos.sh"
   }
 }
