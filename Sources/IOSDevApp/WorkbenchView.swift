@@ -86,7 +86,7 @@ public struct WorkbenchView: View {
     case .agent:
       let narrow = viewportWidth < 1400
       HStack(spacing: 12) {
-        AgentPanel().frame(width: narrow ? 300 : 340)
+        AgentPanel().frame(width: narrow ? 340 : 380)
         AppStage()
           .frame(maxWidth: .infinity)
         VerificationPanel().frame(width: narrow ? 320 : 400)
@@ -467,103 +467,92 @@ private struct AgentPanel: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      HStack(spacing: 9) {
-        Image(systemName: "sparkles")
-          .font(.system(size: 15, weight: .medium))
-          .foregroundStyle(Studio.accent)
+      HStack(spacing: 10) {
         Text("Agent")
-          .font(.system(size: 13, weight: .semibold))
+          .font(.system(size: 15, weight: .semibold))
         Spacer()
-        HStack(spacing: 5) {
-          Circle().fill(Studio.success).frame(width: 7, height: 7)
-          Text(model.isBusy ? "Working" : "Live")
-        }
-        .font(.system(size: 10.5, weight: .medium))
-        .foregroundStyle(model.isBusy ? Studio.accent : Studio.success)
         if model.canStopAgent {
           Button(action: model.stopAgent) {
-            Label("Stop", systemImage: "stop.fill")
-              .font(.system(size: 10.5, weight: .semibold))
+            Image(systemName: "stop.circle")
+              .font(.system(size: 15, weight: .medium))
+              .frame(width: 40, height: 40)
+              .contentShape(Rectangle())
           }
-          .buttonStyle(.bordered)
-          .controlSize(.small)
-          .tint(.red)
+          .buttonStyle(.plain)
+          .foregroundStyle(Color.red)
           .help("Stop the agent while preserving the running app and development server")
           .accessibilityLabel("Stop agent")
         }
       }
       .padding(.horizontal, 20)
+      .frame(height: 56)
+
+      Divider().overlay(Studio.separator)
+
+      HStack(spacing: 10) {
+        Text("Session")
+          .font(.system(size: 13, weight: .semibold))
+        Spacer()
+        Button(action: model.clearAgentActivity) {
+          HStack(spacing: 6) {
+            Text("Clear")
+            Image(systemName: "trash")
+          }
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(Studio.secondary)
+          .frame(minWidth: 58, minHeight: 40, alignment: .trailing)
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(sessionItems.isEmpty || model.isBusy || model.pendingAgentPermission != nil)
+        .help("Clear messages and agent actions from this session")
+        .accessibilityLabel("Clear agent session activity")
+      }
+      .padding(.horizontal, 20)
       .frame(height: 52)
 
-      ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-          VStack(alignment: .leading, spacing: 10) {
-            Text(taskTitleText)
-              .font(.system(size: model.taskTitle.isEmpty ? 20 : 17, weight: .bold))
-              .lineSpacing(3)
-              .fixedSize(horizontal: false, vertical: true)
-            Text(taskSubtitle)
-              .font(.system(size: 12))
-              .foregroundStyle(Studio.secondary)
-              .fixedSize(horizontal: false, vertical: true)
-            if !model.taskTitle.isEmpty {
-              StatusBadge(title: model.status, state: badgeState)
-            }
-          }
-
-          if model.needsExpoPreparation {
-            ExpoSetupCallout()
-          }
-
-          if let summary = model.taskSummary {
-            TaskSummaryCard(summary: summary)
-          }
-
-          if !model.plan.isEmpty {
-            Divider().overlay(Studio.separator)
-            HStack {
-              Text("Plan").font(.system(size: 12, weight: .semibold))
-              Spacer()
-              Text("Generation \(model.generation)")
-                .font(.system(size: 10).monospacedDigit())
-                .foregroundStyle(Studio.secondary)
-            }
-            VStack(spacing: 0) {
-              ForEach(Array(model.plan.enumerated()), id: \.element.id) { index, item in
-                PlanActivityRow(
-                  index: index, item: item, detail: planDetail(for: index),
-                  duration: nil, activeMarkComplete: false)
+      ScrollViewReader { proxy in
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 10) {
+            if sessionItems.isEmpty {
+              VStack(spacing: 8) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                  .font(.system(size: 20, weight: .light))
+                  .foregroundStyle(Studio.tertiary)
+                Text(emptySessionTitle)
+                  .font(.system(size: 11.5, weight: .semibold))
+                Text(emptySessionDetail)
+                  .font(.system(size: 10.5))
+                  .foregroundStyle(Studio.secondary)
+                  .multilineTextAlignment(.center)
+                  .fixedSize(horizontal: false, vertical: true)
               }
-            }
-          }
-
-          if let journey = model.activeJourney {
-            JourneyProgressSection(journey: journey)
-          }
-
-          if model.plan.isEmpty {
-            Divider().overlay(Studio.separator)
-            HStack {
-              Text("Agent activity").font(.system(size: 12, weight: .semibold))
-              Spacer()
-              Text(model.isBusy ? "Live" : "Idle")
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(model.isBusy ? Studio.accent : Studio.secondary)
-            }
-            if model.timeline.isEmpty {
-              Text("Open a repository to begin.").font(.system(size: 12)).foregroundStyle(
-                Studio.secondary)
+              .frame(maxWidth: .infinity)
+              .padding(.horizontal, 24)
+              .padding(.top, 42)
             } else {
-              VStack(spacing: 0) {
-                ForEach(model.timeline.suffix(8)) { item in
-                  ActivityRow(item: item)
-                }
+              ForEach(sessionItems) { item in
+                AgentSessionItem(item: item)
+                  .id(item.id)
               }
             }
           }
+          .background(alignment: .leading) {
+            if sessionItems.count > 1 {
+              Rectangle()
+                .fill(Studio.separator)
+                .frame(width: 1)
+                .padding(.leading, 29)
+                .padding(.vertical, 24)
+                .accessibilityHidden(true)
+            }
+          }
+          .padding(.horizontal, 16)
+          .padding(.bottom, 18)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .scrollIndicators(.automatic)
+        .onAppear { scrollToLatest(using: proxy) }
+        .onChange(of: sessionScrollSignal) { _, _ in scrollToLatest(using: proxy) }
       }
 
       if let permission = model.pendingAgentPermission {
@@ -574,54 +563,65 @@ private struct AgentPanel: View {
       }
 
       Divider().overlay(Studio.separator)
-      VStack(alignment: .leading, spacing: 7) {
-        HStack(alignment: .bottom, spacing: 8) {
-          ZStack(alignment: .topLeading) {
-            if model.taskPrompt.isEmpty {
-              Text(
-                model.hasAgentSession
-                  ? "Continue the conversation…" : "Ask the agent to test or change something…"
-              )
-              .font(.system(size: 12))
-              .foregroundStyle(Studio.tertiary)
-              .padding(.horizontal, 4).padding(.vertical, 7)
-              .allowsHitTesting(false)
+      VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 0) {
+          HStack(alignment: .bottom, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+              if model.taskPrompt.isEmpty {
+                Text(
+                  model.hasAgentSession
+                    ? "Ask Lys to change something or test the app…"
+                    : "Ask the agent to change something or test the app…"
+                )
+                .font(.system(size: 12))
+                .foregroundStyle(Studio.secondary)
+                .padding(.horizontal, 4).padding(.vertical, 8)
+                .allowsHitTesting(false)
+              }
+              AgentComposerEditor(text: $model.taskPrompt, onSubmit: model.sendAgentPrompt)
+                .frame(minHeight: 38, maxHeight: 74)
+                .accessibilityLabel("Agent message")
             }
-            AgentComposerEditor(text: $model.taskPrompt, onSubmit: model.sendAgentPrompt)
-              .frame(minHeight: 34, maxHeight: 68)
-              .accessibilityLabel("Agent message")
+            Button(action: model.sendAgentPrompt) {
+              Image(systemName: "arrow.up")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white)
+                .frame(width: 30, height: 30)
+                .background(model.canSendAgentPrompt ? Studio.accent : Studio.tertiary.opacity(0.55))
+                .clipShape(Circle())
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canSendAgentPrompt)
+            .keyboardShortcut(.return, modifiers: [.command])
+            .help(model.agentComposerBlocker ?? "Send message (Command–Return)")
           }
-          Button(action: model.sendAgentPrompt) {
-            Image(systemName: "paperplane.fill")
-              .frame(width: 28, height: 28)
-              .contentShape(Rectangle())
-          }
-          .buttonStyle(.plain)
-          .foregroundStyle(model.canSendAgentPrompt ? Studio.accent : Studio.tertiary)
-          .disabled(!model.canSendAgentPrompt)
-          .keyboardShortcut(.return, modifiers: [.command])
-          .help(model.agentComposerBlocker ?? "Send message (Command–Return)")
+          .padding(.horizontal, 12)
+          .padding(.vertical, 8)
+          .frame(minHeight: 64)
+
+          Divider().overlay(Studio.separator)
+
+          AgentConfigurationBar()
+            .padding(.horizontal, 10)
+            .frame(height: 46)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
-        .frame(height: 48)
-        .background(Studio.raised)
+        .background(Studio.surface)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1))
 
-        Text(model.agentComposerBlocker ?? "Command–Return to send")
-          .font(.system(size: 9.5, weight: .medium))
-          .foregroundStyle(model.agentComposerBlocker == nil ? Studio.secondary : Studio.warning)
-          .lineLimit(2)
-
-        AgentConfigurationBar()
-
-        Text(model.agentConfigStatusText)
-          .font(.system(size: 9.5))
-          .foregroundStyle(Studio.tertiary)
-          .lineLimit(2)
+        if let blocker = model.agentComposerBlocker {
+          Text(blocker)
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(Studio.warning)
+            .lineLimit(2)
+            .padding(.horizontal, 2)
+        }
       }
       .padding(.horizontal, 16)
-      .padding(.top, 16)
+      .padding(.top, 14)
       .padding(.bottom, 16)
     }
     .background(Studio.surface)
@@ -629,42 +629,30 @@ private struct AgentPanel: View {
     .shadow(color: .black.opacity(0.022), radius: 14, y: 4)
   }
 
-  private var taskTitleText: String {
-    if model.taskTitle.isEmpty { return "What should the agent change?" }
-    return model.taskTitle
+  private var sessionItems: [TimelineItem] {
+    model.timeline.filter { $0.category != .system }
   }
 
-  private func planDetail(for index: Int) -> String {
-    switch index {
-    case 0: return "Preparing the task context."
-    case 1: return "Updating the isolated worktree."
-    case 2: return "Waiting for agent output."
-    case 3: return "Collecting fresh evidence."
-    default: return "Waiting for the previous step."
+  private var sessionScrollSignal: String {
+    guard let latest = sessionItems.last else { return "empty" }
+    return "\(latest.id.uuidString):\(latest.detail.count):\(latest.state)"
+  }
+
+  private func scrollToLatest(using proxy: ScrollViewProxy) {
+    guard let latestID = sessionItems.last?.id else { return }
+    DispatchQueue.main.async {
+      proxy.scrollTo(latestID, anchor: .bottom)
     }
   }
 
-  private var taskSubtitle: String {
-    if model.repository == nil {
-      return "Open an existing Git repository. Every editable task starts in an isolated worktree."
-    }
-    if !model.isGitRepository {
-      return "App inspection and testing are available. Source editing requires Git."
-    }
-    if model.taskTitle.isEmpty {
-      return
-        "Describe one outcome. Build and verification evidence will stay tied to the current mutation generation."
-    }
-    if model.activeTaskIntent?.allowsSourceWrites == false {
-      return "Current app preserved · Source read-only · Generation \(model.generation)"
-    }
-    return "Original checkout protected · Generation \(model.generation)"
+  private var emptySessionTitle: String {
+    model.repository == nil ? "Open a repository to begin" : "Describe a task to begin"
   }
 
-  private var badgeState: StatusBadge.State {
-    if model.status.contains("failed") || model.status.contains("blocked") { return .warning }
-    if model.isBusy { return .active }
-    return .neutral
+  private var emptySessionDetail: String {
+    model.repository == nil
+      ? "Session messages and agent actions will appear here."
+      : "Your messages, agent replies, and tool actions stay together here."
   }
 }
 
@@ -839,12 +827,16 @@ private struct AgentConfigurationBar: View {
       AgentModelSelector()
         .frame(maxWidth: .infinity, alignment: .leading)
       Divider()
-        .frame(height: 20)
-        .padding(.horizontal, 9)
+        .frame(height: 26)
+        .padding(.horizontal, 10)
+      Text("Reasoning")
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .fixedSize()
       AgentEffortSelector()
         .fixedSize(horizontal: true, vertical: false)
     }
-    .frame(height: 34)
+    .frame(height: 44)
     .accessibilityElement(children: .contain)
   }
 }
@@ -875,7 +867,7 @@ private struct AgentModelSelector: View {
       }
       .padding(.horizontal, 3)
       .frame(maxWidth: .infinity, alignment: .leading)
-      .frame(height: 32)
+      .frame(height: 40)
       .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
@@ -1099,7 +1091,10 @@ private struct AgentEffortSelector: View {
       Button {
         isPresented.toggle()
       } label: {
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
+          Image(systemName: "chart.bar.fill")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Studio.secondary)
           Text(model.agentReasoningLabel)
             .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(Color.primary)
@@ -1107,8 +1102,9 @@ private struct AgentEffortSelector: View {
             .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(Studio.secondary)
         }
-        .padding(.horizontal, 3)
-        .frame(height: 32)
+        .padding(.leading, 8)
+        .padding(.trailing, 3)
+        .frame(height: 40)
         .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
@@ -1146,7 +1142,8 @@ private struct AgentEffortSelector: View {
       Text("Effort unavailable")
         .font(.system(size: 10.5, weight: .medium))
         .foregroundStyle(Studio.tertiary)
-        .frame(height: 32)
+        .padding(.leading, 8)
+        .frame(height: 40)
         .help("The selected agent has not reported a reasoning effort control.")
     }
   }
@@ -7147,36 +7144,160 @@ private struct PlanStateMark: View {
   }
 }
 
-private struct ActivityRow: View {
+private struct AgentSessionItem: View {
   let item: TimelineItem
+
+  @ViewBuilder var body: some View {
+    switch item.category {
+    case .human, .agent:
+      AgentMessageRow(item: item)
+    case .tool, .permission:
+      AgentToolRow(item: item)
+    case .system:
+      EmptyView()
+    }
+  }
+}
+
+private struct AgentMessageRow: View {
+  let item: TimelineItem
+
   var body: some View {
-    HStack(alignment: .top, spacing: 10) {
-      Text(item.time).font(.system(size: 10).monospacedDigit()).foregroundStyle(Studio.secondary)
-        .frame(width: 42, alignment: .leading)
-      Circle().fill(color).frame(width: 7, height: 7).padding(.top, 4)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(item.title).font(
-          .system(size: 11, weight: item.state == .active ? .semibold : .regular)
-        )
-        .foregroundStyle(
-          item.state == .complete && item.category != .agent ? Studio.success : Color.primary)
+    HStack(alignment: .top, spacing: 12) {
+      ZStack {
+        Circle()
+          .fill(item.category == .human ? Studio.accentSoft : Studio.raised)
+        Text(item.category == .human ? "U" : agentMonogram)
+          .font(.system(size: item.category == .human ? 11 : 10, weight: .semibold))
+          .foregroundStyle(item.category == .human ? Studio.accent : Color.primary)
+      }
+      .frame(width: 34, height: 34)
+      .accessibilityHidden(true)
+
+      VStack(alignment: .leading, spacing: 5) {
+        HStack(spacing: 7) {
+          Text(item.category == .human ? "You" : item.title)
+            .font(.system(size: 11.5, weight: .semibold))
+          Text(item.time)
+            .font(.system(size: 10).monospacedDigit())
+            .foregroundStyle(Studio.secondary)
+        }
         if !item.detail.isEmpty {
-          Text(item.detail).font(.system(size: 10)).foregroundStyle(Studio.secondary)
-            .lineLimit(item.category == .agent ? 6 : 2)
+          Text(item.detail)
+            .font(.system(size: 11))
+            .foregroundStyle(Color.primary)
+            .lineSpacing(2)
+            .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
+        } else if item.state == .active {
+          ProgressView()
+            .controlSize(.mini)
+            .frame(height: 16, alignment: .leading)
         }
       }
       Spacer(minLength: 0)
     }
-    .padding(.vertical, 5)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 4)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(
+      "\(item.category == .human ? "You" : item.title), \(item.time). \(item.detail)")
   }
-  private var color: Color {
-    switch item.state {
-    case .complete: Studio.success
-    case .active: Studio.accent
-    case .waiting: Studio.tertiary
-    case .warning: Studio.warning
+
+  private var agentMonogram: String {
+    let words = item.title.split(separator: " ")
+    if words.count > 1 {
+      return words.prefix(2).compactMap(\.first).map(String.init).joined().lowercased()
     }
+    return String(item.title.prefix(3)).lowercased()
+  }
+}
+
+private struct AgentToolRow: View {
+  let item: TimelineItem
+
+  var body: some View {
+    HStack(spacing: 11) {
+      Image(systemName: symbol)
+        .font(.system(size: 15, weight: .medium))
+        .foregroundStyle(color)
+        .frame(width: 34, height: 34)
+        .background(color.opacity(0.09))
+        .clipShape(Circle())
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text(item.title)
+          .font(.system(size: 11.5, weight: .semibold))
+          .foregroundStyle(Color.primary)
+          .fixedSize(horizontal: false, vertical: true)
+        if !item.detail.isEmpty {
+          Text(item.detail)
+            .font(.system(size: 10.5))
+            .foregroundStyle(Studio.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+        }
+      }
+
+      Spacer(minLength: 6)
+      stateMark
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 9)
+    .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+    .background(Studio.raised.opacity(0.78))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("Agent action: \(item.title). \(item.detail)")
+  }
+
+  @ViewBuilder private var stateMark: some View {
+    switch item.state {
+    case .complete:
+      Image(systemName: "checkmark.circle")
+        .font(.system(size: 15, weight: .medium))
+        .foregroundStyle(Studio.success)
+    case .active:
+      ProgressView()
+        .controlSize(.small)
+        .tint(Studio.accent)
+    case .waiting:
+      Image(systemName: "clock")
+        .font(.system(size: 14, weight: .medium))
+        .foregroundStyle(Studio.secondary)
+    case .warning:
+      Image(systemName: "exclamationmark.circle")
+        .font(.system(size: 15, weight: .medium))
+        .foregroundStyle(Studio.warning)
+    }
+  }
+
+  private var color: Color {
+    if item.category == .permission { return Studio.warning }
+    if item.state == .warning { return Studio.warning }
+    let normalized = item.title.lowercased()
+    if normalized.contains("edit") || normalized.contains("file") || normalized.contains("change") {
+      return item.state == .complete ? Studio.success : Studio.accent
+    }
+    if normalized.contains("test") || normalized.contains("inspect")
+      || normalized.contains("screenshot") || normalized.contains("validation")
+    { return Color(red: 0.48, green: 0.38, blue: 0.82) }
+    return Studio.accent
+  }
+
+  private var symbol: String {
+    if item.category == .permission { return "hand.raised" }
+    let normalized = item.title.lowercased()
+    if normalized.contains("edit") || normalized.contains("file") || normalized.contains("change") {
+      return "chevron.left.forwardslash.chevron.right"
+    }
+    if normalized.contains("build") { return "hammer" }
+    if normalized.contains("test") { return "flask" }
+    if normalized.contains("inspect") || normalized.contains("screenshot")
+      || normalized.contains("validation")
+    { return "magnifyingglass" }
+    if normalized.contains("command") || normalized.contains("terminal") { return "terminal" }
+    return "wrench.and.screwdriver"
   }
 }
 

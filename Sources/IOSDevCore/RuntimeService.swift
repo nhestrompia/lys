@@ -2947,7 +2947,7 @@ public actor RuntimeService {
         try await devServerRunner.run(
           executable: npm, arguments: ["start", "--", "--port", String(port)],
           workingDirectory: projectRoot,
-          environment: ["PATH": searchPath, "BROWSER": "none", "CI": "1"],
+          environment: DevelopmentServerEnvironment.local(searchPath: searchPath),
           maximumOutputBytes: 8 * 1_024 * 1_024)
       }
       devServerTask = task

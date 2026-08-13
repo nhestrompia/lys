@@ -257,6 +257,12 @@ Borders are rare. Use single-pixel separators inside grouped lists and a subtle 
 - **Default:** Secondary Label icon and text on Working White.
 - **Active:** Workbench Blue foreground with a 38 × 34pt Selection Mist icon well; the whole item's position and label remain stable.
 
+### Agent Session Ledger
+
+The Agent panel is a non-collapsible session ledger, not a general application event log. It shows only human messages, agent replies, agent tool calls, and permission decisions; repository discovery, runtime orchestration, and other host-owned system events remain in their dedicated surfaces. Human and agent messages use distinct circular identities with name and timestamp, while tool calls use compact neutral rows with a semantic SF Symbol, useful file/command context, and a textual state. A quiet vertical thread preserves the causal reading order. Agent prose is never line-clamped, and the scroll position follows the current streaming or newly appended item.
+
+The composer stays fixed below the scrolling ledger. Its upper field owns message entry and the circular blue send action; its lower row retains the existing agent/model and reasoning-effort selectors as native menus or popovers. Clear removes only visible session activity and is unavailable while work or a permission decision is active. Green remains reserved for a completed recorded action, never an active edit or agent statement.
+
 ### App Stage
 
 The flexible center panel keeps an iPhone preview horizontally centered and top-weighted directly beneath the stage toolbar against Studio Canvas. Its maximum is 306 × 650pt at the reference viewport; at shorter window heights it scales proportionally down to preserve the 68pt top toolbar, 76pt review bar, appearance control, and device aspect ratio. At the 1512 × 884pt MacBook 14-inch viewport the phone is approximately 264 × 560pt. A small floating capsule below owns appearance and orientation. The interaction palette sits adjacent to the device and remains visibly disabled while the compatibility gate is closed. Evidence rows scroll inside their own ledger when vertical space is constrained rather than enlarging the window.

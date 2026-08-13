@@ -3,6 +3,14 @@ import Testing
 
 @testable import IOSDevCore
 
+@Test func localDevelopmentServerEnvironmentKeepsMetroWatching() {
+  let environment = DevelopmentServerEnvironment.local(searchPath: "/opt/homebrew/bin:/usr/bin")
+
+  #expect(environment["PATH"] == "/opt/homebrew/bin:/usr/bin")
+  #expect(environment["BROWSER"] == "none")
+  #expect(environment["CI"] == nil)
+}
+
 @Test func simulatorCommandsPreserveArgumentsWithoutShellInterpolation() {
   let simctl = URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/simctl")
   let app = URL(fileURLWithPath: "/tmp/My App; touch nope.app")

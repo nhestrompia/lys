@@ -75,7 +75,7 @@ enum FileTreeLoader {
 
 struct TimelineItem: Identifiable {
   enum State { case complete, active, waiting, warning }
-  enum Category { case system, agent, tool, permission }
+  enum Category { case system, human, agent, tool, permission }
   let id = UUID()
   var time: String
   var title: String
@@ -729,6 +729,11 @@ public final class AppModel: ObservableObject {
     terminalEntries = []
   }
 
+  func clearAgentActivity() {
+    guard !isBusy, pendingAgentPermission == nil else { return }
+    timeline.removeAll { $0.category != .system }
+  }
+
   func prepareExpoProject() {
     guard let repository, needsExpoPreparation, !isBusy, appOperation == .idle else {
       notice = "Wait for the current build, test, or preparation operation to finish."
@@ -948,6 +953,10 @@ public final class AppModel: ObservableObject {
     plan = hostPlan(for: intent)
     timeline.append(
       .init(
+        time: Self.now(), title: "You", detail: prompt, state: .complete,
+        category: .human))
+    timeline.append(
+      .init(
         time: Self.now(), title: "Task routed",
         detail: intentSummary(intent), state: .complete))
     Task {
@@ -1127,7 +1136,9 @@ public final class AppModel: ObservableObject {
     status = "Agent working"
     agentStopRequested = false
     timeline.append(
-      .init(time: Self.now(), title: "You", detail: prompt, state: .complete))
+      .init(
+        time: Self.now(), title: "You", detail: prompt, state: .complete,
+        category: .human))
     Task {
       do {
         _ = try? await runtime.request(method: "session.resume")
@@ -1965,14 +1976,29 @@ public final class AppModel: ObservableObject {
     ]
     timeline = [
       .init(
-        time: "10:42", title: "Read ProfileView.swift", detail: "Synthetic fixture",
-        state: .complete),
+        time: "10:42", title: "You",
+        detail: "Add dark mode support to Profile and test it.", state: .complete,
+        category: .human),
       .init(
-        time: "10:44", title: "Build succeeded", detail: "Synthetic fixture · 24s", state: .complete
-      ),
+        time: "10:42", title: "Lys",
+        detail:
+          "Got it. I’ll add dark mode to the Profile screen, update the related styles, and run tests to verify everything works.",
+        state: .complete, category: .agent),
       .init(
-        time: "10:46", title: "Application launched", detail: "Synthetic fixture", state: .complete),
-      .init(time: "10:47", title: "Verifying Profile", detail: "Synthetic fixture", state: .active),
+        time: "10:44", title: "Edited files",
+        detail: "ProfileView.swift, Theme.swift, Color+Theme.swift", state: .complete,
+        category: .tool),
+      .init(
+        time: "10:46", title: "Build", detail: "Build succeeded", state: .complete,
+        category: .tool),
+      .init(
+        time: "10:47", title: "Run tests", detail: "8 tests running on iPhone 16 Pro",
+        state: .active, category: .tool),
+      .init(
+        time: "10:48", title: "Lys",
+        detail:
+          "The Profile checks passed. I’m verifying the final appearance and navigation state now.",
+        state: .active, category: .agent),
     ]
     evidence = [
       .init(
@@ -2663,13 +2689,7 @@ public final class AppModel: ObservableObject {
       case "pending": .waiting
       default: .active
       }
-    let detail: String =
-      switch status {
-      case "completed": "Completed"
-      case "failed": conciseToolFailure(context.rawOutput) ?? "Failed"
-      case "pending": "Waiting"
-      default: "In progress"
-      }
+    let detail = agentToolDetail(context, status: status)
     let title = humanizedToolTitle(context)
     if let timelineID = agentToolTimelineIDs[toolCallID],
       let index = timeline.firstIndex(where: { $0.id == timelineID })
@@ -2934,6 +2954,43 @@ public final class AppModel: ObservableObject {
       if !clean.isEmpty && !Self.looksLikeMachineToolName(clean) { return clean }
     }
     return "Using a tool"
+  }
+
+  private func agentToolDetail(_ context: AgentToolContext, status: String) -> String {
+    let locations = context.locations.map {
+      URL(fileURLWithPath: $0).lastPathComponent.isEmpty
+        ? $0 : URL(fileURLWithPath: $0).lastPathComponent
+    }
+    let locationDetail: String? = {
+      guard !locations.isEmpty else { return nil }
+      let visible = locations.prefix(3).joined(separator: ", ")
+      let remaining = locations.count - min(locations.count, 3)
+      return remaining > 0 ? "\(visible) +\(remaining)" : visible
+    }()
+    let commandDetail = commandText(from: context.rawInput).flatMap { command -> String? in
+      let singleLine = command.split(whereSeparator: \.isNewline).joined(separator: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !singleLine.isEmpty else { return nil }
+      return singleLine.count > 104 ? "\(singleLine.prefix(101))…" : singleLine
+    }
+
+    switch status {
+    case "completed":
+      return locationDetail ?? commandDetail.map { "Completed · \($0)" } ?? "Completed"
+    case "failed":
+      return conciseToolFailure(context.rawOutput) ?? locationDetail.map { "Failed · \($0)" }
+        ?? "Failed"
+    case "pending":
+      return locationDetail.map { "Waiting · \($0)" } ?? commandDetail.map { "Waiting · \($0)" }
+        ?? "Waiting"
+    default:
+      if let locationDetail { return "Working on \(locationDetail)" }
+      if let commandDetail { return "Running · \(commandDetail)" }
+      if runtimeToolKey(context) != nil, let destination = selectedDestination?.name {
+        return "Running on \(destination)"
+      }
+      return "In progress"
+    }
   }
 
   private func runtimeToolKey(_ context: AgentToolContext) -> String? {
@@ -3672,11 +3729,8 @@ public final class AppModel: ObservableObject {
         try await metroRunner.run(
           executable: npm, arguments: ["start", "--", "--port", "8081"],
           workingDirectory: workspace,
-          environment: [
-            "PATH": searchPath,
-            "BROWSER": "none",
-            "CI": "1",
-          ], maximumOutputBytes: 8 * 1_024 * 1_024,
+          environment: DevelopmentServerEnvironment.local(searchPath: searchPath),
+          maximumOutputBytes: 8 * 1_024 * 1_024,
           onEvent: { [weak self] event in
             guard event.stream != .lifecycle else { return }
             Task { @MainActor [weak self] in
