@@ -595,27 +595,20 @@ public actor RuntimeService {
         }
       }
 
-      let current = try await currentBlueprintElements()
-      let currentRoute = blueprintRoute(in: current, blueprint: blueprint)?.id
-      guard let currentRoute else {
-        throw RPCError(
-          code: -32127,
-          message:
-            "Lys screen instrumentation error: the current screen does not match any declared route. Ensure it exposes exactly one lys.screen.* marker."
-        )
-      }
+      let currentRoute = try await waitForAnyBlueprintRoute(blueprint)
+      let currentRouteID = currentRoute.id
       guard
         BlueprintNavigationPlanner.path(
-          from: currentRoute, to: flow.startRoute,
+          from: currentRouteID, to: flow.startRoute,
           capabilities: blueprint.capabilities ?? []) != nil
       else {
         throw RPCError(
           code: -32127,
           message:
-            "Lys routing error: the observed route \(currentRoute) has no safe declared path to \(flow.startRoute) for flow \(flow.id). Add the real route/resultsIn controls, or use a context that normalizes the app state."
+            "Lys routing error: the observed route \(currentRouteID) has no safe declared path to \(flow.startRoute) for flow \(flow.id). Add the real route/resultsIn controls, or use a context that normalizes the app state."
         )
       }
-      if currentRoute != flow.startRoute {
+      if currentRouteID != flow.startRoute {
         try await executeBlueprintSteps(
           [
             .init(
@@ -1295,6 +1288,35 @@ public actor RuntimeService {
       if attempt < 25 { try await Task.sleep(for: .milliseconds(120)) }
     }
     return (false, observed)
+  }
+
+  /// A relaunch can produce a valid WDA snapshot while the app is still showing its splash
+  /// screen, loading JavaScript, or resolving its persisted navigation state. Do not treat that
+  /// snapshot as test-ready until exactly one declared route is observable.
+  private func waitForAnyBlueprintRoute(
+    _ blueprint: InteractionBlueprint
+  ) async throws -> BlueprintRoute {
+    let attempts = 80  // 12 seconds at 150 ms intervals.
+    var lastElements: [UIElement] = []
+
+    for attempt in 0..<attempts {
+      if let elements = try? await currentBlueprintElements() {
+        lastElements = elements
+        if let route = blueprintRoute(in: elements, blueprint: blueprint) {
+          return route
+        }
+      }
+      if attempt < attempts - 1 {
+        try await Task.sleep(for: .milliseconds(150))
+      }
+    }
+
+    let observed = blueprintRoute(in: lastElements, blueprint: blueprint)?.id ?? "unrecognized"
+    throw RPCError(
+      code: -32127,
+      message:
+        "Lys screen instrumentation error: no declared route became observable after waiting 12 seconds (last observed route: \(observed)). Ensure the app has finished booting and exposes exactly one lys.screen.* marker."
+    )
   }
 
   private func waitForBlueprintPredicates(
