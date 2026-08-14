@@ -9,27 +9,20 @@ struct TerminalTranscriptView: NSViewRepresentable {
 
   func makeNSView(context: Context) -> NSScrollView {
     let scroll = NSScrollView()
-    scroll.borderType = .noBorder
-    scroll.drawsBackground = true
-    scroll.backgroundColor = TerminalPalette.background
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = true
-    scroll.autohidesScrollers = false
-    // A persistent track keeps long build output discoverably scrollable even when macOS is set
-    // to show overlay scrollbars only while scrolling.
-    scroll.scrollerStyle = .legacy
+    TerminalScrollConfiguration.apply(to: scroll)
 
     let storage = NSTextStorage()
     let manager = NSLayoutManager()
     let container = NSTextContainer(
       containerSize: NSSize(
         width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))
-    container.widthTracksTextView = false
+    container.widthTracksTextView = true
     container.heightTracksTextView = false
     manager.addTextContainer(container)
     storage.addLayoutManager(manager)
 
-    let transcript = TerminalTextView(frame: .zero, textContainer: container)
+    let transcript = TerminalTextView(
+      frame: NSRect(x: 0, y: 0, width: 900, height: 600), textContainer: container)
     transcript.isEditable = false
     transcript.isSelectable = true
     transcript.isRichText = true
@@ -38,8 +31,9 @@ struct TerminalTranscriptView: NSViewRepresentable {
     transcript.backgroundColor = TerminalPalette.background
     transcript.textContainerInset = NSSize(width: 16, height: 12)
     transcript.textContainer?.lineFragmentPadding = 0
-    transcript.isHorizontallyResizable = true
+    transcript.isHorizontallyResizable = false
     transcript.isVerticallyResizable = true
+    transcript.autoresizingMask = [.width]
     transcript.minSize = .zero
     transcript.maxSize = NSSize(
       width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -140,6 +134,58 @@ private enum TerminalPalette {
   static let background = NSColor(red: 0.055, green: 0.06, blue: 0.07, alpha: 1)
   static let output = NSColor(white: 0.82, alpha: 1)
   static let secondary = NSColor(white: 0.58, alpha: 1)
+}
+
+@MainActor enum TerminalScrollConfiguration {
+  static func apply(to scroll: NSScrollView) {
+    scroll.borderType = .noBorder
+    scroll.drawsBackground = true
+    scroll.backgroundColor = TerminalPalette.background
+    scroll.hasVerticalScroller = true
+    scroll.hasHorizontalScroller = false
+    // Keep the vertical track persistent so long build output remains discoverably scrollable.
+    scroll.autohidesScrollers = false
+    scroll.scrollerStyle = .legacy
+    scroll.verticalScroller = TerminalScroller()
+    scroll.horizontalScroller = nil
+  }
+}
+
+@MainActor final class TerminalScroller: NSScroller {
+  static let trackColor = NSColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1)
+  static let knobColor = NSColor(red: 0.50, green: 0.52, blue: 0.57, alpha: 0.96)
+
+  override class var isCompatibleWithOverlayScrollers: Bool { true }
+
+  override func draw(_ dirtyRect: NSRect) {
+    Self.trackColor.setFill()
+    bounds.fill()
+    drawKnob()
+  }
+
+  override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {
+    Self.trackColor.setFill()
+    slotRect.fill()
+  }
+
+  override func drawKnob() {
+    var knob = rect(for: .knob)
+    guard !knob.isEmpty else { return }
+
+    if bounds.height >= bounds.width {
+      knob = knob.insetBy(dx: 3, dy: 1)
+    } else {
+      knob = knob.insetBy(dx: 1, dy: 3)
+    }
+    guard knob.width > 0, knob.height > 0 else { return }
+
+    Self.knobColor.setFill()
+    NSBezierPath(
+      roundedRect: knob,
+      xRadius: min(knob.width, knob.height) / 2,
+      yRadius: min(knob.width, knob.height) / 2
+    ).fill()
+  }
 }
 
 private final class TerminalTextView: NSTextView {

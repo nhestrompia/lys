@@ -1010,11 +1010,15 @@ public final class AppModel: ObservableObject {
             message: "Choose an ACP-ready coding agent in Settings before starting a task.")
         }
         plan[2].state = .active
-        try await connectAgent(
+        let flowIncomplete = try await connectAgent(
           adapter: adapter, workspace: workspace, prompt: prompt, intent: intent,
           attachments: promptAttachments)
         guard !agentStopRequested else { return }
         plan[2].state = .complete
+        if flowIncomplete {
+          await finishIncompleteTestingSession()
+          return
+        }
         status =
           intent.allowsSourceWrites
           ? "Agent finished · review evidence" : "Testing finished · review evidence"
@@ -1165,7 +1169,11 @@ public final class AppModel: ObservableObject {
           .init(
             time: Self.now(), title: "Agent response ended", detail: "Stop reason: \(reason)",
             state: activeTaskIntent?.kind == .verifyCurrentApp ? .warning : .complete))
-        try await continueIncompleteTestingSession(client: client, sessionID: sessionID)
+        let flowIncomplete = try await continueIncompleteTestingSession()
+        if flowIncomplete {
+          await finishIncompleteTestingSession()
+          return
+        }
         if activeTaskIntent?.allowsSourceWrites == true { try await refreshProposedChanges() }
         await refreshEvidence()
         await createTaskSummary()
@@ -2430,7 +2438,7 @@ public final class AppModel: ObservableObject {
   private func connectAgent(
     adapter: DetectedAdapter, workspace: URL, prompt: String, intent: AgentTaskIntent,
     attachments: [ACPContentBlock] = []
-  ) async throws {
+  ) async throws -> Bool {
     guard let executable = adapter.executable else {
       throw RPCError(code: -32090, message: "The selected ACP adapter is unavailable")
     }
@@ -2498,18 +2506,18 @@ public final class AppModel: ObservableObject {
       method: "session/prompt",
       params: try jsonValue(
         ACPPrompt(sessionID: sessionID, content: [.init(text: context)] + attachments)))
-    guard !agentStopRequested else { return }
+    guard !agentStopRequested else { return false }
     let reason = result.result?["stopReason"]?.stringValue ?? "completed"
     finishAgentMessage()
     timeline.append(
       .init(
         time: Self.now(), title: "Agent response ended", detail: "Stop reason: \(reason)",
         state: intent.kind == .verifyCurrentApp ? .warning : .complete))
-    try await continueIncompleteTestingSession(client: client, sessionID: sessionID)
+    return try await continueIncompleteTestingSession()
   }
 
-  private func continueIncompleteTestingSession(client: ACPClient, sessionID: String) async throws {
-    guard activeTaskIntent?.kind == .verifyCurrentApp, !agentStopRequested else { return }
+  private func continueIncompleteTestingSession() async throws -> Bool {
+    guard activeTaskIntent?.kind == .verifyCurrentApp, !agentStopRequested else { return false }
     guard let value = try? await runtime.request(method: "flow.status"),
       let journey: JourneyRecord = try? decodeRuntimeValue(value)
     else {
@@ -2519,12 +2527,20 @@ public final class AppModel: ObservableObject {
     }
     if journey.status == .ready || journey.status == .running || journey.status == .preparing {
       activeJourney = journey
-      throw RPCError(
-        code: -32096,
-        message:
-          "The agent response ended before Lys reached the flow's terminal state. The app remains attached and no additional model turns were started."
-      )
+      return true
     }
+    return false
+  }
+
+  private func finishIncompleteTestingSession() async {
+    await refreshEvidence()
+    await createTaskSummary()
+    status = "Testing paused · continue the flow"
+    timeline.append(
+      .init(
+        time: Self.now(), title: "Flow paused",
+        detail: "The app remains attached. Continue the current journey to reach its terminal result.",
+        state: .warning, category: .tool))
   }
 
   private func createTaskSummary(stopped: Bool = false) async {

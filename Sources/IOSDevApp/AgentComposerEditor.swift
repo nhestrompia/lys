@@ -88,7 +88,8 @@ private final class ActivatingTextView: NSTextView {
 
   override func keyDown(with event: NSEvent) {
     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    if event.keyCode == 36, flags.contains(.command) {
+    let isReturnKey = event.keyCode == 36 || event.keyCode == 76
+    if isReturnKey, !flags.contains(.shift) {
       onSubmit?()
       return
     }

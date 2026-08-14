@@ -229,6 +229,13 @@ public enum LysContextMode: String, Codable, Sendable {
   case uiFlow, authenticatedSession
 }
 
+/// Controls how the host prepares the app before running a flow in this context.
+/// `relaunch` preserves app data while preventing an independent flow from inheriting the
+/// previous flow's in-memory navigation state. Use `preserve` only for an explicit chained flow.
+public enum LysIsolationPolicy: String, Codable, Sendable {
+  case relaunch, preserve
+}
+
 public struct LysAuthenticatedSession: Codable, Sendable {
   public var environment: [String: LysInput]
   public var arguments: [String]?
@@ -242,6 +249,7 @@ public struct LysContext: Codable, Identifiable, Sendable {
   public var id: String
   public var title: String
   public var mode: LysContextMode
+  public var isolation: LysIsolationPolicy
   public var requiredSecrets: [String]?
   public var startRoute: String?
   public var entryRoutes: [String]?
@@ -250,7 +258,8 @@ public struct LysContext: Codable, Identifiable, Sendable {
   public var session: LysAuthenticatedSession?
 
   public init(
-    id: String, title: String, mode: LysContextMode, requiredSecrets: [String] = [],
+    id: String, title: String, mode: LysContextMode, isolation: LysIsolationPolicy = .relaunch,
+    requiredSecrets: [String] = [],
     startRoute: String? = nil, entryRoutes: [String]? = nil,
     prepare: [LysStep] = [], readyWhen: [LysPredicate],
     session: LysAuthenticatedSession? = nil
@@ -258,6 +267,7 @@ public struct LysContext: Codable, Identifiable, Sendable {
     self.id = id
     self.title = title
     self.mode = mode
+    self.isolation = isolation
     self.requiredSecrets = requiredSecrets.isEmpty ? nil : requiredSecrets
     self.startRoute = startRoute
     self.entryRoutes = entryRoutes

@@ -628,8 +628,8 @@ private struct AgentPanel: View {
             }
             .buttonStyle(.plain)
             .disabled(!model.canSendAgentPrompt)
-            .keyboardShortcut(.return, modifiers: [.command])
-            .help(model.agentComposerBlocker ?? "Send message (Command–Return)")
+            .keyboardShortcut(.return)
+            .help(model.agentComposerBlocker ?? "Send message (Return; Shift–Return for a new line)")
           }
           .padding(.horizontal, 12)
           .padding(.vertical, 8)
