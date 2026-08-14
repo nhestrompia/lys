@@ -25,7 +25,6 @@ enum EvidenceWorkspaceTab: String, CaseIterable, Identifiable {
   case terminal = "Terminal"
   case logs = "Logs"
   case evidence = "Evidence"
-  case changes = "Changes"
 
   var id: String { rawValue }
 }
@@ -395,7 +394,7 @@ public final class AppModel: ObservableObject {
   }
   var needsExpoPreparation: Bool { isExpoRepository && containers.isEmpty }
   var agentComposerBlocker: String? {
-    guard repository != nil else { return "Open a repository to start an agent task." }
+    guard repository != nil else { return nil }
     let pendingIntent = AgentTaskIntentRouter.classify(taskPrompt)
     if pendingIntent.allowsSourceWrites && !isGitRepository {
       return "Editing requires a Git repository. Inspection and app testing remain available."
@@ -441,7 +440,8 @@ public final class AppModel: ObservableObject {
       : "Local CLI setting · connect to change"
   }
   var canSendAgentPrompt: Bool {
-    !taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    repository != nil
+      && !taskPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && agentComposerBlocker == nil && !isBusy
   }
   var agentModelOption: ACPConfigOption? {
@@ -2036,7 +2036,7 @@ public final class AppModel: ObservableObject {
         workingDirectory: "/Synthetic/TravelApp", state: .succeeded)
     ]
     terminalEntries[0].output = "** BUILD SUCCEEDED **\n"
-    isTerminalExpanded = ProcessInfo.processInfo.environment["LYS_SNAPSHOT_TERMINAL"] == "1"
+    isEvidenceWorkspaceOpen = ProcessInfo.processInfo.environment["LYS_SNAPSHOT_TERMINAL"] == "1"
     taskTitle =
       "Add dark mode support to the Profile screen and verify it on small and large iPhones."
     activeTaskIntent = AgentTaskIntentRouter.classify(taskTitle)
@@ -2303,7 +2303,6 @@ public final class AppModel: ObservableObject {
     switch tab {
     case "terminal": evidenceWorkspaceTab = .terminal
     case "logs": evidenceWorkspaceTab = .logs
-    case "changes": evidenceWorkspaceTab = .changes
     default: evidenceWorkspaceTab = .evidence
     }
   }
@@ -4047,7 +4046,7 @@ public final class AppModel: ObservableObject {
       terminalEntries[index].output = output
     }
     terminalEntries[index].state = succeeded ? .succeeded : .failed
-    if !succeeded { isTerminalExpanded = true }
+    if !succeeded { isEvidenceWorkspaceOpen = true }
   }
 
   private func scheduleTerminalFlush() {

@@ -1,7 +1,7 @@
 // THESIS: The running iOS app is the center of work; agent intent and verification stay visibly adjacent instead of hiding in an IDE-dark dashboard.
 // OWN-WORLD: Luminous macOS studio surfaces, quiet grouped lists, 14pt structural corners, system-blue action, and green only for machine-recorded success.
 // STORY: Open a repository, delegate in isolation, watch the app, inspect fresh evidence, then review and apply or discard without losing context.
-// FIRST VIEWPORT: Persistent navigation rail; task-focused Agent column; large device stage; Verify ledger; one bottom change-review bar with the primary action at right.
+// FIRST VIEWPORT: Persistent navigation rail; task-focused Agent column; large device stage; persistent evidence workspace; one bottom change-review bar with the primary action at right.
 // FORM: Direct native reproduction of the user-supplied reference, replacing the prior blueprint direction.
 // FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
 
@@ -34,14 +34,10 @@ struct IOSDevWorkbenchApp: App {
     .commands {
       CommandGroup(after: .sidebar) {
         Divider()
-        Button(model.isTerminalExpanded ? "Hide Terminal" : "Show Terminal") {
-          model.toggleTerminal()
-        }
-        .keyboardShortcut("j", modifiers: .command)
-        Button(model.isEvidenceWorkspaceOpen ? "Hide Evidence" : "Show Evidence") {
+        Button(model.isEvidenceWorkspaceOpen ? "Collapse Bottom Workspace" : "Expand Bottom Workspace") {
           model.toggleEvidenceWorkspace()
         }
-        .keyboardShortcut("e", modifiers: [.command, .shift])
+        .keyboardShortcut("j", modifiers: .command)
       }
     }
   }

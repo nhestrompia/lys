@@ -44,15 +44,12 @@ public struct WorkbenchView: View {
               .frame(maxWidth: .infinity, maxHeight: .infinity)
               .clipped()
               .layoutPriority(0)
-            if model.isEvidenceWorkspaceOpen {
-              Divider().overlay(Studio.separator)
-              EvidenceWorkspace()
-                .frame(
-                  minHeight: compact ? 132 : 180,
-                  idealHeight: compact ? 150 : 240,
-                  maxHeight: compact ? 158 : 240)
-                .layoutPriority(2)
-            }
+            EvidenceWorkspace()
+              .frame(
+                minHeight: model.isEvidenceWorkspaceOpen ? (compact ? 132 : 180) : 52,
+                idealHeight: model.isEvidenceWorkspaceOpen ? (compact ? 150 : 240) : 52,
+                maxHeight: model.isEvidenceWorkspaceOpen ? (compact ? 158 : 240) : 52)
+              .layoutPriority(2)
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -85,11 +82,11 @@ public struct WorkbenchView: View {
     switch model.section {
     case .agent:
       let narrow = viewportWidth < 1400
+      let agentPanelWidth: CGFloat = narrow ? 340 : 380
       HStack(spacing: 12) {
-        AgentPanel().frame(width: narrow ? 340 : 380)
+        AgentPanel().frame(width: agentPanelWidth * 1.05)
         AppStage()
           .frame(maxWidth: .infinity)
-        VerificationPanel().frame(width: narrow ? 320 : 400)
       }
       .padding(.top, 21)
       .padding(.leading, 23)
@@ -471,6 +468,20 @@ private struct AgentPanel: View {
         Text("Agent")
           .font(.system(size: 15, weight: .semibold))
         Spacer()
+        Button(action: model.clearAgentActivity) {
+          HStack(spacing: 6) {
+            Text("Clear")
+            Image(systemName: "trash")
+          }
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(Studio.secondary)
+          .frame(minWidth: 58, minHeight: 40, alignment: .trailing)
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(sessionItems.isEmpty || model.isBusy || model.pendingAgentPermission != nil)
+        .help("Clear messages and agent actions from this session")
+        .accessibilityLabel("Clear agent session activity")
         if model.canStopAgent {
           Button(action: model.stopAgent) {
             Image(systemName: "stop.circle")
@@ -486,30 +497,6 @@ private struct AgentPanel: View {
       }
       .padding(.horizontal, 20)
       .frame(height: 56)
-
-      Divider().overlay(Studio.separator)
-
-      HStack(spacing: 10) {
-        Text("Session")
-          .font(.system(size: 13, weight: .semibold))
-        Spacer()
-        Button(action: model.clearAgentActivity) {
-          HStack(spacing: 6) {
-            Text("Clear")
-            Image(systemName: "trash")
-          }
-          .font(.system(size: 11, weight: .medium))
-          .foregroundStyle(Studio.secondary)
-          .frame(minWidth: 58, minHeight: 40, alignment: .trailing)
-          .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(sessionItems.isEmpty || model.isBusy || model.pendingAgentPermission != nil)
-        .help("Clear messages and agent actions from this session")
-        .accessibilityLabel("Clear agent session activity")
-      }
-      .padding(.horizontal, 20)
-      .frame(height: 52)
 
       ScrollViewReader { proxy in
         ScrollView {
@@ -562,7 +549,6 @@ private struct AgentPanel: View {
           .padding(.vertical, 14)
       }
 
-      Divider().overlay(Studio.separator)
       VStack(alignment: .leading, spacing: 6) {
         VStack(spacing: 0) {
           HStack(alignment: .bottom, spacing: 8) {
@@ -600,7 +586,7 @@ private struct AgentPanel: View {
           .padding(.vertical, 8)
           .frame(minHeight: 64)
 
-          Divider().overlay(Studio.separator)
+          Divider().overlay(Studio.separator.opacity(0.58))
 
           AgentConfigurationBar()
             .padding(.horizontal, 10)
@@ -1181,7 +1167,7 @@ private struct ExpoSetupCallout: View {
 
 private struct AppStage: View {
   @EnvironmentObject var model: AppModel
-  @State private var previewZoom: CGFloat = 1
+  @State private var previewZoom: CGFloat = 0.9
   @State private var landscape = false
 
   var body: some View {
@@ -1197,9 +1183,9 @@ private struct AppStage: View {
         max(360, min(geometry.size.height - (compact ? 180 : 100), widthFittedDeviceHeight)))
       let emptyDeviceHeight = min(
         700,
-        max(420, min(geometry.size.height * 0.80, widthFittedDeviceHeight)))
+        max(420, min(geometry.size.height - (compact ? 78 : 92), widthFittedDeviceHeight)))
       let deviceHeight = compact
-        ? max(300, geometry.size.height - 180)
+        ? max(300, min(geometry.size.height - 78, widthFittedDeviceHeight))
         : (emptyState ? emptyDeviceHeight : fittedDeviceHeight)
 
       VStack(alignment: .leading, spacing: 0) {
@@ -1289,32 +1275,20 @@ private struct AppStage: View {
         .frame(height: compact ? 38 : 44)
 
         HStack(spacing: 0) {
-          if emptyState {
-            VStack(spacing: 0) {
-              Spacer(minLength: 0)
-              DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
-                .offset(y: geometry.size.height >= 800 ? 32 : 0)
-              Spacer(minLength: 0)
-            }
-            .frame(minWidth: previewViewportWidth, maxWidth: previewViewportWidth, maxHeight: .infinity)
-            .background(Studio.backdrop)
-            .clipped()
-          } else {
-            ScrollView([.horizontal, .vertical]) {
-              DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 8)
-                .frame(
-                  minWidth: max(0, previewViewportWidth - 44),
-                  minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .center)
-            }
-            .frame(
-              minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
-              maxHeight: .infinity)
-            .scrollIndicators(.automatic)
-            .background(Studio.backdrop)
-            .clipped()
+          ScrollView([.horizontal, .vertical]) {
+            DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
+              .padding(.horizontal, 22)
+              .padding(.vertical, 8)
+              .frame(
+                minWidth: max(0, previewViewportWidth - 44),
+                minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .center)
           }
+          .frame(
+            minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
+            maxHeight: .infinity)
+          .scrollIndicators(.automatic)
+          .background(Studio.backdrop)
+          .clipped()
           InteractionPalette()
             .frame(width: 58)
             .frame(maxHeight: .infinity)
@@ -1324,10 +1298,8 @@ private struct AppStage: View {
 
         HStack(spacing: 0) {
           appearanceControls
-          if !compact {
-            Divider().frame(height: 22).padding(.horizontal, 10)
-            zoomControls
-          }
+          Divider().frame(height: 22).padding(.horizontal, 10)
+          zoomControls
           Spacer(minLength: 10)
           if !compact {
             previewInteractionStatus
@@ -2475,39 +2447,12 @@ private struct EvidenceWorkspace: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      HStack(spacing: 0) {
-        ForEach(EvidenceWorkspaceTab.allCases) { tab in
-          tabButton(tab)
-        }
-        if !model.proposedChanges.isEmpty {
-          Text("\(model.proposedChanges.count)")
-            .font(.system(size: 9, weight: .semibold).monospacedDigit())
-            .foregroundStyle(Studio.secondary)
-            .padding(.horizontal, 6)
-            .frame(height: 18)
-            .background(Studio.raised)
-            .clipShape(Capsule())
-            .padding(.leading, -4)
-        }
-        Spacer(minLength: 12)
-        if model.evidenceWorkspaceTab == .terminal {
-          HStack(spacing: 16) {
-            Button("Copy Latest", action: copyLatest)
-              .buttonStyle(.plain)
-              .font(.system(size: 10.5, weight: .medium))
-              .disabled(model.terminalEntries.isEmpty)
-            Button("Clear", action: model.clearTerminal)
-              .buttonStyle(.plain)
-              .font(.system(size: 10.5, weight: .medium))
-              .disabled(model.terminalEntries.isEmpty || model.terminalEntries.contains(where: { $0.state == .running }))
-          }
-        }
+      workspaceHeader
+      if model.isEvidenceWorkspaceOpen {
+        Divider().overlay(Studio.separator)
+        tabContent
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
-      .padding(.horizontal, 16)
-      .frame(height: 40)
-      Divider().overlay(Studio.separator)
-      tabContent
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     .background(Studio.surface)
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -2516,6 +2461,55 @@ private struct EvidenceWorkspace: View {
     .padding(.trailing, 24)
     .padding(.top, 8)
     .padding(.bottom, 4)
+  }
+
+  private var workspaceHeader: some View {
+    HStack(spacing: 0) {
+      ForEach(EvidenceWorkspaceTab.allCases) { tab in
+        tabButton(tab)
+      }
+      Spacer(minLength: 12)
+      if model.evidenceWorkspaceTab == .terminal {
+        HStack(spacing: 16) {
+          Button("Copy Latest", action: copyLatest)
+            .buttonStyle(.plain)
+            .font(.system(size: 10.5, weight: .medium))
+            .disabled(model.terminalEntries.isEmpty)
+          Button("Clear", action: model.clearTerminal)
+            .buttonStyle(.plain)
+            .font(.system(size: 10.5, weight: .medium))
+            .disabled(model.terminalEntries.isEmpty || model.terminalEntries.contains(where: { $0.state == .running }))
+        }
+      }
+      HStack(spacing: 4) {
+        Image(systemName: "command")
+          .font(.system(size: 9, weight: .medium))
+        Text("J")
+          .font(.system(size: 9.5, weight: .medium).monospaced())
+      }
+      .foregroundStyle(Studio.tertiary)
+      .padding(.leading, 14)
+      .help("Toggle bottom workspace (Command–J)")
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel("Command J toggles the bottom workspace")
+
+      Button(action: model.toggleEvidenceWorkspace) {
+        Image(systemName: model.isEvidenceWorkspaceOpen ? "chevron.down" : "chevron.right")
+          .font(.system(size: 10, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+          .frame(width: 32, height: 32)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(
+        model.isEvidenceWorkspaceOpen ? "Collapse bottom workspace" : "Expand bottom workspace")
+      .help(
+        model.isEvidenceWorkspaceOpen
+          ? "Collapse bottom workspace (Command–J)"
+          : "Expand bottom workspace (Command–J)")
+    }
+    .padding(.horizontal, 16)
+    .frame(height: 40)
   }
 
   @ViewBuilder private var tabContent: some View {
@@ -2563,14 +2557,6 @@ private struct EvidenceWorkspace: View {
       }
     case .evidence:
       evidenceContent
-    case .changes:
-      if model.proposedChanges.isEmpty {
-        workspaceMessage(
-          symbol: "checkmark", title: "No changes",
-          detail: "The isolated task has not produced a change set.")
-      } else {
-        changesContent
-      }
     }
   }
 
@@ -2639,47 +2625,32 @@ private struct EvidenceWorkspace: View {
     }
   }
 
-  private var changesContent: some View {
-    ScrollView {
-      LazyVStack(spacing: 0) {
-        ForEach(model.proposedChanges) { change in
-          HStack(spacing: 14) {
-            Text(change.kind.rawValue.uppercased())
-              .font(.system(size: 9, weight: .bold).monospaced())
-              .foregroundStyle(changeColor(change.kind))
-              .frame(width: 68, alignment: .leading)
-            Text(change.path)
-              .font(.system(size: 10.5).monospaced())
-              .lineLimit(1)
-            Spacer(minLength: 0)
-            if change.binary {
-              Text("Binary")
-                .font(.system(size: 9.5))
-                .foregroundStyle(Studio.warning)
-            }
-          }
-          .padding(.horizontal, 18)
-          .frame(minHeight: 32)
-        }
-      }
-    }
-  }
-
   private func tabButton(_ tab: EvidenceWorkspaceTab) -> some View {
     Button {
       model.evidenceWorkspaceTab = tab
-      if tab == .terminal { model.isTerminalExpanded = true }
+      model.isEvidenceWorkspaceOpen = true
     } label: {
-      Text(tab.rawValue)
-        .font(.system(size: 10.5, weight: model.evidenceWorkspaceTab == tab ? .semibold : .medium))
-        .foregroundStyle(model.evidenceWorkspaceTab == tab ? Color.primary : Studio.secondary)
-        .frame(width: tabWidth(tab), height: 40)
-        .contentShape(Rectangle())
-        .overlay(alignment: .bottom) {
+      HStack(spacing: 4) {
+        Text(tab.rawValue)
+        if let count = tabCount(tab) {
+          Text("\(count)")
+            .font(.system(size: 9, weight: .semibold).monospacedDigit())
+            .foregroundStyle(Studio.secondary)
+            .padding(.horizontal, 3)
+            .frame(height: 15)
+            .background(Studio.raised)
+            .clipShape(Capsule())
+        }
+      }
+      .font(.system(size: 10.5, weight: model.evidenceWorkspaceTab == tab ? .semibold : .medium))
+      .foregroundStyle(model.evidenceWorkspaceTab == tab ? Color.primary : Studio.secondary)
+      .frame(width: tabWidth(tab), height: 40)
+      .contentShape(Rectangle())
+      .overlay(alignment: .bottom) {
         Rectangle()
           .fill(model.evidenceWorkspaceTab == tab ? Color.primary : .clear)
           .frame(
-            width: model.evidenceWorkspaceTab == tab ? tabWidth(tab) - 18 : 0,
+            width: model.evidenceWorkspaceTab == tab ? tabWidth(tab) - 10 : 0,
             height: 2)
         }
     }
@@ -2689,11 +2660,19 @@ private struct EvidenceWorkspace: View {
     .accessibilityValue(model.evidenceWorkspaceTab == tab ? "Selected" : "")
   }
 
+  private func tabCount(_ tab: EvidenceWorkspaceTab) -> Int? {
+    switch tab {
+    case .terminal: nil
+    case .logs: model.timeline.count > 0 ? model.timeline.count : nil
+    case .evidence: model.verificationEvidence.count > 0 ? model.verificationEvidence.count : nil
+    }
+  }
+
   private func tabWidth(_ tab: EvidenceWorkspaceTab) -> CGFloat {
     switch tab {
-    case .terminal, .logs: 70
-    case .evidence: 88
-    case .changes: 78
+    case .terminal: 56
+    case .logs: 64
+    case .evidence: 74
     }
   }
 
@@ -2720,13 +2699,6 @@ private struct EvidenceWorkspace: View {
       "\(entry.workingDirectory) % \(entry.command)\n\(entry.output)", forType: .string)
   }
 
-  private func changeColor(_ kind: ProposedChangeKind) -> Color {
-    switch kind {
-    case .added: Studio.success
-    case .modified: Studio.accent
-    case .deleted: .red
-    }
-  }
 }
 
 private struct EvidenceThumbnail: View {
@@ -2806,27 +2778,6 @@ private struct LogStateMark: View {
   }
 }
 
-private struct EvidenceToggleButton: View {
-  @EnvironmentObject var model: AppModel
-
-  var body: some View {
-    Button(action: model.toggleEvidenceWorkspace) {
-      Image(systemName: model.isEvidenceWorkspaceOpen ? "chevron.down" : "chevron.up")
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(Studio.secondary)
-        .frame(width: 34, height: 34)
-        .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .keyboardShortcut("e", modifiers: [.command, .shift])
-    .accessibilityLabel(
-      model.isEvidenceWorkspaceOpen ? "Close bottom workspace" : "Open bottom workspace")
-    .help(
-      model.isEvidenceWorkspaceOpen
-        ? "Close bottom workspace (⇧⌘E)" : "Open bottom workspace (⇧⌘E)")
-  }
-}
-
 private struct TaskActionBar: View {
   @EnvironmentObject var model: AppModel
   var body: some View {
@@ -2872,21 +2823,6 @@ private struct TaskActionBar: View {
           .background(Studio.accent)
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        Button {
-          model.notice = "No unread notifications."
-        } label: {
-          Image(systemName: "bell")
-            .font(.system(size: 14, weight: .medium))
-            .frame(width: 34, height: 34)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Studio.secondary)
-        .help("Notifications")
-        Divider()
-          .frame(height: 18)
-          .overlay(Studio.separator)
-        EvidenceToggleButton()
       }
       Spacer().frame(width: 4)
     }
