@@ -4233,34 +4233,36 @@ private struct DeployWorkspace: View {
   }
 
   private func feedbackCard(_ feedback: AppStoreFeedback) -> some View {
-    let comment = feedback.comment?.nonempty
-    let title = feedbackTitle(for: feedback)
+    let feedbackText = feedback.comment?.nonempty
+    let hasScreenshot = feedback.imageURL != nil
 
     return HStack(alignment: .top, spacing: 12) {
       VStack(alignment: .leading, spacing: 0) {
         VStack(alignment: .leading, spacing: 7) {
-          Text(title)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(Color.primary)
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
-
-          if let comment, comment.caseInsensitiveCompare(title) != .orderedSame {
-            Text(comment)
-              .font(.system(size: 13, weight: .regular))
+          if let feedbackText {
+            Text(feedbackText)
+              .font(.system(size: 16, weight: .semibold))
               .foregroundStyle(Color.primary)
               .lineSpacing(1)
               .fixedSize(horizontal: false, vertical: true)
           }
 
-          feedbackMetadata(feedback, fontSize: 10)
+          feedbackMetadata(feedback, fontSize: 10, includeDate: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
 
+        if hasScreenshot {
+          Spacer(minLength: 0)
+        }
+
         feedbackFooter(feedback)
-          .padding(.top, 14)
+          .padding(.top, hasScreenshot ? 0 : 14)
       }
-      .frame(maxWidth: .infinity, alignment: .leading)
+      .frame(
+        maxWidth: .infinity,
+        minHeight: hasScreenshot ? 104 : 0,
+        alignment: .topLeading
+      )
 
       if let imageURL = feedback.imageURL {
         feedbackThumbnail(feedback, imageURL: imageURL, width: 48, height: 104)
@@ -4283,18 +4285,12 @@ private struct DeployWorkspace: View {
       feedbackTypeIcon(feedback, size: 28)
 
       VStack(alignment: .leading, spacing: 5) {
-        Text(feedbackTitle(for: feedback))
-          .font(.system(size: 9.5, weight: .semibold))
-          .lineLimit(1)
-        feedbackMetadata(feedback, fontSize: 8.5)
-        if let comment = feedback.comment?.nonempty,
-          comment.caseInsensitiveCompare(feedbackTitle(for: feedback)) != .orderedSame
-        {
-          Text(comment)
-            .font(.system(size: 9))
-            .foregroundStyle(Studio.secondary)
-            .lineLimit(2)
+        if let feedbackText = feedback.comment?.nonempty {
+          Text(feedbackText)
+            .font(.system(size: 9.5, weight: .semibold))
+            .lineLimit(1)
         }
+        feedbackMetadata(feedback, fontSize: 8.5)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -4306,10 +4302,6 @@ private struct DeployWorkspace: View {
     .background(Studio.raised.opacity(0.58))
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     .accessibilityElement(children: .contain)
-  }
-
-  private func feedbackTitle(for feedback: AppStoreFeedback) -> String {
-    feedback.kind == .crash ? "Crash report" : "Test feedback"
   }
 
   private func feedbackTypeIcon(_ feedback: AppStoreFeedback, size: CGFloat) -> some View {
@@ -4324,11 +4316,13 @@ private struct DeployWorkspace: View {
       .accessibilityHidden(true)
   }
 
-  @ViewBuilder private func feedbackMetadata(_ feedback: AppStoreFeedback, fontSize: CGFloat) -> some View {
+  @ViewBuilder private func feedbackMetadata(
+    _ feedback: AppStoreFeedback, fontSize: CGFloat, includeDate: Bool = false
+  ) -> some View {
     let values = [
-      feedback.deviceModel?.nonempty,
-      feedback.osVersion?.nonempty,
-      feedbackBuildLabel(for: feedback),
+      friendlyFeedbackDeviceModel(feedback.deviceModel),
+      friendlyFeedbackOSVersion(feedback.osVersion),
+      includeDate ? feedback.createdDate.map(feedbackDateLabel) : nil,
     ].compactMap { $0 }
 
     if !values.isEmpty {
@@ -4340,14 +4334,110 @@ private struct DeployWorkspace: View {
     }
   }
 
-  private func feedbackBuildLabel(for feedback: AppStoreFeedback) -> String? {
-    guard let buildID = feedback.buildID,
-      let build = model.appStoreBuilds.first(where: { $0.id == buildID })
-    else { return nil }
-    if let marketingVersion = build.marketingVersion?.nonempty {
-      return "\(marketingVersion) (\(build.version))"
+  private func friendlyFeedbackDeviceModel(_ value: String?) -> String? {
+    guard let raw = value?.nonempty else { return nil }
+
+    let identifier = raw
+      .replacingOccurrences(of: "_", with: ",")
+      .replacingOccurrences(of: " ", with: "")
+    let knownNames: [String: String] = [
+      "iPhone18,5": "iPhone 17e",
+      "iPhone18,4": "iPhone Air",
+      "iPhone18,1": "iPhone 17 Pro",
+      "iPhone18,2": "iPhone 17 Pro Max",
+      "iPhone18,3": "iPhone 17",
+      "iPhone17,5": "iPhone 16e",
+      "iPhone17,1": "iPhone 16 Pro",
+      "iPhone17,2": "iPhone 16 Pro Max",
+      "iPhone17,3": "iPhone 16",
+      "iPhone17,4": "iPhone 16 Plus",
+      "iPhone16,1": "iPhone 15 Pro",
+      "iPhone16,2": "iPhone 15 Pro Max",
+      "iPhone15,4": "iPhone 15",
+      "iPhone15,5": "iPhone 15 Plus",
+      "iPhone15,2": "iPhone 14 Pro",
+      "iPhone15,3": "iPhone 14 Pro Max",
+      "iPhone14,7": "iPhone 14",
+      "iPhone14,8": "iPhone 14 Plus",
+      "iPhone14,6": "iPhone SE (3rd generation)",
+      "iPhone14,2": "iPhone 13 Pro",
+      "iPhone14,3": "iPhone 13 Pro Max",
+      "iPhone14,4": "iPhone 13 mini",
+      "iPhone14,5": "iPhone 13",
+      "iPhone13,1": "iPhone 12 mini",
+      "iPhone13,2": "iPhone 12",
+      "iPhone13,3": "iPhone 12 Pro",
+      "iPhone13,4": "iPhone 12 Pro Max",
+      "iPhone12,8": "iPhone SE (2nd generation)",
+      "iPhone12,1": "iPhone 11",
+      "iPhone12,3": "iPhone 11 Pro",
+      "iPhone12,5": "iPhone 11 Pro Max",
+      "iPhone11,8": "iPhone XR",
+      "iPhone11,2": "iPhone XS",
+      "iPhone11,4": "iPhone XS Max",
+      "iPhone11,6": "iPhone XS Max",
+      "iPhone10,3": "iPhone X",
+      "iPhone10,6": "iPhone X",
+      "iPhone10,1": "iPhone 8",
+      "iPhone10,4": "iPhone 8",
+      "iPhone10,2": "iPhone 8 Plus",
+      "iPhone10,5": "iPhone 8 Plus",
+      "iPhone9,1": "iPhone 7",
+      "iPhone9,3": "iPhone 7",
+      "iPhone9,2": "iPhone 7 Plus",
+      "iPhone9,4": "iPhone 7 Plus",
+      "iPhone8,4": "iPhone SE (1st generation)",
+    ]
+    if let knownName = knownNames[identifier] {
+      return knownName
     }
-    return build.version.nonempty
+
+    let parts = identifier.split { $0 == "," }
+    if let family = parts.first,
+      family.count > 6
+    {
+      let familyValue = String(family)
+      let familyNumber = familyValue.dropFirst(6)
+      if familyValue.prefix(6).caseInsensitiveCompare("iPhone") == .orderedSame,
+        familyNumber.allSatisfy(\.isNumber)
+      {
+        return "iPhone \(familyNumber)"
+      }
+    }
+    if let family = parts.first,
+      family.count > 4
+    {
+      let familyValue = String(family)
+      let familyNumber = familyValue.dropFirst(4)
+      if familyValue.prefix(4).caseInsensitiveCompare("iPad") == .orderedSame,
+        familyNumber.allSatisfy(\.isNumber)
+      {
+        return "iPad \(familyNumber)"
+      }
+    }
+
+    return raw
+      .replacingOccurrences(of: "_", with: " ")
+      .replacingOccurrences(of: ",", with: " ")
+      .split(separator: " ")
+      .joined(separator: " ")
+  }
+
+  private func friendlyFeedbackOSVersion(_ value: String?) -> String? {
+    guard let raw = value?.nonempty else { return nil }
+    let lowercased = raw.lowercased()
+    if lowercased.hasPrefix("ios") {
+      let version = String(raw.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+      return "iOS \(version)"
+    }
+    if lowercased.hasPrefix("macos") {
+      let version = String(raw.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+      return "macOS \(version)"
+    }
+    if raw.first?.isNumber == true {
+      return "iOS \(raw)"
+    }
+    return raw
   }
 
   private func feedbackFooter(_ feedback: AppStoreFeedback) -> some View {
@@ -4368,21 +4458,13 @@ private struct DeployWorkspace: View {
       .disabled(model.isBusy || model.isPreparingFeedbackAgentTask)
       .help("Start a task in the selected coding agent with this feedback and its screenshots")
 
-      Spacer(minLength: 16)
-
-      if let date = feedback.createdDate {
-        Text(feedbackDateLabel(date))
-          .font(.system(size: 10, weight: .regular))
-          .foregroundStyle(Studio.secondary)
-          .lineLimit(1)
-      }
     }
   }
 
   private func feedbackDateLabel(_ date: Date) -> String {
-    let day = date.formatted(date: .abbreviated, time: .omitted)
-    let time = date.formatted(date: .omitted, time: .shortened)
-    return "\(day) · \(time)"
+    let day = date.formatted(.dateTime.month(.abbreviated).day())
+    let time = date.formatted(.dateTime.hour().minute())
+    return "\(day), \(time)"
   }
 
   private func feedbackThumbnail(
