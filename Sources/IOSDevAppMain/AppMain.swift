@@ -67,9 +67,17 @@ private struct WindowViewportGuard: NSViewRepresentable {
       window.titlebarAppearsTransparent = true
       window.styleMask.insert(.fullSizeContentView)
       window.isMovableByWindowBackground = true
-      window.standardWindowButton(.closeButton)?.isHidden = true
-      window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-      window.standardWindowButton(.zoomButton)?.isHidden = true
+      // Keep the native traffic-light controls visible even though the custom
+      // title bar content fills the window. Hiding these made Lys look like a
+      // frameless web surface and removed the expected macOS window actions.
+      for button in [
+        window.standardWindowButton(.closeButton),
+        window.standardWindowButton(.miniaturizeButton),
+        window.standardWindowButton(.zoomButton),
+      ] {
+        button?.isHidden = false
+        button?.isEnabled = true
+      }
       let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
       var frame = window.frame
       frame.size.width = min(frame.width, visible.width)

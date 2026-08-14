@@ -203,121 +203,125 @@ private struct LysToolbar: View {
   @EnvironmentObject var model: AppModel
 
   var body: some View {
-    HStack(spacing: 0) {
-      LysLogoView(width: 60, height: 42)
-        .padding(.leading, 22)
-        .frame(width: 100, alignment: .leading)
+    ZStack {
+      HStack(spacing: 0) {
+        LysLogoView(width: 60, height: 42)
+          .padding(.leading, 22)
+          .frame(width: 100, alignment: .leading)
 
-      Menu {
-        Button("Open Repository…") { model.chooseRepository() }
-        if !model.containers.isEmpty {
-          Divider()
-          ForEach(model.containers, id: \.path) { container in
-            Button(container.lastPathComponent) { model.selectContainer(container) }
-          }
-        }
-        if model.needsExpoPreparation {
-          Divider()
-          Button("Prepare Expo iOS Project…", systemImage: "hammer") {
-            model.prepareExpoProject()
-          }
-        }
-      } label: {
-        ToolbarControl(
-          symbol: "cube", title: model.repository?.lastPathComponent ?? "Open Project",
-          width: 126)
-      }
-      .menuStyle(.borderlessButton)
-      .tint(Color(nsColor: .labelColor))
-      .frame(width: 126, height: 40)
-      .background(Studio.surface)
-      .overlay {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .stroke(Studio.separator, lineWidth: 1)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .padding(.trailing, 21)
+        Spacer(minLength: 12)
 
-      Menu {
-        if model.branchName == "—" || model.branchName.isEmpty {
-          Text("No branch detected")
-        } else {
-          Text(model.branchName)
-        }
-        if model.isGitRepository {
-          Divider()
-          Button("Open Changes", systemImage: "doc.text.magnifyingglass") { model.section = .changes }
-        }
-      } label: {
-        ToolbarControl(symbol: "arrow.triangle.branch", title: model.branchName, width: 117)
-      }
-      .menuStyle(.borderlessButton)
-      .tint(Color(nsColor: .labelColor))
-      .frame(width: 117, height: 40)
-      .background(Studio.surface)
-      .overlay {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .stroke(Studio.separator, lineWidth: 1)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .padding(.trailing, 22)
+        WorkspaceStatusButton()
 
-      Menu {
-        if !model.destinations.isEmpty {
-          ForEach(model.destinations) { destination in
-            Button("\(destination.name) · \(runtimeName(destination.runtime))") {
-              model.selectDestination(destination.udid)
+        Button(action: model.run) {
+          Label("Run", systemImage: "play.fill")
+            .font(.system(size: 12, weight: .semibold))
+            .frame(width: 92, height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.primary)
+        .background(Studio.surface)
+        .overlay {
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .disabled(!model.canRun)
+
+        ToolbarMoreButton()
+          .padding(.leading, 16)
+          .padding(.trailing, 24)
+      }
+      .frame(maxWidth: .infinity)
+
+      HStack(spacing: 10) {
+        Menu {
+          Button("Open Repository…") { model.chooseRepository() }
+          if !model.containers.isEmpty {
+            Divider()
+            ForEach(model.containers, id: \.path) { container in
+              Button(container.lastPathComponent) { model.selectContainer(container) }
             }
           }
-          Divider()
-        } else {
-          Text("No simulators found")
-        }
-        Button("Refresh Simulators", systemImage: "arrow.clockwise") {
-          model.refreshSimulators()
-        }
-        Button("Simulator Settings…", systemImage: "gearshape") { model.section = .settings }
-      } label: {
-        ToolbarControl(
-          symbol: "iphone",
-          title: model.selectedDestination.map {
-            "\($0.name) · \(runtimeName($0.runtime))"
+          if model.needsExpoPreparation {
+            Divider()
+            Button("Prepare Expo iOS Project…", systemImage: "hammer") {
+              model.prepareExpoProject()
+            }
           }
-            ?? "Select Simulator", width: 232)
-      }
-      .menuStyle(.borderlessButton)
-      .tint(Color(nsColor: .labelColor))
-      .frame(width: 232, height: 40)
-      .background(Studio.surface)
-      .overlay {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .stroke(Studio.separator, lineWidth: 1)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        } label: {
+          ToolbarControl(
+            symbol: "cube", title: model.repository?.lastPathComponent ?? "Open Project",
+            width: 126)
+        }
+        .menuStyle(.borderlessButton)
+        .tint(Color(nsColor: .labelColor))
+        .frame(width: 126, height: 40)
+        .background(Studio.surface)
+        .overlay {
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-      Spacer(minLength: 12)
+        Menu {
+          if model.branchName == "—" || model.branchName.isEmpty {
+            Text("No branch detected")
+          } else {
+            Text(model.branchName)
+          }
+          if model.isGitRepository {
+            Divider()
+            Button("Open Changes", systemImage: "doc.text.magnifyingglass") { model.section = .changes }
+          }
+        } label: {
+          ToolbarControl(symbol: "arrow.triangle.branch", title: model.branchName, width: 117)
+        }
+        .menuStyle(.borderlessButton)
+        .tint(Color(nsColor: .labelColor))
+        .frame(width: 117, height: 40)
+        .background(Studio.surface)
+        .overlay {
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-      WorkspaceStatusButton()
-
-      Button(action: model.run) {
-        Label("Run", systemImage: "play.fill")
-          .font(.system(size: 12, weight: .semibold))
-          .frame(width: 92, height: 40)
-          .contentShape(Rectangle())
+        Menu {
+          if !model.destinations.isEmpty {
+            ForEach(model.destinations) { destination in
+              Button("\(destination.name) · \(runtimeName(destination.runtime))") {
+                model.selectDestination(destination.udid)
+              }
+            }
+            Divider()
+          } else {
+            Text("No simulators found")
+          }
+          Button("Refresh Simulators", systemImage: "arrow.clockwise") {
+            model.refreshSimulators()
+          }
+          Button("Simulator Settings…", systemImage: "gearshape") { model.section = .settings }
+        } label: {
+          ToolbarControl(
+            symbol: "iphone",
+            title: model.selectedDestination.map {
+              "\($0.name) · \(runtimeName($0.runtime))"
+            }
+              ?? "Select Simulator", width: 232)
+        }
+        .menuStyle(.borderlessButton)
+        .tint(Color(nsColor: .labelColor))
+        .frame(width: 232, height: 40)
+        .background(Studio.surface)
+        .overlay {
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(Studio.separator, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
       }
-      .buttonStyle(.plain)
-      .foregroundStyle(Color.primary)
-      .background(Studio.surface)
-      .overlay {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .stroke(Studio.separator, lineWidth: 1)
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .disabled(!model.canRun)
-
-      ToolbarMoreButton()
-      .padding(.leading, 16)
-      .padding(.trailing, 24)
+      .fixedSize(horizontal: true, vertical: false)
     }
     .frame(height: 72)
     .background(Studio.surface)
@@ -403,7 +407,7 @@ private struct ToolbarControl: View {
           .foregroundStyle(Studio.secondary)
       }
       .font(.system(size: 12, weight: .medium))
-      .padding(.horizontal, 12)
+      .padding(.horizontal, 10)
     }
     .frame(width: width, height: 40)
     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -6768,90 +6772,26 @@ private struct GitWorkspace: View {
   @State private var selectedPath: String?
   @State private var selectedDiff: ProposedFileDiff?
   @State private var isLoadingDiff = false
+  @State private var fileFilter = ""
+  @State private var copiedDiff = false
+  @FocusState private var isFileFilterFocused: Bool
 
   var body: some View {
     VStack(spacing: 0) {
-      HStack(spacing: 16) {
-        WorkspaceHeader(
-          symbol: "arrow.triangle.branch",
-          title: "Changes",
-          detail: model.activeWorktree == nil
-            ? "Review uncommitted files in the repository checkout"
-            : "Review the isolated task against its exact baseline"
-        )
-        Spacer(minLength: 0)
-        StatusBadge(
-          title: scopeBadgeTitle,
-          state: scopeBadgeState
-        )
-        Button {
-          if model.activeWorktree == nil {
-            Task { await model.refreshRepositoryChanges() }
-          } else {
-            model.reviewChanges()
-          }
-        } label: {
-          Label("Refresh", systemImage: "arrow.clockwise")
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .help(
-          model.activeWorktree == nil
-            ? "Refresh the repository working-tree status"
-            : "Refresh the baseline-relative change set")
-      }
-      .padding(.horizontal, 24)
-      .frame(height: 72)
-      .background(Studio.surface)
+      changeHeader
       Divider().overlay(Studio.separator)
 
       HStack(spacing: 0) {
-        changeMetric("Changed", count: modifiedCount, color: Studio.accent)
-        changeMetricSeparator
-        changeMetric("Added", count: addedCount, color: Studio.success)
-        changeMetricSeparator
-        changeMetric("Deleted", count: deletedCount, color: .red)
-        Spacer()
-        HStack(spacing: 7) {
-          Image(systemName: model.activeWorktree == nil ? "arrow.triangle.branch" : "checkmark.seal")
-          Text(
-            model.activeWorktree == nil
-              ? "Working tree compared with HEAD" : "Showing only task-scoped changes")
-        }
-        .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(Studio.secondary)
-        .padding(.trailing, 24)
+        changeFileList
+          .frame(width: fileListWidth)
+        Divider().overlay(Studio.separator)
+        changeDetail
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
-      .padding(.leading, 24)
-      .frame(height: 58)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
       .background(Studio.surface)
-      Divider().overlay(Studio.separator)
-
-      if model.visibleChanges.isEmpty {
-        WorkspaceEmpty(
-          symbol: "arrow.triangle.branch",
-          title: model.activeWorktree == nil ? "No uncommitted changes" : "No proposed changes",
-          detail: model.activeWorktree == nil
-            ? "The repository checkout currently matches HEAD."
-            : "The active task currently matches its baseline.")
-      } else {
-        HStack(spacing: 0) {
-          changeFileList
-            .frame(width: 310)
-          Divider().overlay(Studio.separator)
-          changeDetail
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(Studio.surface)
-        .clipShape(RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous))
-        .overlay {
-          RoundedRectangle(cornerRadius: Studio.panelRadius, style: .continuous)
-            .stroke(Studio.separator, lineWidth: 1)
-        }
-        .padding(20)
-      }
     }
-    .background(Studio.backdrop)
+    .background(Studio.surface)
     .task(id: diffTaskID) {
       await loadSelectedDiff()
     }
@@ -6863,20 +6803,179 @@ private struct GitWorkspace: View {
     }
   }
 
-  private func changeMetric(_ title: String, count: Int, color: Color) -> some View {
-    HStack(spacing: 8) {
-      Circle().fill(color).frame(width: 7, height: 7)
-      Text(title).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Studio.secondary)
-      Text("\(count)").font(.system(size: 12, weight: .semibold).monospacedDigit())
+  private var changeHeader: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .center, spacing: 16) {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("Changes")
+            .font(.system(size: 24, weight: .bold))
+          Text("Review uncommitted changes")
+            .font(.system(size: 13))
+            .foregroundStyle(Studio.secondary)
+        }
+
+        Spacer(minLength: 20)
+
+        HStack(spacing: 12) {
+          Text(scopeTitle)
+            .font(.system(size: 12.5, weight: .medium))
+            .foregroundStyle(Studio.secondary)
+
+          Button(action: refreshChanges) {
+            Image(systemName: "arrow.clockwise")
+              .font(.system(size: 14, weight: .semibold))
+              .frame(width: 42, height: 42)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(Studio.secondary)
+          .background(Studio.surface)
+          .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(Studio.separator, lineWidth: 1)
+          }
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .help(
+            model.activeWorktree == nil
+              ? "Refresh the repository working-tree status"
+              : "Refresh the baseline-relative change set")
+          .accessibilityLabel("Refresh changes")
+
+          Menu {
+            Button("Refresh Changes", systemImage: "arrow.clockwise", action: refreshChanges)
+            Divider()
+            Button("Copy File Path", systemImage: "doc.on.doc", action: copyFilePath)
+            Button("Open in Code", systemImage: "chevron.left.forwardslash.chevron.right") {
+              openSelectedInCode()
+            }
+            .disabled(!canOpenSelectedFile)
+            Button("Reveal in Finder", systemImage: "folder") {
+              revealSelectedFile()
+            }
+            .disabled(!canOpenSelectedFile)
+          } label: {
+            Image(systemName: "ellipsis")
+              .font(.system(size: 15, weight: .semibold))
+              .frame(width: 42, height: 42)
+              .contentShape(Rectangle())
+          }
+          .menuStyle(.borderlessButton)
+          .foregroundStyle(Studio.secondary)
+          .background(Studio.surface)
+          .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(Studio.separator, lineWidth: 1)
+          }
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .help("More change actions")
+          .accessibilityLabel("More change actions")
+        }
+      }
+      .padding(.horizontal, 32)
+      .frame(height: 96)
+
+      HStack(spacing: 0) {
+        Text("\(changes.count) files")
+          .font(.system(size: 13, weight: .semibold))
+        headerMetricSeparator
+        headerMetric("\(modifiedCount) modified", color: Studio.accent)
+        headerMetricSeparator
+        headerMetric("\(addedCount) added", color: Studio.success)
+        headerMetricSeparator
+        headerMetric("\(deletedCount) deleted", color: .red)
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 32)
+      .frame(height: 68, alignment: .center)
     }
-    .padding(.horizontal, 16)
+    .background(Studio.surface)
   }
 
-  private var changeMetricSeparator: some View {
-    Rectangle()
-      .fill(Studio.separator)
-      .frame(width: 1, height: 30)
-      .padding(.horizontal, 8)
+  private func headerMetric(_ title: String, color: Color) -> some View {
+    Text(title)
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundStyle(color)
+  }
+
+  private var headerMetricSeparator: some View {
+    Text("·")
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundStyle(Studio.secondary)
+      .padding(.horizontal, 12)
+  }
+
+  private var fileListWidth: CGFloat { 348 }
+
+  private var scopeTitle: String {
+    model.activeWorktree == nil ? "Working tree ↔ HEAD" : "Task worktree ↔ baseline"
+  }
+
+  private func refreshChanges() {
+    if model.activeWorktree == nil {
+      Task { await model.refreshRepositoryChanges() }
+    } else {
+      model.reviewChanges()
+    }
+  }
+
+  private var filteredChanges: [ProposedChange] {
+    guard let query = fileFilter.nonempty?.lowercased() else { return changes }
+    return changes.filter { $0.path.lowercased().contains(query) }
+  }
+
+  private var canOpenSelectedFile: Bool {
+    guard let selectedFileURL else { return false }
+    return (try? selectedFileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+  }
+
+  private var selectedFileURL: URL? {
+    guard let workspace = model.taskWorkspace, let selectedChange else { return nil }
+    return workspace.appending(path: selectedChange.path)
+  }
+
+  private func openSelectedInCode() {
+    guard let selectedFileURL, canOpenSelectedFile else { return }
+    model.selectFile(selectedFileURL)
+  }
+
+  private func revealSelectedFile() {
+    guard let selectedFileURL, canOpenSelectedFile else { return }
+    NSWorkspace.shared.activateFileViewerSelecting([selectedFileURL])
+  }
+
+  private func copyFilePath() {
+    guard let selectedFileURL else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(selectedFileURL.path, forType: .string)
+    showCopyFeedback()
+  }
+
+  private func copyDiff() {
+    guard let change = selectedChange else { return }
+    let contents: String
+    if let selectedDiff, !selectedDiff.lines.isEmpty {
+      contents = selectedDiff.lines.map { line in
+        let prefix: String
+        switch line.kind {
+        case .context: prefix = " "
+        case .added: prefix = "+"
+        case .removed: prefix = "-"
+        }
+        return "\(prefix)\(line.text)"
+      }.joined(separator: "\n")
+    } else {
+      contents = selectedDiff?.message ?? change.path
+    }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(contents, forType: .string)
+    showCopyFeedback()
+  }
+
+  private func showCopyFeedback() {
+    copiedDiff = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+      copiedDiff = false
+    }
   }
 
   private var changes: [ProposedChange] { model.visibleChanges }
@@ -6886,10 +6985,11 @@ private struct GitWorkspace: View {
   private var deletedCount: Int { changes.filter { $0.kind == .deleted }.count }
 
   private var selectedChange: ProposedChange? {
+    let visibleChanges = filteredChanges
     if let selectedPath {
-      return changes.first { $0.path == selectedPath }
+      return visibleChanges.first { $0.path == selectedPath }
     }
-    return changes.first
+    return visibleChanges.first
   }
 
   private var diffTaskID: String {
@@ -6901,76 +7001,107 @@ private struct GitWorkspace: View {
     return "\(revision)::\(model.generation)::\(selectedChange?.path ?? "none")::\(files)"
   }
 
-  private var scopeBadgeTitle: String {
-    if model.activeWorktree != nil { return "Task worktree" }
-    if model.repository == nil { return "No project" }
-    if !model.isGitRepository { return "Read-only folder" }
-    return model.repositoryChanges.isEmpty ? "Clean checkout" : "Uncommitted work"
-  }
-
-  private var scopeBadgeState: StatusBadge.State {
-    if model.activeWorktree != nil { return .active }
-    return model.repositoryChanges.isEmpty ? .neutral : .warning
-  }
-
   private var changeFileList: some View {
     VStack(spacing: 0) {
-      HStack {
-        Text("Changed files")
-          .font(.system(size: 11, weight: .semibold))
-        Spacer()
-        Text("\(changes.count)")
-          .font(.system(size: 10, weight: .semibold).monospacedDigit())
+      HStack(spacing: 9) {
+        Image(systemName: "magnifyingglass")
+          .font(.system(size: 13, weight: .medium))
           .foregroundStyle(Studio.secondary)
+        TextField("Filter files…", text: $fileFilter)
+          .textFieldStyle(.plain)
+          .font(.system(size: 12.5))
+          .focused($isFileFilterFocused)
+        if !fileFilter.isEmpty {
+          Button { fileFilter = "" } label: {
+            Image(systemName: "xmark.circle.fill")
+              .font(.system(size: 13))
+              .foregroundStyle(Studio.tertiary)
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Clear file filter")
+        }
+        Text("⌘ P")
+          .font(.system(size: 9.5, weight: .medium).monospaced())
+          .foregroundStyle(Studio.tertiary)
       }
-      .padding(.horizontal, 16)
+      .padding(.horizontal, 14)
       .frame(height: 44)
+      .background(Studio.raised.opacity(0.82))
+      .overlay {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(Studio.separator, lineWidth: 1)
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .padding(.horizontal, 20)
+      .padding(.vertical, 16)
+      .background {
+        Button("Focus file filter") { isFileFilterFocused = true }
+          .keyboardShortcut("p", modifiers: [.command])
+          .hidden()
+      }
+
       Divider().overlay(Studio.separator)
 
-      ScrollView {
-        LazyVStack(spacing: 3) {
-          ForEach(changes) { change in
-            Button {
-              selectedPath = change.path
-            } label: {
-              ChangeFileRow(
-                change: change, selected: selectedChange?.path == change.path)
+      if filteredChanges.isEmpty {
+        WorkspaceEmpty(
+          symbol: fileFilter.isEmpty ? "arrow.triangle.branch" : "magnifyingglass",
+          title: fileFilter.isEmpty
+            ? (model.activeWorktree == nil ? "No uncommitted changes" : "No proposed changes")
+            : "No matching files",
+          detail: fileFilter.isEmpty
+            ? (model.activeWorktree == nil
+              ? "The repository checkout currently matches HEAD."
+              : "The active task currently matches its baseline.")
+            : "Try a different path or file name.")
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .padding(.horizontal, 22)
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 3) {
+            ForEach(filteredChanges) { change in
+              Button {
+                selectedPath = change.path
+              } label: {
+                ChangeFileRow(
+                  change: change, selected: selectedChange?.path == change.path)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("\(change.kind.rawValue) \(change.path)")
+              .accessibilityValue(change.binary ? "Binary file" : "Text file")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(change.kind.rawValue) \(change.path)")
-            .accessibilityValue(change.binary ? "Binary file" : "Text file")
-          }
 
-          if !model.applyConflicts.isEmpty {
-            VStack(alignment: .leading, spacing: 7) {
-              Label("Apply needs review", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(Studio.warning)
-              ForEach(model.applyConflicts) { conflict in
-                VStack(alignment: .leading, spacing: 3) {
-                  Text(conflict.path)
-                    .font(.system(size: 10, weight: .semibold).monospaced())
-                  Text(conflict.reason)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(Studio.secondary)
-                    .lineLimit(3)
-                }
-                if let artifact = conflict.resolutionArtifact {
-                  Text(artifact)
-                    .font(.system(size: 9).monospaced())
-                    .foregroundStyle(Studio.secondary)
-                    .textSelection(.enabled)
+            if !model.applyConflicts.isEmpty {
+              VStack(alignment: .leading, spacing: 7) {
+                Label("Apply needs review", systemImage: "exclamationmark.triangle.fill")
+                  .font(.system(size: 10.5, weight: .semibold))
+                  .foregroundStyle(Studio.warning)
+                ForEach(model.applyConflicts) { conflict in
+                  VStack(alignment: .leading, spacing: 3) {
+                    Text(conflict.path)
+                      .font(.system(size: 10, weight: .semibold).monospaced())
+                    Text(conflict.reason)
+                      .font(.system(size: 9.5))
+                      .foregroundStyle(Studio.secondary)
+                      .lineLimit(3)
+                  }
+                  if let artifact = conflict.resolutionArtifact {
+                    Text(artifact)
+                      .font(.system(size: 9).monospaced())
+                      .foregroundStyle(Studio.secondary)
+                      .textSelection(.enabled)
+                  }
                 }
               }
+              .padding(12)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(Color.orange.opacity(0.08))
+              .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+              .padding(.top, 8)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .padding(.top, 8)
           }
+          .padding(.horizontal, 12)
+          .padding(.vertical, 12)
         }
-        .padding(8)
       }
     }
     .background(Studio.surface)
@@ -6983,7 +7114,7 @@ private struct GitWorkspace: View {
         HStack(alignment: .top, spacing: 12) {
           VStack(alignment: .leading, spacing: 5) {
             Text(change.path)
-              .font(.system(size: 12, weight: .semibold).monospaced())
+              .font(.system(size: 15, weight: .semibold).monospaced())
               .lineLimit(1)
               .truncationMode(.middle)
             HStack(spacing: 10) {
@@ -7002,15 +7133,28 @@ private struct GitWorkspace: View {
                   .foregroundStyle(Studio.secondary)
               }
             }
-            .font(.system(size: 10, weight: .medium).monospacedDigit())
+            .font(.system(size: 11, weight: .medium).monospacedDigit())
           }
           Spacer(minLength: 0)
-          Text(model.activeWorktree == nil ? "HEAD diff" : "Task diff")
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(Studio.secondary)
+          Button(action: copyDiff) {
+            Image(systemName: copiedDiff ? "checkmark" : "doc.on.doc")
+              .font(.system(size: 14, weight: .medium))
+              .frame(width: 42, height: 42)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(copiedDiff ? Studio.success : Studio.secondary)
+          .background(Studio.surface)
+          .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(Studio.separator, lineWidth: 1)
+          }
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .help(copiedDiff ? "Copied to clipboard" : "Copy diff to clipboard")
+          .accessibilityLabel(copiedDiff ? "Diff copied" : "Copy diff")
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 15)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 22)
         Divider().overlay(Studio.separator)
 
         if isLoadingDiff {
@@ -7063,13 +7207,30 @@ private struct GitWorkspace: View {
     let language = SyntaxLanguage(fileURL: URL(fileURLWithPath: diff.path))
     return ScrollView([.vertical, .horizontal]) {
       LazyVStack(spacing: 0) {
+        Text(hunkSummary(for: diff))
+          .font(.system(size: 10.5, weight: .medium).monospaced())
+          .foregroundStyle(Studio.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal, 78)
+          .frame(height: 42)
+          .background(Studio.raised.opacity(0.72))
+          .overlay(alignment: .bottom) { Divider().overlay(Studio.separator) }
         ForEach(diff.lines) { line in
           DiffLineRow(line: line, language: language)
         }
       }
-      .padding(.vertical, 8)
+      .frame(minWidth: 900, alignment: .leading)
+      .padding(.vertical, 0)
     }
-    .background(Studio.raised.opacity(0.42))
+    .background(Studio.surface)
+  }
+
+  private func hunkSummary(for diff: ProposedFileDiff) -> String {
+    let oldStart = diff.lines.compactMap(\.oldLineNumber).first ?? 1
+    let newStart = diff.lines.compactMap(\.newLineNumber).first ?? oldStart
+    let oldCount = max(1, diff.lines.filter { $0.oldLineNumber != nil }.count)
+    let newCount = max(1, diff.lines.filter { $0.newLineNumber != nil }.count)
+    return "@@ -\(oldStart),\(oldCount) +\(newStart),\(newCount) @@"
   }
 
   private func loadSelectedDiff() async {
@@ -7093,32 +7254,30 @@ private struct ChangeFileRow: View {
   let selected: Bool
 
   var body: some View {
-    HStack(spacing: 10) {
+    HStack(spacing: 12) {
       Image(systemName: change.binary ? "shippingbox" : "doc.text")
-        .font(.system(size: 12, weight: .medium))
+        .font(.system(size: 16, weight: .medium))
         .foregroundStyle(proposedChangeColor(change.kind))
-        .frame(width: 28, height: 28)
-        .background(proposedChangeColor(change.kind).opacity(0.11))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(width: 24, height: 24)
 
       VStack(alignment: .leading, spacing: 3) {
         Text(fileName)
-          .font(.system(size: 11, weight: selected ? .semibold : .medium))
+          .font(.system(size: 12, weight: selected ? .semibold : .medium))
           .lineLimit(1)
           .truncationMode(.middle)
         Text(directory)
-          .font(.system(size: 9.5, weight: .medium).monospaced())
+          .font(.system(size: 10, weight: .medium).monospaced())
           .foregroundStyle(Studio.secondary)
           .lineLimit(1)
           .truncationMode(.middle)
       }
       Spacer(minLength: 5)
-      Text(change.kind.rawValue.capitalized)
-        .font(.system(size: 8.5, weight: .bold).monospaced())
+      Text(changeKindLetter)
+        .font(.system(size: 11, weight: .bold).monospaced())
         .foregroundStyle(proposedChangeColor(change.kind))
     }
-    .padding(.horizontal, 10)
-    .frame(minHeight: 58)
+    .padding(.horizontal, 14)
+    .frame(minHeight: 70)
     .background(selected ? Studio.accentSoft : Color.clear)
     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
     .contentShape(Rectangle())
@@ -7130,6 +7289,14 @@ private struct ChangeFileRow: View {
     let components = change.path.split(separator: "/")
     guard components.count > 1 else { return "Project root" }
     return components.dropLast().joined(separator: "/")
+  }
+
+  private var changeKindLetter: String {
+    switch change.kind {
+    case .added: "A"
+    case .modified: "M"
+    case .deleted: "D"
+    }
   }
 }
 
@@ -7152,19 +7319,21 @@ private struct DiffLineRow: View {
   var body: some View {
     HStack(spacing: 0) {
       Text(lineNumber)
-        .frame(width: 42, alignment: .trailing)
+        .font(.system(size: 10.5).monospacedDigit())
+        .frame(width: 48, alignment: .trailing)
         .foregroundStyle(Studio.tertiary)
       Text(prefix)
-        .frame(width: 24)
+        .font(.system(size: 11, weight: .semibold).monospaced())
+        .frame(width: 28)
         .foregroundStyle(prefixColor)
       SyntaxHighlightedText(text: line.text, language: language)
         .fixedSize(horizontal: true, vertical: false)
-        .frame(minWidth: 420, alignment: .leading)
+        .frame(minWidth: 620, alignment: .leading)
         .textSelection(.enabled)
     }
     .foregroundStyle(Studio.secondary)
-    .padding(.horizontal, 10)
-    .frame(minHeight: 23, alignment: .center)
+    .padding(.horizontal, 24)
+    .frame(minWidth: 900, minHeight: 28, alignment: .leading)
     .background(rowColor)
     .overlay(alignment: .bottom) { Divider().overlay(Studio.separator.opacity(0.5)) }
   }
