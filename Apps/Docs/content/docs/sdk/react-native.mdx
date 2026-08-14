@@ -150,10 +150,19 @@ import { testSession } from '@lys/testkit';
 
 const token = testSession.credential('LYS_TEST_SESSION_TOKEN');
 if (token) await auth.restoreTestSession(token);
+
+if (testSession.resetRequestedFor('authenticated.student')) {
+  // Use the app's real navigation API; Lys does not manipulate the router directly.
+  router.replace('/home');
+}
 ```
 
 The value is available only on a host launch carrying `-LysTesting`. Never log, persist, or include
-the token value in a contract.
+the token value in a contract. Independent contexts default to `isolation: "relaunch"`; before the
+next flow the host adds `-LysReset` and `-LysContext <id>`. The app-owned setup branch should restore
+the route represented by `readyWhen`. Use `isolation: "preserve"` only for an explicitly chained
+scenario. These launch markers are host-owned and cannot be supplied through session `arguments`.
+The previous flow's terminal screen remains available for evidence.
 
 ## Verify
 

@@ -8,7 +8,8 @@ The canonical file is `.lys/contract.json`, schema version 2.
 - `app.entryRoutes`: real bootstrap/attachment routes such as Home or signed-out login.
 - `capabilities`: real UI actions with a stable selector, optional source/result route, parameters,
   and risk (`readOnly`, `reversible`, `destructive`, `external`).
-- `contexts`: deterministic preparation plus `readyWhen`. Use `uiFlow` or `authenticatedSession`.
+- `contexts`: deterministic preparation plus `readyWhen`. Use `uiFlow` or
+  `authenticatedSession`, and declare `isolation` (`relaunch` by default or explicit `preserve`).
 - `flows`: the bounded outcome, `startRoute`, supported `entryRoutes`, optional parameters and
   `requiredSecrets`, steps, and acceptance.
 
@@ -30,6 +31,20 @@ normalize to their route-based `readyWhen` through a protected relaunch.
 UI contexts with `prepare` steps follow the same rule so login/logout preparation is independent of
 the screen left open by the user. Authenticated-session contexts relaunch through the host fixture
 and do not need UI entry navigation unless they also declare preparation steps.
+
+## Between-flow isolation
+
+Independent flows are normalized before they start. The host terminates and relaunches the app
+without erasing app data, then adds `-LysTesting -LysReset -LysContext <context-id>` to the launch.
+The app owns the router/session setup for that context and should reset to the route represented by
+`readyWhen`. These markers are host-owned and must not appear in session `arguments`. The final
+screen of the preceding flow is intentionally left untouched for evidence.
+
+Use `isolation: "preserve"` only when a flow is deliberately chained to state created by the
+previous flow. A real Home/back capability should still be declared when it is part of the product
+UI, but it is not a substitute for host-owned isolation and app-owned startup normalization.
+Exploratory journeys receive `-LysReset` without a context ID when a new journey begins; continuing
+the same journey by `journeyID` does not reset between its steps.
 
 Supported actions: `tap`, `doubleTap`, `longPress`, `type`, `clear`, `toggle`, `select`, `scrollUp`,
 `scrollDown`, `swipe`, `drag`, `setSlider`, `dismiss`, and `back`.

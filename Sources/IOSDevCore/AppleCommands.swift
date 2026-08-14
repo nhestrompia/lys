@@ -36,19 +36,28 @@ public enum AppleCommandBuilder {
   public static func install(simctl: URL, udid: String, app: URL) -> CommandSpec {
     .init(executable: simctl, arguments: ["install", udid, app.path])
   }
-  public static func launch(simctl: URL, udid: String, bundleID: String, arguments: [String] = [])
-    -> CommandSpec
-  { .init(executable: simctl, arguments: ["launch", udid, bundleID] + arguments) }
+  public static func launch(
+    simctl: URL, udid: String, bundleID: String, arguments: [String] = [],
+    terminateRunningProcess: Bool = false
+  ) -> CommandSpec {
+    .init(
+      executable: simctl,
+      arguments: ["launch"] + (terminateRunningProcess ? ["--terminate-running-process"] : [])
+        + [udid, bundleID] + arguments)
+  }
   /// Builds a Simulator launch whose protected values live only in the child environment. Values
   /// are never interpolated into command arguments, logs, or the agent-visible contract.
   public static func authenticatedLaunch(
     simctl: URL, udid: String, bundleID: String, developerDirectory: String,
-    values: [String: String], arguments: [String] = ["-LysTesting"]
+    values: [String: String], arguments: [String] = ["-LysTesting"],
+    terminateRunningProcess: Bool = false
   ) -> CommandSpec {
     var environment = ["DEVELOPER_DIR": developerDirectory]
     for (key, value) in values { environment["SIMCTL_CHILD_\(key)"] = value }
     return .init(
-      executable: simctl, arguments: ["launch", udid, bundleID] + arguments,
+      executable: simctl,
+      arguments: ["launch"] + (terminateRunningProcess ? ["--terminate-running-process"] : [])
+        + [udid, bundleID] + arguments,
       environment: environment)
   }
   public static func configureMetro(
@@ -153,5 +162,39 @@ public enum AppleCommandBuilder {
       if value == 48 { return 39 }
     }
     return nil
+  }
+}
+
+/// Builds the process arguments owned by the Lys host. Contract-provided app arguments may not
+/// override the testing, reset, or context markers that define the current isolation boundary.
+enum LysHostLaunchArguments {
+  static let reservedFlags = Set(["-LysTesting", "-LysReset", "-LysContext"])
+
+  static func build(
+    contextID: String?, resetRequested: Bool, additional: [String] = []
+  ) -> [String] {
+    var sanitized: [String] = []
+    var index = additional.startIndex
+    while index < additional.endIndex {
+      let argument = additional[index]
+      if argument == "-LysContext" {
+        index = additional.index(after: index)
+        if index < additional.endIndex { index = additional.index(after: index) }
+        continue
+      }
+      if reservedFlags.contains(argument) {
+        index = additional.index(after: index)
+        continue
+      }
+      sanitized.append(argument)
+      index = additional.index(after: index)
+    }
+
+    sanitized.append("-LysTesting")
+    if resetRequested { sanitized.append("-LysReset") }
+    if let contextID, !contextID.isEmpty {
+      sanitized.append(contentsOf: ["-LysContext", contextID])
+    }
+    return sanitized
   }
 }

@@ -169,10 +169,19 @@ if let token = LysTestSession.credential(
 ) {
   await auth.restoreTestSession(token)
 }
+
+if LysTestSession.resetRequested(for: "authenticated.student") {
+  // Use the app's real router after restoring the requested test identity.
+  router.reset(to: .home)
+}
 ```
 
 Keep restoration behind `LysTestSession`; it returns a value only when the host supplied
-`-LysTesting`.
+`-LysTesting`. Independent contexts default to `isolation: .relaunch`. Before the next flow, the
+host relaunches the app with `-LysReset -LysContext <id>` and the app-owned setup branch restores
+the route represented by `readyWhen`. Use `isolation: .preserve` only for an explicitly chained
+scenario. These launch markers are host-owned and cannot be supplied through session `arguments`.
+The previous flow's terminal screen remains available for evidence.
 
 ## Verify
 

@@ -239,7 +239,7 @@ public enum LysIsolationPolicy: String, Codable, Sendable {
 public struct LysAuthenticatedSession: Codable, Sendable {
   public var environment: [String: LysInput]
   public var arguments: [String]?
-  public init(environment: [String: LysInput], arguments: [String]? = ["-LysTesting"]) {
+  public init(environment: [String: LysInput], arguments: [String]? = nil) {
     self.environment = environment
     self.arguments = arguments
   }
@@ -258,11 +258,10 @@ public struct LysContext: Codable, Identifiable, Sendable {
   public var session: LysAuthenticatedSession?
 
   public init(
-    id: String, title: String, mode: LysContextMode, isolation: LysIsolationPolicy = .relaunch,
-    requiredSecrets: [String] = [],
+    id: String, title: String, mode: LysContextMode, requiredSecrets: [String] = [],
     startRoute: String? = nil, entryRoutes: [String]? = nil,
     prepare: [LysStep] = [], readyWhen: [LysPredicate],
-    session: LysAuthenticatedSession? = nil
+    session: LysAuthenticatedSession? = nil, isolation: LysIsolationPolicy = .relaunch
   ) {
     self.id = id
     self.title = title
@@ -276,31 +275,53 @@ public struct LysContext: Codable, Identifiable, Sendable {
     self.session = session
   }
 
+  private enum CodingKeys: String, CodingKey {
+    case id, title, mode, isolation, requiredSecrets, startRoute, entryRoutes, prepare, readyWhen
+    case session
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    id = try values.decode(String.self, forKey: .id)
+    title = try values.decode(String.self, forKey: .title)
+    mode = try values.decode(LysContextMode.self, forKey: .mode)
+    isolation =
+      try values.decodeIfPresent(LysIsolationPolicy.self, forKey: .isolation) ?? .relaunch
+    requiredSecrets = try values.decodeIfPresent([String].self, forKey: .requiredSecrets)
+    startRoute = try values.decodeIfPresent(String.self, forKey: .startRoute)
+    entryRoutes = try values.decodeIfPresent([String].self, forKey: .entryRoutes)
+    prepare = try values.decodeIfPresent([LysStep].self, forKey: .prepare) ?? []
+    readyWhen = try values.decode([LysPredicate].self, forKey: .readyWhen)
+    session = try values.decodeIfPresent(LysAuthenticatedSession.self, forKey: .session)
+  }
+
   public static func authenticated(
     id: String, title: String, tokenEnvironmentKey: String, tokenSecret: String,
-    readyWhen: [LysPredicate]
+    readyWhen: [LysPredicate], isolation: LysIsolationPolicy = .relaunch
   ) -> Self {
     .init(
       id: id, title: title, mode: .authenticatedSession,
       requiredSecrets: [tokenSecret], readyWhen: readyWhen,
-      session: .init(environment: [tokenEnvironmentKey: .secret(tokenSecret)]))
+      session: .init(environment: [tokenEnvironmentKey: .secret(tokenSecret)]),
+      isolation: isolation)
   }
 
   public static func signedOut(
     id: String = "signedOut", title: String = "Signed-out user",
-    readyWhen: [LysPredicate]
+    readyWhen: [LysPredicate], isolation: LysIsolationPolicy = .relaunch
   ) -> Self {
-    .init(id: id, title: title, mode: .uiFlow, readyWhen: readyWhen)
+    .init(id: id, title: title, mode: .uiFlow, readyWhen: readyWhen, isolation: isolation)
   }
 
   public static func ui(
     id: String, title: String, startRoute: LysScreen, entryRoutes: [LysScreen],
-    requiredSecrets: [String] = [], prepare: [LysStep], readyWhen: [LysPredicate]
+    requiredSecrets: [String] = [], prepare: [LysStep], readyWhen: [LysPredicate],
+    isolation: LysIsolationPolicy = .relaunch
   ) -> Self {
     .init(
       id: id, title: title, mode: .uiFlow, requiredSecrets: requiredSecrets,
       startRoute: startRoute.id, entryRoutes: entryRoutes.map(\.id), prepare: prepare,
-      readyWhen: readyWhen)
+      readyWhen: readyWhen, isolation: isolation)
   }
 }
 

@@ -13,7 +13,7 @@ semver tag without inheriting the desktop app's macOS 26 deployment target:
 
 ```swift
 dependencies: [
-  .package(url: "https://github.com/nhestrompia/lys-swift.git", from: "0.3.0")
+  .package(url: "https://github.com/nhestrompia/lys-swift.git", from: "0.4.0")
 ],
 targets: [
   .target(name: "YourApp", dependencies: [
@@ -23,3 +23,10 @@ targets: [
 ```
 
 Application code imports the module with `import Lys`.
+
+Independent flow contexts use `isolation: .relaunch` by default. Before the next flow, the host
+relaunches the app with `-LysReset -LysContext <id>` while preserving app data. Use
+`LysTestSession.resetRequested(for:)` in the app's own router/session setup to establish the
+context's `readyWhen` route. Choose `isolation: .preserve` only for intentionally chained flows.
+The host owns `-LysTesting`, `-LysReset`, and `-LysContext`; session `arguments` must not redeclare
+them.

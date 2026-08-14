@@ -50,10 +50,13 @@ and prove the requested journey from every supported app entry state.
    contract.
 2. Create one typed semantic source of truth shared by UI and exporter.
 3. Model real startup and authentication states without exposing secrets.
-4. Declare safe `route` → `resultsIn` graph edges on actual controls.
-5. Add a bounded flow with terminal acceptance criteria.
-6. Export and run `check-contract-goal.mjs` for every requested outcome.
-7. Execute the real journey and require fresh build, launch, interaction, and screenshot evidence.
+4. Normalize independent flows before they start: use the context's default relaunch policy and
+   implement the Swift/Expo app-owned setup branch for `-LysReset -LysContext <id>`; use preserve
+   only for explicitly chained scenarios.
+5. Declare safe `route` → `resultsIn` graph edges on actual controls.
+6. Add a bounded flow with terminal acceptance criteria.
+7. Export and run `check-contract-goal.mjs` for every requested outcome.
+8. Execute the real journey and require fresh build, launch, interaction, and screenshot evidence.
 
 ## Contract audit
 

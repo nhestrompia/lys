@@ -26,6 +26,7 @@ class LysContractValidationError extends Error {
 exports.LysContractValidationError = LysContractValidationError;
 const identifierPattern = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
 const environmentPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const reservedSessionArguments = new Set(["-LysTesting", "-LysReset", "-LysContext"]);
 function fail(message) {
     throw new LysContractValidationError(message);
 }
@@ -242,11 +243,18 @@ function validateContract(contract) {
     for (const context of contract.contexts) {
         if (!context.title.trim() || !context.readyWhen.length)
             fail(`Context ${context.id} requires title and readyWhen`);
+        if (context.isolation && !["relaunch", "preserve"].includes(context.isolation)) {
+            fail(`Context ${context.id} has unsupported isolation policy ${context.isolation}`);
+        }
         if (context.mode === "uiFlow" && context.session)
             fail(`UI context ${context.id} cannot declare a session fixture`);
         if (context.mode === "authenticatedSession") {
             if (!context.session || !Object.keys(context.session.environment).length) {
                 fail(`Authenticated context ${context.id} requires a session environment`);
+            }
+            const reservedArgument = context.session.arguments?.find((argument) => reservedSessionArguments.has(argument));
+            if (reservedArgument) {
+                fail(`Authenticated context ${context.id} cannot override host-owned launch argument ${reservedArgument}`);
             }
             const secrets = new Set(context.requiredSecrets ?? []);
             for (const [key, input] of Object.entries(context.session.environment)) {
@@ -410,6 +418,7 @@ function uiContext(options) {
     return {
         ...options,
         mode: "uiFlow",
+        isolation: options.isolation ?? "relaunch",
         startRoute: semanticID(options.startRoute),
         entryRoutes: options.entryRoutes.map(semanticID),
     };
@@ -445,6 +454,7 @@ function authenticatedContext(options) {
         id: options.id,
         title: options.title,
         mode: "authenticatedSession",
+        isolation: options.isolation ?? "relaunch",
         requiredSecrets: [options.tokenSecret],
         prepare: [],
         readyWhen: options.readyWhen,
@@ -452,12 +462,13 @@ function authenticatedContext(options) {
             environment: {
                 [options.tokenEnvironmentKey]: { secret: options.tokenSecret },
             },
-            arguments: ["-LysTesting"],
         },
     };
 }
-function signedOutContext(readyWhen, id = "signedOut") {
-    return { id, title: "Signed-out user", mode: "uiFlow", prepare: [], readyWhen };
+function signedOutContext(readyWhen, id = "signedOut", isolation = "relaunch") {
+    return {
+        id, title: "Signed-out user", mode: "uiFlow", isolation, prepare: [], readyWhen,
+    };
 }
 function defineContract(contract) {
     return validateContract({ schemaVersion: 2, ...contract });
@@ -472,5 +483,8 @@ function native() {
 exports.testSession = {
     isEnabled: () => native().isTestSession(),
     credential: (environmentKey) => native().credential(environmentKey),
+    contextID: () => native().contextID(),
+    resetRequested: () => native().resetRequested(),
+    resetRequestedFor: (contextID) => native().resetRequested() && native().contextID() === contextID,
 };
 //# sourceMappingURL=index.js.map

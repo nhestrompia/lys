@@ -109,6 +109,13 @@ public struct InteractionBlueprint: Codable, Sendable {
           throw invalid(
             "Authenticated context \(context.id) requires a non-empty session environment")
         }
+        if let argument = session.arguments?.first(
+          where: LysHostLaunchArguments.reservedFlags.contains)
+        {
+          throw invalid(
+            "Authenticated context \(context.id) cannot override host-owned launch argument \(argument)"
+          )
+        }
         let declaredSecrets = Set(context.requiredSecrets ?? [])
         for (key, input) in session.environment {
           guard BlueprintEnvironmentKey.isValid(key) else {
@@ -563,6 +570,10 @@ public enum BlueprintContextMode: String, Codable, Sendable {
   case authenticatedSession
 }
 
+public enum BlueprintIsolationPolicy: String, Codable, Sendable {
+  case relaunch, preserve
+}
+
 public struct BlueprintAuthenticatedSession: Codable, Sendable {
   public var environment: [String: BlueprintInput]
   public var arguments: [String]?
@@ -577,6 +588,7 @@ public struct BlueprintContext: Codable, Identifiable, Sendable {
   public var id: String
   public var title: String
   public var mode: BlueprintContextMode
+  public var isolation: BlueprintIsolationPolicy
   public var requiredSecrets: [String]?
   public var startRoute: String?
   public var entryRoutes: [String]?
@@ -588,11 +600,13 @@ public struct BlueprintContext: Codable, Identifiable, Sendable {
     id: String, title: String, mode: BlueprintContextMode = .uiFlow,
     requiredSecrets: [String]? = nil, startRoute: String? = nil,
     entryRoutes: [String]? = nil, prepare: [BlueprintStep] = [],
-    readyWhen: [BlueprintPredicate], session: BlueprintAuthenticatedSession? = nil
+    readyWhen: [BlueprintPredicate], session: BlueprintAuthenticatedSession? = nil,
+    isolation: BlueprintIsolationPolicy = .relaunch
   ) {
     self.id = id
     self.title = title
     self.mode = mode
+    self.isolation = isolation
     self.requiredSecrets = requiredSecrets
     self.startRoute = startRoute
     self.entryRoutes = entryRoutes
@@ -602,7 +616,7 @@ public struct BlueprintContext: Codable, Identifiable, Sendable {
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, title, mode, requiredSecrets, startRoute, entryRoutes, prepare, readyWhen, session
+    case id, title, mode, isolation, requiredSecrets, startRoute, entryRoutes, prepare, readyWhen, session
   }
 
   public init(from decoder: Decoder) throws {
@@ -610,6 +624,7 @@ public struct BlueprintContext: Codable, Identifiable, Sendable {
     id = try values.decode(String.self, forKey: .id)
     title = try values.decode(String.self, forKey: .title)
     mode = try values.decodeIfPresent(BlueprintContextMode.self, forKey: .mode) ?? .uiFlow
+    isolation = try values.decodeIfPresent(BlueprintIsolationPolicy.self, forKey: .isolation) ?? .relaunch
     requiredSecrets = try values.decodeIfPresent([String].self, forKey: .requiredSecrets)
     startRoute = try values.decodeIfPresent(String.self, forKey: .startRoute)
     entryRoutes = try values.decodeIfPresent([String].self, forKey: .entryRoutes)

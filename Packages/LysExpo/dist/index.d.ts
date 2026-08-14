@@ -1,4 +1,5 @@
 export type LysRisk = "readOnly" | "reversible" | "destructive" | "external";
+export type LysIsolationPolicy = "relaunch" | "preserve";
 export type LysActionKind = "tap" | "doubleTap" | "longPress" | "type" | "clear" | "toggle" | "select" | "scrollUp" | "scrollDown" | "swipe" | "drag" | "setSlider" | "dismiss" | "back";
 export type LysSelector = {
     identifier?: string;
@@ -62,6 +63,7 @@ export type LysContext = {
     id: string;
     title: string;
     mode: "uiFlow" | "authenticatedSession";
+    isolation?: LysIsolationPolicy;
     requiredSecrets?: string[];
     startRoute?: string;
     entryRoutes?: string[];
@@ -137,6 +139,7 @@ export declare function uiContext(options: {
     prepare: LysStep[];
     readyWhen: LysPredicate[];
     requiredSecrets?: string[];
+    isolation?: LysIsolationPolicy;
 }): LysContext;
 export declare function application(options: {
     bundleIdentifier?: string;
@@ -165,12 +168,16 @@ export declare function authenticatedContext(options: {
     tokenEnvironmentKey: string;
     tokenSecret: string;
     readyWhen: LysPredicate[];
+    isolation?: LysIsolationPolicy;
 }): LysContext;
-export declare function signedOutContext(readyWhen: LysPredicate[], id?: string): LysContext;
+export declare function signedOutContext(readyWhen: LysPredicate[], id?: string, isolation?: LysIsolationPolicy): LysContext;
 export declare function defineContract(contract: Omit<LysContract, "schemaVersion">): LysContract;
 export declare const testSession: {
     isEnabled: () => boolean;
     credential: (environmentKey: string) => string | null;
+    contextID: () => string | null;
+    resetRequested: () => boolean;
+    resetRequestedFor: (contextID: string) => boolean;
 };
 export {};
 //# sourceMappingURL=index.d.ts.map

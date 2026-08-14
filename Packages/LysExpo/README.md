@@ -10,3 +10,10 @@ every other declared screen that can safely reach each flow start. A restored ap
 from its observed route instead of failing on a manually maintained entry whitelist.
 
 See the repository's `LYS_SDK.md` for Swift/Expo examples and authenticated-session guidance.
+
+Independent flow contexts use `isolation: "relaunch"` by default. Before the next flow, the host
+relaunches the app with `-LysReset -LysContext <id>` while preserving app data. Use
+`testSession.resetRequestedFor(id)` in the app's own router/session setup to establish the
+context's `readyWhen` route. Choose `isolation: "preserve"` only for intentionally chained flows.
+The host owns `-LysTesting`, `-LysReset`, and `-LysContext`; session `arguments` must not redeclare
+them.

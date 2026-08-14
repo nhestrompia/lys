@@ -28,4 +28,11 @@ if (validate(missingContextEntry)) {
   throw new Error("Schema accepted UI preparation with no start route");
 }
 
+const reservedLaunchArgument = structuredClone(example);
+reservedLaunchArgument.contexts.find((item) => item.id === "authenticated.testUser")
+  .session.arguments = ["-LysReset"];
+if (validate(reservedLaunchArgument)) {
+  throw new Error("Schema accepted a host-owned authenticated-session launch argument");
+}
+
 console.log("Lys JSON Schema conformance tests passed");

@@ -51,10 +51,18 @@ Lys.register(
 if let token = LysTestSession.credential(environmentKey: "LYS_TEST_SESSION_TOKEN") {
   await auth.restoreTestSession(token)
 }
+
+if LysTestSession.resetRequested(for: "authenticated.student") {
+  // Run this with the app's real router after restoring the requested test identity.
+  router.reset(to: .home)
+}
 ```
 
 Keep the restore branch gated by `LysTestSession`; it returns values only for a host launch carrying
-`-LysTesting`. The app owns token exchange/restore and must not log the value.
+`-LysTesting`. Independent contexts default to `isolation: .relaunch`; the host adds `-LysReset` and
+`-LysContext <id>` so the app can reset its own navigation stack. Use `isolation: .preserve` only
+for an explicitly chained scenario. These markers are host-owned and cannot be supplied through
+session `arguments`. The app owns token exchange/restore and must not log the value.
 
 ## Export and verify
 

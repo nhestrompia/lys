@@ -1,5 +1,7 @@
 import Foundation
 
+private let lysReservedSessionArguments = Set(["-LysTesting", "-LysReset", "-LysContext"])
+
 public struct LysContractValidationError: Error, LocalizedError, Equatable, Sendable {
   public let message: String
 
@@ -93,6 +95,11 @@ extension LysContract {
       case .authenticatedSession:
         guard let session = context.session, !session.environment.isEmpty else {
           throw invalid("Authenticated context \(context.id) requires a session environment")
+        }
+        if let argument = session.arguments?.first(where: lysReservedSessionArguments.contains) {
+          throw invalid(
+            "Authenticated context \(context.id) cannot override host-owned launch argument \(argument)"
+          )
         }
         let requiredSecrets = Set(context.requiredSecrets ?? [])
         for (key, input) in session.environment {

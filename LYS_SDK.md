@@ -44,6 +44,38 @@ values into the real controls and assert the post-login screen. The checked-in e
 both modes. Production builds should not restore test credentials; `LysTestSession` returns values
 only when the host supplied `-LysTesting`.
 
+## Between-flow setup and isolation
+
+Independent flows are normalized before they start. Contexts default to `isolation: .relaunch` in
+Swift or `isolation: "relaunch"` in Expo/React Native. The host terminates and relaunches the app
+without erasing app data, then supplies `-LysTesting -LysReset -LysContext <context-id>`.
+These markers are host-owned; do not add them to authenticated-session `arguments`. Ordinary app
+launch arguments remain supported.
+
+The app owns its router and session setup. After restoring the requested identity, inspect the
+context marker and reset to the route represented by `readyWhen`:
+
+```swift
+if LysTestSession.resetRequested(for: "authenticated.student") {
+  router.reset(to: .home)
+}
+```
+
+```tsx
+if (testSession.resetRequestedFor("authenticated.student")) {
+  router.replace("/home");
+}
+```
+
+For exploratory runs without a declared context, use the generic reset marker and your app's
+default entry route (`LysTestSession.resetRequested` / `testSession.resetRequested()`). Continuing
+an existing journey with its `journeyID` intentionally does not reset between individual steps.
+
+Use `isolation: .preserve` / `isolation: "preserve"` only for an explicitly chained scenario.
+Do not navigate away from a terminal screen when a flow finishes; that screen and its evidence stay
+available until the host prepares the next flow. A real Home/back capability should still be
+declared when it is part of the product UI, but it is not a substitute for setup normalization.
+
 ## SwiftUI integration
 
 ```swift

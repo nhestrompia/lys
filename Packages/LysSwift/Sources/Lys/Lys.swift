@@ -66,6 +66,28 @@ public final class LysRegistry: @unchecked Sendable {
 }
 
 public enum LysTestSession {
+  /// The context requested by the host for the current test launch. The app uses this value to
+  /// choose its own router/session setup; Lys never reaches into product navigation directly.
+  public static var contextID: String? {
+    guard isEnabled else { return nil }
+    let arguments = ProcessInfo.processInfo.arguments
+    guard let index = arguments.firstIndex(of: "-LysContext"), arguments.indices.contains(index + 1)
+    else { return nil }
+    let value = arguments[index + 1]
+    return value.isEmpty ? nil : value
+  }
+
+  /// True when this launch is the host-owned normalization boundary before an independent flow.
+  public static var resetRequested: Bool {
+    isEnabled && ProcessInfo.processInfo.arguments.contains("-LysReset")
+  }
+
+  /// Returns whether this launch asks the app to normalize the requested context. Passing a
+  /// context ID prevents a stale or unrelated launch argument from changing app state.
+  public static func resetRequested(for contextID: String) -> Bool {
+    resetRequested && self.contextID == contextID
+  }
+
   public static var isEnabled: Bool {
     ProcessInfo.processInfo.arguments.contains("-LysTesting")
   }

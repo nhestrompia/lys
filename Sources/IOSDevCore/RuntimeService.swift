@@ -359,6 +359,7 @@ public actor RuntimeService {
         "description": flow.description.map(JSONValue.string) ?? .null,
         "context": flow.context.map(JSONValue.string) ?? .null,
         "contextMode": context.map { .string($0.mode.rawValue) } ?? .null,
+        "isolation": context.map { .string($0.isolation.rawValue) } ?? .string("relaunch"),
         "startRoute": .string(flow.startRoute),
         "entryRoutes": .array(flow.entryRoutes.map(JSONValue.string)),
         "trusted": .bool(true),
@@ -517,6 +518,10 @@ public actor RuntimeService {
       }
     }
     var journey = JourneyRecord(goal: flow.title, mode: .declared)
+    let context = flow.context.flatMap { contextID in
+      blueprint.contexts?.first(where: { $0.id == contextID })
+    }
+    let isolation = context?.isolation ?? .relaunch
     activeJourney = journey
     emit(.journeyStarted, message: flow.title, journeyID: journey.id)
     do {
@@ -535,12 +540,19 @@ public actor RuntimeService {
       journey.status = .running
       activeJourney = journey
 
-      if let contextID = flow.context,
-        let context = blueprint.contexts?.first(where: { $0.id == contextID })
-      {
+      if isolation == .relaunch {
+        try await relaunchBlueprintContext(
+          context, parameters: parameters, configuration: configuration, journeyID: journey.id)
+        let normalized = try await currentBlueprintElements()
+        journey.currentFingerprint = ScreenFingerprint.make(
+          elements: normalized, modal: false, navigationTitle: nil)
+        activeJourney = journey
+      }
+
+      if let context {
         let current = try await currentBlueprintElements()
-        if !(await blueprintPredicatesPass(
-          context.readyWhen, elements: current, blueprint: blueprint))
+        if !(try await waitForBlueprintPredicates(
+          context.readyWhen, initialElements: current, blueprint: blueprint))
         {
           for secret in context.requiredSecrets ?? [] {
             guard blueprintSecret(secret) != nil else {
@@ -551,7 +563,9 @@ public actor RuntimeService {
               )
             }
           }
-          if context.mode == .authenticatedSession, let session = context.session {
+          if context.isolation == .preserve,
+            context.mode == .authenticatedSession, let session = context.session
+          {
             try await launchAuthenticatedTestSession(
               session, parameters: parameters, configuration: configuration,
               journeyID: journey.id)
@@ -570,12 +584,13 @@ public actor RuntimeService {
           try await executeBlueprintSteps(
             context.prepare, blueprint: blueprint, parameters: parameters, journey: &journey)
           let prepared = try await currentBlueprintElements()
-          guard
-            await blueprintPredicatesPass(
-              context.readyWhen, elements: prepared, blueprint: blueprint)
-          else {
+          guard try await waitForBlueprintPredicates(
+            context.readyWhen, initialElements: prepared, blueprint: blueprint) else {
+            let detail = context.isolation == .relaunch
+              ? "Context \(context.id) is not ready after relaunch. Implement the app-owned LysTestSession/testSession setup for -LysReset -LysContext \(context.id), or declare a real safe preparation path."
+              : "Context \(context.id) is not ready"
             throw RPCError(
-              code: -32115, message: "Authentication context \(context.id) is not ready")
+              code: -32115, message: detail)
           }
         }
       }
@@ -817,13 +832,70 @@ public actor RuntimeService {
     }
   }
 
+  /// Normalizes the app at the boundary between independent flows. Relaunching preserves app data;
+  /// the app's Lys integration receives `-LysReset` and `-LysContext` so it can reset its own
+  /// navigation/session state to the context's declared ready route.
+  private func relaunchBlueprintContext(
+    _ context: BlueprintContext?, parameters: [String: JSONValue],
+    configuration: RuntimeSessionConfiguration, journeyID: UUID
+  ) async throws {
+    if context?.mode == .authenticatedSession, let session = context?.session {
+      try await launchAuthenticatedTestSession(
+        session, parameters: parameters, configuration: configuration, journeyID: journeyID,
+        contextID: context?.id, resetRequested: true)
+      return
+    }
+    guard let destination = configuration.destination, let target = configuration.target else {
+      throw RPCError(code: -32125, message: "Lys cannot normalize the app without a selected app")
+    }
+    let preflight = await resolvedToolchainPreflight()
+    guard let simctlPath = preflight.simctlPath,
+      let developerDirectory = preflight.developerDirectory
+    else { throw RPCError(code: -32050, message: "Full Xcode is unavailable") }
+
+    let simctl = URL(fileURLWithPath: simctlPath)
+    let launch = AppleCommandBuilder.launch(
+      simctl: simctl, udid: destination.udid, bundleID: target.bundleID,
+      arguments: LysHostLaunchArguments.build(
+        contextID: context?.id, resetRequested: true),
+      terminateRunningProcess: true)
+    let outcome = try await runner.run(
+      executable: launch.executable, arguments: launch.arguments, workingDirectory: workspace,
+      environment: ["DEVELOPER_DIR": developerDirectory])
+    let evidence = Evidence(
+      kind: .launch, status: outcome.succeeded ? .passed : .failed,
+      taskGeneration: await ledger.generation, destinationUDID: destination.udid,
+      diagnosticSummary: outcome.succeeded
+        ? "Lys relaunched the app for an isolated flow context"
+        : "Flow context relaunch failed: \(outcome.stderr)")
+    try await ledger.record(evidence)
+    guard outcome.succeeded else {
+      throw RPCError(code: -32125, message: evidence.diagnosticSummary)
+    }
+    lastLaunchedBundleID = target.bundleID
+    emit(
+      .appLaunched, message: "Flow context \(context?.id ?? "default") ready for normalization.",
+      journeyID: journeyID, target: target, destinationUDID: destination.udid)
+    for _ in 0..<20 {
+      if (try? await wda.snapshot(
+        udid: destination.udid, runtime: destination.runtime, bundleID: target.bundleID,
+        preflight: preflight)) != nil
+      {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(150))
+    }
+    throw RPCError(code: -32125, message: "Flow context relaunch did not become observable")
+  }
+
   /// Starts a protected test session without asking the agent to type credentials through the UI.
   /// Values are resolved inside the host and reach the Simulator only through SIMCTL_CHILD_ launch
   /// environment entries. Authentication itself remains testable with a separate `.uiFlow`
   /// context that drives the real login controls.
   private func launchAuthenticatedTestSession(
     _ session: BlueprintAuthenticatedSession, parameters: [String: JSONValue],
-    configuration: RuntimeSessionConfiguration, journeyID: UUID
+    configuration: RuntimeSessionConfiguration, journeyID: UUID,
+    contextID: String? = nil, resetRequested: Bool = false
   ) async throws {
     guard let destination = configuration.destination, let target = configuration.target else {
       throw RPCError(code: -32125, message: "Lys cannot prepare authentication without an app")
@@ -845,18 +917,12 @@ public actor RuntimeService {
     }
 
     let simctl = URL(fileURLWithPath: simctlPath)
-    let terminate = AppleCommandBuilder.terminate(
-      simctl: simctl, udid: destination.udid, bundleID: target.bundleID)
-    _ = try? await runner.run(
-      executable: terminate.executable, arguments: terminate.arguments,
-      workingDirectory: workspace, environment: ["DEVELOPER_DIR": developerDirectory])
-
-    var launchArguments = session.arguments ?? []
-    if !launchArguments.contains("-LysTesting") { launchArguments.append("-LysTesting") }
+    let launchArguments = LysHostLaunchArguments.build(
+      contextID: contextID, resetRequested: resetRequested, additional: session.arguments ?? [])
     let launch = AppleCommandBuilder.authenticatedLaunch(
       simctl: simctl, udid: destination.udid, bundleID: target.bundleID,
       developerDirectory: developerDirectory, values: values,
-      arguments: launchArguments)
+      arguments: launchArguments, terminateRunningProcess: true)
     let outcome = try await runner.run(
       executable: launch.executable, arguments: launch.arguments, workingDirectory: workspace,
       environment: launch.environment)
@@ -880,7 +946,9 @@ public actor RuntimeService {
       if (try? await wda.snapshot(
         udid: destination.udid, runtime: destination.runtime, bundleID: target.bundleID,
         preflight: preflight)) != nil
-      { return }
+      {
+        return
+      }
       try await Task.sleep(for: .milliseconds(150))
     }
     throw RPCError(code: -32125, message: "Authenticated test session did not become observable")
@@ -1229,6 +1297,22 @@ public actor RuntimeService {
     return (false, observed)
   }
 
+  private func waitForBlueprintPredicates(
+    _ predicates: [BlueprintPredicate], initialElements: [UIElement], blueprint: InteractionBlueprint
+  ) async throws -> Bool {
+    var elements = initialElements
+    for attempt in 0..<26 {
+      if await blueprintPredicatesPass(predicates, elements: elements, blueprint: blueprint) {
+        return true
+      }
+      if attempt < 25 {
+        try await Task.sleep(for: .milliseconds(120))
+        elements = try await currentBlueprintElements()
+      }
+    }
+    return false
+  }
+
   private func blueprintRoute(
     in elements: [UIElement], blueprint: InteractionBlueprint
   ) -> BlueprintRoute? {
@@ -1417,12 +1501,13 @@ public actor RuntimeService {
     if let requestedID, activeJourney?.id != requestedID {
       return failure(request.id, -32084, "The requested journey is no longer active")
     }
-    if requestedID == nil, let current = activeJourney,
-      [.passed, .failed, .cancelled].contains(current.status), current.goal != goal
-    {
+    var startsNewJourney = false
+    if requestedID == nil {
       activeJourney = nil
+      startsNewJourney = true
     }
     if activeJourney == nil {
+      startsNewJourney = true
       activeJourney = JourneyRecord(goal: goal)
       emit(.journeyStarted, message: goal, journeyID: activeJourney?.id)
     }
@@ -1438,6 +1523,14 @@ public actor RuntimeService {
         journey.status = .ready
         journey.updatedAt = Date()
         activeJourney = journey
+        if startsNewJourney {
+          try await relaunchBlueprintContext(
+            nil, parameters: [:], configuration: configuration, journeyID: journey.id)
+          let normalized = try await currentBlueprintElements()
+          journey.currentFingerprint = ScreenFingerprint.make(
+            elements: normalized, modal: false, navigationTitle: nil)
+          activeJourney = journey
+        }
         emit(
           .journeyReady, message: "Attached to \(configuration.target?.bundleID ?? "app").",
           journeyID: journey.id, target: configuration.target,

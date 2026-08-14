@@ -38,7 +38,7 @@ You can also use `./Scripts/run-local.sh` when the selected Xcode toolchain need
 Create a local Apple-silicon app bundle and DMG with ad-hoc signing:
 
 ```sh
-LYS_VERSION=0.3.0 npm run package:macos
+LYS_VERSION=0.4.0 npm run package:macos
 ```
 
 Tagged releases publish the Expo/React Native SDK to npm, expose the Swift SDK through SwiftPM,

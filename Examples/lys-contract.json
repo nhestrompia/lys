@@ -103,13 +103,13 @@
       "id": "authenticated.testUser",
       "title": "Authenticated test user",
       "mode": "authenticatedSession",
+      "isolation": "relaunch",
       "requiredSecrets": ["test.session"],
       "prepare": [],
       "session": {
         "environment": {
           "LYS_TEST_SESSION_TOKEN": { "secret": "test.session" }
-        },
-        "arguments": ["-LysTesting"]
+        }
       },
       "readyWhen": [{ "kind": "route", "route": "home" }]
     },
@@ -117,6 +117,7 @@
       "id": "signedOut",
       "title": "Signed-out user",
       "mode": "uiFlow",
+      "isolation": "relaunch",
       "requiredSecrets": ["test.email", "test.password"],
       "startRoute": "home",
       "entryRoutes": ["home"],

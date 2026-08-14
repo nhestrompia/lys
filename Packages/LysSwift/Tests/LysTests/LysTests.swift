@@ -23,6 +23,71 @@ import Testing
   let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
   let contexts = try #require(json["contexts"] as? [[String: Any]])
   #expect(contexts.first?["mode"] as? String == "authenticatedSession")
+  #expect(contexts.first?["isolation"] as? String == "relaunch")
+}
+
+@Test func contextIsolationCanExplicitlyPreserveAChainedFlow() throws {
+  let home = LysScreen(id: "home", title: "Home")
+  let results = LysScreen(id: "results", title: "Results", terminal: true)
+  let contract = LysContract(
+    app: .init(entryRoutes: [home]),
+    routes: [home, results],
+    capabilities: [LysAction(id: "home.results", title: "Open results", route: home, resultsIn: results)],
+    contexts: [
+      LysContext(
+        id: "chained", title: "Chained scenario", mode: .uiFlow,
+        readyWhen: [.route(home)], isolation: .preserve)
+    ],
+    flows: [
+      LysFlow(
+        id: "results.check", title: "Check results", context: "chained", startRoute: home,
+        entryRoutes: [home], steps: [.invoke(id: "open", title: "Open results", action: .init(
+          id: "home.results", title: "Open results", route: home, resultsIn: results))],
+        acceptance: [.route(results)])
+    ])
+
+  let data = try JSONDecoder().decode(LysContract.self, from: try JSONEncoder().encode(contract))
+  #expect(data.contexts.first?.isolation == .preserve)
+}
+
+@Test func contextDecodingDefaultsMissingIsolationToRelaunch() throws {
+  let context = try JSONDecoder().decode(
+    LysContext.self,
+    from: Data(
+      #"{"id":"independent","title":"Independent","mode":"uiFlow","readyWhen":[{"kind":"route","route":"home"}]}"#
+        .utf8))
+
+  #expect(context.isolation == .relaunch)
+  #expect(context.prepare.isEmpty)
+}
+
+@Test func authenticatedContextRejectsHostOwnedLaunchArguments() {
+  let contract = LysContract(
+    app: .init(entryRoutes: ["home"]), routes: [.init(id: "home", title: "Home")],
+    contexts: [
+      .init(
+        id: "authenticated", title: "Authenticated", mode: .authenticatedSession,
+        requiredSecrets: ["test.session"], readyWhen: [.route("home")],
+        session: .init(
+          environment: ["LYS_TOKEN": .secret("test.session")],
+          arguments: ["-LysContext", "stale"]))
+    ],
+    flows: [
+      .init(
+        id: "home.check", title: "Check home", context: "authenticated", startRoute: "home",
+        entryRoutes: ["home"],
+        steps: [.init(id: "home", title: "Home", kind: .navigate, route: "home")],
+        acceptance: [.route("home")])
+    ])
+
+  #expect(throws: LysContractValidationError.self) { try contract.validate() }
+}
+
+@Test func testSessionExposesOnlyHostLaunchSetupMarkers() {
+  #expect(LysTestSession.isEnabled == ProcessInfo.processInfo.arguments.contains("-LysTesting"))
+  #expect(
+    LysTestSession.resetRequested
+      == (LysTestSession.isEnabled && ProcessInfo.processInfo.arguments.contains("-LysReset")))
 }
 
 @Test func registryEmitsStableSemanticIdentifiers() throws {

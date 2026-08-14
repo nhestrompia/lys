@@ -32,11 +32,22 @@ import Testing
     ).arguments == [
       "launch", "DEVICE", "com.example.app", "-RCT_jsLocation", "127.0.0.1:8081",
     ])
+  #expect(
+    AppleCommandBuilder.launch(
+      simctl: simctl, udid: "DEVICE", bundleID: "com.example.app",
+      arguments: ["-LysTesting", "-LysReset"], terminateRunningProcess: true
+    ).arguments == [
+      "launch", "--terminate-running-process", "DEVICE", "com.example.app", "-LysTesting",
+      "-LysReset",
+    ])
   let authenticated = AppleCommandBuilder.authenticatedLaunch(
     simctl: simctl, udid: "DEVICE", bundleID: "com.example.app",
     developerDirectory: "/Applications/Xcode.app/Contents/Developer",
-    values: ["LYS_TEST_SESSION_TOKEN": "protected-value"])
-  #expect(authenticated.arguments == ["launch", "DEVICE", "com.example.app", "-LysTesting"])
+    values: ["LYS_TEST_SESSION_TOKEN": "protected-value"], terminateRunningProcess: true)
+  #expect(
+    authenticated.arguments == [
+      "launch", "--terminate-running-process", "DEVICE", "com.example.app", "-LysTesting",
+    ])
   #expect(!authenticated.arguments.contains("protected-value"))
   #expect(authenticated.environment["SIMCTL_CHILD_LYS_TEST_SESSION_TOKEN"] == "protected-value")
   #expect(
@@ -80,6 +91,24 @@ import Testing
       axe: axe, udid: "DEVICE", macKeyCode: 51, characters: nil,
       charactersIgnoringModifiers: nil, modifiers: []
     )?.arguments == ["key", "42", "--udid", "DEVICE"])
+}
+
+@Test func lysHostLaunchArgumentsCannotBeOverriddenByAContract() {
+  #expect(
+    LysHostLaunchArguments.build(
+      contextID: "authenticated.current", resetRequested: true,
+      additional: [
+        "-FeatureFlag", "enabled", "-LysTesting", "-LysReset", "-LysContext",
+        "authenticated.stale",
+      ]) == [
+        "-FeatureFlag", "enabled", "-LysTesting", "-LysReset", "-LysContext",
+        "authenticated.current",
+      ])
+  #expect(
+    LysHostLaunchArguments.build(
+      contextID: "chained.current", resetRequested: false,
+      additional: ["-LysReset", "-LysContext", "chained.stale"]
+    ) == ["-LysTesting", "-LysContext", "chained.current"])
 }
 
 @Test func processOutputIsBoundedAndMarked() async throws {

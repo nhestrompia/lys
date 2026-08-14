@@ -151,6 +151,10 @@
         "id": { "$ref": "#/$defs/id" },
         "title": { "type": "string", "minLength": 1 },
         "mode": { "enum": ["uiFlow", "authenticatedSession"] },
+        "isolation": {
+          "description": "Preparation before an independent flow. Relaunch preserves app data; preserve is for explicit chained flows.",
+          "enum": ["relaunch", "preserve"]
+        },
         "requiredSecrets": { "type": "array", "items": { "$ref": "#/$defs/id" } },
         "startRoute": { "$ref": "#/$defs/id" },
         "entryRoutes": {
@@ -186,7 +190,13 @@
           "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
           "additionalProperties": { "$ref": "#/$defs/input" }
         },
-        "arguments": { "type": "array", "items": { "type": "string" } }
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "not": { "enum": ["-LysTesting", "-LysReset", "-LysContext"] }
+          }
+        }
       }
     },
     "flow": {

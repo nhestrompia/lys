@@ -79,6 +79,84 @@ private func temporaryRuntimeRoot() throws -> URL {
   #expect(result.result?["mode"] == .string("exploratory"))
 }
 
+@Test func flowListExposesTheDefaultHostIsolationPolicy() async throws {
+  let root = try temporaryRuntimeRoot()
+  let contractURL = root.appending(path: ".lys/contract.json")
+  try FileManager.default.createDirectory(
+    at: contractURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let home = BlueprintRoute(
+    id: "home", title: "Home",
+    match: [.init(kind: .visible, selector: .init(identifier: "lys.screen.home"))])
+  let results = BlueprintRoute(
+    id: "results", title: "Results",
+    match: [.init(kind: .visible, selector: .init(identifier: "lys.screen.results"))], terminal: true)
+  let contract = InteractionBlueprint(
+    app: .init(entryRoutes: [home.id]), routes: [home, results],
+    capabilities: [
+      .init(
+        id: "home.results", title: "Open results", route: home.id, resultsIn: results.id,
+        action: .tap, selector: .init(identifier: "lys.action.home.results"))
+    ],
+    contexts: [
+      .init(id: "independent", title: "Independent", readyWhen: [.init(kind: .route, route: home.id)])
+    ],
+    flows: [
+      .init(
+        id: "results.check", title: "Check results", context: "independent",
+        startRoute: home.id, entryRoutes: [home.id],
+        steps: [.init(id: "open", title: "Open results", kind: .invoke, capability: "home.results")],
+        acceptance: [.init(kind: .route, route: results.id)])
+    ])
+  try JSONEncoder().encode(contract).write(to: contractURL)
+
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Test the results"), container: nil,
+    scheme: "Demo", destination: nil, target: nil, startDevelopmentServer: false)
+  _ = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+  let listed = await service.handle(
+    .init(id: .int(2), method: "flow.list"), authenticated: &authenticated)
+
+  #expect(listed.result?["flows"]?.arrayValue?.first?["isolation"] == .string("relaunch"))
+}
+
+@Test func newExploratoryRunReplacesAnUnfinishedJourney() async throws {
+  let root = try temporaryRuntimeRoot()
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Run the unit test suite"), container: nil,
+    scheme: "Demo", destination: nil, target: nil, startDevelopmentServer: false)
+  _ = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+
+  let first = await service.handle(
+    .init(
+      id: .int(2), method: "flow.run",
+      params: .object(["goal": .string("Explore the first feature")])),
+    authenticated: &authenticated)
+  let second = await service.handle(
+    .init(
+      id: .int(3), method: "flow.run",
+      params: .object(["goal": .string("Explore the second feature")])),
+    authenticated: &authenticated)
+
+  #expect(first.error == nil)
+  #expect(second.error == nil)
+  #expect(first.result?["id"] != second.result?["id"])
+  #expect(second.result?["goal"] == .string("Explore the second feature"))
+  let staleStatus = await service.handle(
+    .init(
+      id: .int(4), method: "flow.status",
+      params: .object(["journeyID": first.result?["id"] ?? .null])),
+    authenticated: &authenticated)
+  #expect(staleStatus.error?.code == -32084)
+}
+
 @Test func runtimeSessionEnforcesHostIntentAndPublishesEvents() async throws {
   let root = try temporaryRuntimeRoot()
   let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)

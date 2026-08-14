@@ -72,6 +72,11 @@ Never edit generated `.lys/contract.json` as the source of truth.
 - Use a separate `uiFlow` to test login/logout UI itself.
 - Make UI preparation recover from every application entry. An authenticated context may normalize
   state through a host-owned relaunch and must declare route-based `readyWhen`.
+- Declare context `isolation` when a flow has special lifecycle needs. `relaunch` is the default for
+  independent flows and preserves app data; `preserve` is only for intentionally chained flows.
+  On a relaunch, the host sends `-LysReset` and `-LysContext <id>` so the app's own router/session
+  setup can establish `readyWhen`. These markers and `-LysTesting` are host-owned; never put them
+  in session `arguments`.
 - Declare all referenced logical secrets in `requiredSecrets`.
 
 ### 4. Build the navigation graph
@@ -134,6 +139,13 @@ Do not report success after only compilation, export, route entry, or partial fl
   control and `route` → `resultsIn` edge; do not retry the same invalid contract.
 - **Flow excludes current route:** add a safe path and supported entry, or add a context that truly
   normalizes the state. Do not merely list an unreachable entry.
+- **Flow starts on the previous terminal screen:** keep the previous evidence, then normalize before
+  the next flow. Use the context's default `relaunch` policy and implement the app-owned
+  `LysTestSession`/`testSession` setup branch; do not add an artificial cleanup route solely for
+  testing.
+- **Exploratory run starts from stale UI:** a new exploratory journey also receives `-LysReset`
+  without a context ID. Reset to the app's default entry route; keep state only while continuing
+  the same journey with its `journeyID`.
 - **Action missing:** first distinguish absent from off-screen. Inspect the full accessibility tree
   and scroll containers. Bind `actionProps`/`.lysAction` to the actual control and verify the
   installed SDK/exporter uses the same shared object. Do not add fixed scroll steps merely because
@@ -170,6 +182,6 @@ After a repair, rerun static audit and the complete journey from its original fa
 - Do not make an entire screen one accessibility element.
 - Do not expose credentials, arbitrary storage, command execution, or an automation transport.
 - Do not rebuild/relaunch when Lys can attach to the compatible running app, except for a declared
-  context that intentionally normalizes startup.
+  context (or default independent-flow policy) that intentionally normalizes startup.
 - Do not add backward-compatibility aliases for pre-launch formats.
 - Do not describe exploratory action discovery as deterministic flow verification.

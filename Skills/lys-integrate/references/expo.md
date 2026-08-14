@@ -29,6 +29,10 @@ export const app = application({
 </View>
 
 const token = testSession.credential("LYS_TEST_SESSION_TOKEN");
+if (testSession.resetRequestedFor("authenticated.student")) {
+  // Use the app's real navigation API; Lys does not manipulate React Navigation directly.
+  router.replace("/home");
+}
 
 export const startQuizFlow = flow({
   id: "quiz.start",
@@ -68,5 +72,9 @@ from the contract, as happened when separate handwritten lists drifted.
 The `@lys/testkit/node` export is Node-safe and must work without mocking `expo-modules-core` or
 patching Node's module loader. Treat either workaround as a broken SDK installation.
 
-The native module exposes only the test-session flag and requested environment credential. Do not
-add general command execution, arbitrary storage access, or an automation transport to the app.
+The native module exposes the test-session flag, requested context, reset marker, and requested
+environment credential. Independent contexts default to `isolation: "relaunch"`; the host adds
+`-LysReset` and `-LysContext <id>` before the next flow. Use `isolation: "preserve"` only for an
+explicitly chained scenario. These markers are host-owned and cannot be supplied through session
+`arguments`. Do not add general command execution, arbitrary storage access, or an automation
+transport to the app.

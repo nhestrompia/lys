@@ -15,6 +15,7 @@ import Testing
   #expect(blueprint.flows.map(\.id) == ["auth.login", "quiz.complete"])
   #expect(blueprint.contexts?.first?.requiredSecrets == ["test.session"])
   #expect(blueprint.contexts?.first?.mode == .authenticatedSession)
+  #expect(blueprint.contexts?.first?.isolation == .relaunch)
   #expect(
     blueprint.contexts?.first?.session?.environment["LYS_TEST_SESSION_TOKEN"]?.secret
       == "test.session")
@@ -297,6 +298,33 @@ import Testing
       .init(
         id: "authenticated", title: "Authenticated", mode: .authenticatedSession,
         readyWhen: [.init(kind: .route, route: "home")])
+    ],
+    flows: [
+      .init(
+        id: "home.check", title: "Check home", context: "authenticated",
+        startRoute: "home", entryRoutes: ["home"],
+        steps: [.init(id: "home", title: "Reach home", kind: .navigate, route: "home")],
+        acceptance: [.init(kind: .route, route: "home")])
+    ])
+
+  #expect(throws: RPCError.self) { try contract.validate() }
+}
+
+@Test func authenticatedContextCannotOverrideHostOwnedLaunchArguments() {
+  let contract = LysTestContract(
+    app: .init(entryRoutes: ["home"]),
+    routes: [
+      .init(
+        id: "home", title: "Home",
+        match: [.init(kind: .visible, selector: .init(identifier: "home"))])
+    ],
+    contexts: [
+      .init(
+        id: "authenticated", title: "Authenticated", mode: .authenticatedSession,
+        requiredSecrets: ["test.session"], readyWhen: [.init(kind: .route, route: "home")],
+        session: .init(
+          environment: ["LYS_TOKEN": .init(secret: "test.session")],
+          arguments: ["-LysReset"]))
     ],
     flows: [
       .init(

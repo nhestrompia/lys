@@ -13,19 +13,28 @@ const lysNode = require(resolve(root, "dist/node.js"));
 const home = lys.screen("home", "Home");
 const done = lys.screen("done", "Done", true);
 const finish = lys.action("finish", "Finish", { route: home, resultsIn: done });
+const authenticated = lys.authenticatedContext({
+  id: "authenticated.user",
+  title: "Authenticated user",
+  tokenEnvironmentKey: "LYS_TEST_SESSION_TOKEN",
+  tokenSecret: "test.session",
+  readyWhen: [lys.route(home)],
+});
+const preserved = lys.authenticatedContext({
+  id: "chained.user",
+  title: "Chained user",
+  tokenEnvironmentKey: "LYS_TEST_SESSION_TOKEN",
+  tokenSecret: "test.session",
+  readyWhen: [lys.route(home)],
+  isolation: "preserve",
+});
 const contract = lys.defineContract({
   app: lys.application({
     bundleIdentifier: "com.example.app", displayName: "Example", entryRoutes: [home],
   }),
   routes: [home, done],
   capabilities: [finish],
-  contexts: [lys.authenticatedContext({
-    id: "authenticated.user",
-    title: "Authenticated user",
-    tokenEnvironmentKey: "LYS_TEST_SESSION_TOKEN",
-    tokenSecret: "test.session",
-    readyWhen: [lys.route(home)],
-  })],
+  contexts: [authenticated],
   flows: [lys.flow({
     id: "flow.finish",
     title: "Finish",
@@ -38,6 +47,15 @@ const contract = lys.defineContract({
 });
 
 assert.match(lys.serializeContract(contract), /"flow.finish"/);
+assert.equal(contract.contexts[0].isolation, "relaunch");
+assert.equal(contract.contexts[0].session.arguments, undefined);
+assert.equal(preserved.isolation, "preserve");
+const reservedArguments = JSON.parse(JSON.stringify(contract));
+reservedArguments.contexts[0].session.arguments = ["-LysReset"];
+assert.throws(
+  () => lys.validateContract(reservedArguments),
+  /cannot override host-owned launch argument -LysReset/,
+);
 assert.deepEqual(lys.screenProps(home), {
   testID: "lys.screen.home", accessible: false, collapsable: false,
 });

@@ -1,6 +1,6 @@
 {
   "name": "@lys/testkit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Small semantic test contract for Lys and Expo/React Native apps",
   "license": "MIT",
   "homepage": "https://github.com/nhestrompia/lys#readme",

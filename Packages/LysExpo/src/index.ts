@@ -3,6 +3,7 @@ declare const require: (module: "expo-modules-core") => {
 };
 
 export type LysRisk = "readOnly" | "reversible" | "destructive" | "external";
+export type LysIsolationPolicy = "relaunch" | "preserve";
 export type LysActionKind =
   | "tap" | "doubleTap" | "longPress" | "type" | "clear" | "toggle" | "select"
   | "scrollUp" | "scrollDown" | "swipe" | "drag" | "setSlider" | "dismiss" | "back";
@@ -74,6 +75,7 @@ export type LysContext = {
   id: string;
   title: string;
   mode: "uiFlow" | "authenticatedSession";
+  isolation?: LysIsolationPolicy;
   requiredSecrets?: string[];
   startRoute?: string;
   entryRoutes?: string[];
@@ -123,6 +125,7 @@ export class LysContractValidationError extends Error {
 
 const identifierPattern = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
 const environmentPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const reservedSessionArguments = new Set(["-LysTesting", "-LysReset", "-LysContext"]);
 
 function fail(message: string): never {
   throw new LysContractValidationError(message);
@@ -330,10 +333,18 @@ export function validateContract(contract: LysContract): LysContract {
   }
   for (const context of contract.contexts) {
     if (!context.title.trim() || !context.readyWhen.length) fail(`Context ${context.id} requires title and readyWhen`);
+    if (context.isolation && !["relaunch", "preserve"].includes(context.isolation)) {
+      fail(`Context ${context.id} has unsupported isolation policy ${context.isolation}`);
+    }
     if (context.mode === "uiFlow" && context.session) fail(`UI context ${context.id} cannot declare a session fixture`);
     if (context.mode === "authenticatedSession") {
       if (!context.session || !Object.keys(context.session.environment).length) {
         fail(`Authenticated context ${context.id} requires a session environment`);
+      }
+      const reservedArgument = context.session.arguments?.find((argument) =>
+        reservedSessionArguments.has(argument));
+      if (reservedArgument) {
+        fail(`Authenticated context ${context.id} cannot override host-owned launch argument ${reservedArgument}`);
       }
       const secrets = new Set(context.requiredSecrets ?? []);
       for (const [key, input] of Object.entries(context.session.environment)) {
@@ -522,10 +533,12 @@ export function uiContext(options: {
   prepare: LysStep[];
   readyWhen: LysPredicate[];
   requiredSecrets?: string[];
+  isolation?: LysIsolationPolicy;
 }): LysContext {
   return {
     ...options,
     mode: "uiFlow",
+    isolation: options.isolation ?? "relaunch",
     startRoute: semanticID(options.startRoute),
     entryRoutes: options.entryRoutes.map(semanticID),
   };
@@ -572,11 +585,13 @@ export function authenticatedContext(options: {
   tokenEnvironmentKey: string;
   tokenSecret: string;
   readyWhen: LysPredicate[];
+  isolation?: LysIsolationPolicy;
 }): LysContext {
   return {
     id: options.id,
     title: options.title,
     mode: "authenticatedSession",
+    isolation: options.isolation ?? "relaunch",
     requiredSecrets: [options.tokenSecret],
     prepare: [],
     readyWhen: options.readyWhen,
@@ -584,7 +599,6 @@ export function authenticatedContext(options: {
       environment: {
         [options.tokenEnvironmentKey]: { secret: options.tokenSecret },
       },
-      arguments: ["-LysTesting"],
     },
   };
 }
@@ -592,8 +606,11 @@ export function authenticatedContext(options: {
 export function signedOutContext(
   readyWhen: LysPredicate[],
   id = "signedOut",
+  isolation: LysIsolationPolicy = "relaunch",
 ): LysContext {
-  return { id, title: "Signed-out user", mode: "uiFlow", prepare: [], readyWhen };
+  return {
+    id, title: "Signed-out user", mode: "uiFlow", isolation, prepare: [], readyWhen,
+  };
 }
 
 export function defineContract(contract: Omit<LysContract, "schemaVersion">): LysContract {
@@ -603,6 +620,8 @@ export function defineContract(contract: Omit<LysContract, "schemaVersion">): Ly
 type NativeLysModule = {
   isTestSession(): boolean;
   credential(environmentKey: string): string | null;
+  contextID(): string | null;
+  resetRequested(): boolean;
 };
 
 let nativeModule: NativeLysModule | undefined;
@@ -616,4 +635,8 @@ function native(): NativeLysModule {
 export const testSession = {
   isEnabled: () => native().isTestSession(),
   credential: (environmentKey: string) => native().credential(environmentKey),
+  contextID: () => native().contextID(),
+  resetRequested: () => native().resetRequested(),
+  resetRequestedFor: (contextID: string) =>
+    native().resetRequested() && native().contextID() === contextID,
 };
