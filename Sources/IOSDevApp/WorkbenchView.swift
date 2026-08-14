@@ -56,10 +56,12 @@ public struct WorkbenchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .layoutPriority(0)
-        Divider().overlay(Studio.separator)
-        TaskActionBar()
-          .frame(height: compact ? 54 : 62)
-          .layoutPriority(2)
+        if model.activeWorktree != nil {
+          Divider().overlay(Studio.separator)
+          TaskActionBar()
+            .frame(height: compact ? 54 : 62)
+            .layoutPriority(2)
+        }
       }
       .frame(width: viewport.size.width, height: viewport.size.height, alignment: .top)
       .clipped()
@@ -206,9 +208,6 @@ private struct LysToolbar: View {
         .padding(.leading, 22)
         .frame(width: 100, alignment: .leading)
 
-      Divider().frame(height: 28).overlay(Studio.separator)
-        .padding(.horizontal, 17.5)
-
       Menu {
         Button("Open Repository…") { model.chooseRepository() }
         if !model.containers.isEmpty {
@@ -298,15 +297,7 @@ private struct LysToolbar: View {
 
       Spacer(minLength: 12)
 
-      HStack(spacing: 7) {
-        Circle().fill(statusColor).frame(width: 8, height: 8)
-        Text(model.status).font(.system(size: 12, weight: .medium)).lineLimit(1)
-        if model.isBusy { ProgressView().controlSize(.small).scaleEffect(0.72) }
-      }
-      .padding(.horizontal, 10)
-      .frame(width: 125, height: 40)
-      .accessibilityElement(children: .combine)
-      .accessibilityLabel("Status: \(model.status)")
+      WorkspaceStatusButton()
 
       Button(action: model.run) {
         Label("Run", systemImage: "play.fill")
@@ -331,12 +322,62 @@ private struct LysToolbar: View {
     .frame(height: 72)
     .background(Studio.surface)
   }
+}
+
+private struct WorkspaceStatusButton: View {
+  @EnvironmentObject var model: AppModel
+
+  var body: some View {
+    Button(action: showChanges) {
+      HStack(spacing: 7) {
+        Circle().fill(statusColor).frame(width: 8, height: 8)
+        Text(statusTitle)
+          .font(.system(size: 12, weight: .medium))
+          .lineLimit(1)
+        if canShowChanges {
+          Image(systemName: "chevron.right")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(Studio.secondary)
+        }
+        if model.isBusy { ProgressView().controlSize(.small).scaleEffect(0.72) }
+      }
+      .padding(.horizontal, 10)
+      .frame(minWidth: 125, minHeight: 40, maxHeight: 40, alignment: .leading)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(Color.primary)
+    .disabled(!canShowChanges)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(
+      canShowChanges ? "\(statusTitle). Show changes" : "Status: \(statusTitle)")
+    .help(canShowChanges ? "Show changes" : "Current workspace status")
+  }
+
+  private func showChanges() {
+    guard canShowChanges else { return }
+    if model.activeWorktree != nil, model.proposedChanges.isEmpty { model.reviewChanges() }
+    model.section = .changes
+  }
+
+  private var canShowChanges: Bool {
+    model.activeWorktree != nil || !model.repositoryChanges.isEmpty
+  }
+
+  private var statusTitle: String {
+    if model.activeWorktree != nil {
+      return "\(model.proposedChanges.count) \(model.proposedChanges.count == 1 ? "file" : "files") changed"
+    }
+    if model.repository == nil { return "No project" }
+    if !model.isGitRepository { return "Repository status unavailable" }
+    if model.repositoryChanges.isEmpty { return "Working tree clean" }
+    return "\(model.repositoryChanges.count) uncommitted \(model.repositoryChanges.count == 1 ? "file" : "files")"
+  }
 
   private var statusColor: Color {
-    if model.status.contains("failed") || model.status.contains("blocked") { return Studio.warning }
-    if model.isBusy { return Studio.accent }
-    if model.repository == nil { return Studio.tertiary }
-    return model.status == "Running" ? Studio.success : Studio.secondary
+    if model.activeWorktree != nil { return Studio.accent }
+    if !model.repositoryChanges.isEmpty { return Studio.warning }
+    return model.repository == nil ? Studio.secondary : Studio.success
   }
 }
 
@@ -498,48 +539,36 @@ private struct AgentPanel: View {
       .padding(.horizontal, 20)
       .frame(height: 56)
 
-      ScrollViewReader { proxy in
-        ScrollView {
-          LazyVStack(alignment: .leading, spacing: 10) {
-            if sessionItems.isEmpty {
-              VStack(spacing: 8) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                  .font(.system(size: 20, weight: .light))
-                  .foregroundStyle(Studio.tertiary)
-                Text(emptySessionTitle)
-                  .font(.system(size: 11.5, weight: .semibold))
-                Text(emptySessionDetail)
-                  .font(.system(size: 10.5))
-                  .foregroundStyle(Studio.secondary)
-                  .multilineTextAlignment(.center)
-                  .fixedSize(horizontal: false, vertical: true)
-              }
-              .frame(maxWidth: .infinity)
-              .padding(.horizontal, 24)
-              .padding(.top, 42)
-            } else {
+      if sessionItems.isEmpty {
+        emptySessionState
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .padding(.horizontal, 24)
+      } else {
+        ScrollViewReader { proxy in
+          ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
               ForEach(sessionItems) { item in
                 AgentSessionItem(item: item)
                   .id(item.id)
               }
             }
-          }
-          .background(alignment: .leading) {
-            if sessionItems.count > 1 {
-              Rectangle()
-                .fill(Studio.separator)
-                .frame(width: 1)
-                .padding(.leading, 29)
-                .padding(.vertical, 24)
-                .accessibilityHidden(true)
+            .background(alignment: .leading) {
+              if sessionItems.count > 1 {
+                Rectangle()
+                  .fill(Studio.separator)
+                  .frame(width: 1)
+                  .padding(.leading, 29)
+                  .padding(.vertical, 24)
+                  .accessibilityHidden(true)
+              }
             }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 18)
           }
-          .padding(.horizontal, 16)
-          .padding(.bottom, 18)
+          .scrollIndicators(.automatic)
+          .onAppear { scrollToLatest(using: proxy) }
+          .onChange(of: sessionScrollSignal) { _, _ in scrollToLatest(using: proxy) }
         }
-        .scrollIndicators(.automatic)
-        .onAppear { scrollToLatest(using: proxy) }
-        .onChange(of: sessionScrollSignal) { _, _ in scrollToLatest(using: proxy) }
       }
 
       if let permission = model.pendingAgentPermission {
@@ -586,7 +615,9 @@ private struct AgentPanel: View {
           .padding(.vertical, 8)
           .frame(minHeight: 64)
 
-          Divider().overlay(Studio.separator.opacity(0.58))
+          Rectangle()
+            .fill(Studio.separator.opacity(0.42))
+            .frame(height: 0.5)
 
           AgentConfigurationBar()
             .padding(.horizontal, 10)
@@ -639,6 +670,21 @@ private struct AgentPanel: View {
     model.repository == nil
       ? "Session messages and agent actions will appear here."
       : "Your messages, agent replies, and tool actions stay together here."
+  }
+
+  private var emptySessionState: some View {
+    VStack(spacing: 8) {
+      Image(systemName: "bubble.left.and.bubble.right")
+        .font(.system(size: 20, weight: .light))
+        .foregroundStyle(Studio.tertiary)
+      Text(emptySessionTitle)
+        .font(.system(size: 11.5, weight: .semibold))
+      Text(emptySessionDetail)
+        .font(.system(size: 10.5))
+        .foregroundStyle(Studio.secondary)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+    }
   }
 }
 
@@ -811,16 +857,22 @@ private struct AgentConfigurationBar: View {
   var body: some View {
     HStack(spacing: 0) {
       AgentModelSelector()
-        .frame(maxWidth: .infinity, alignment: .leading)
-      Divider()
-        .frame(height: 26)
-        .padding(.horizontal, 10)
-      Text("Reasoning")
-        .font(.system(size: 10.5))
-        .foregroundStyle(Studio.secondary)
-        .fixedSize()
-      AgentEffortSelector()
         .fixedSize(horizontal: true, vertical: false)
+      Spacer(minLength: 0)
+      Divider()
+        .frame(height: 22)
+        .frame(maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, 10)
+      Spacer(minLength: 0)
+      HStack(spacing: 0) {
+        Text("Reasoning")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .fixedSize()
+        AgentEffortSelector()
+          .fixedSize(horizontal: true, vertical: false)
+      }
+      .fixedSize(horizontal: true, vertical: false)
     }
     .frame(height: 44)
     .accessibilityElement(children: .contain)
@@ -1550,7 +1602,7 @@ private struct DevicePreview: View {
         VStack(spacing: 14) {
           Image(systemName: "iphone")
             .font(.system(size: 34, weight: .light))
-          Text(model.repository == nil ? "Open a project" : "No launch evidence")
+          Text(model.repository == nil ? "Open a project" : "App isn’t running")
             .font(.system(size: 15, weight: .semibold))
           Text(deviceMessage)
             .font(.system(size: 11))
@@ -1605,18 +1657,7 @@ private struct DevicePreview: View {
 
   private var deviceMessage: String {
     if model.repository == nil { return "Choose a Git repository from the toolbar to begin." }
-    if model.preflight?.isFullXcode != true {
-      return "Select full Xcode to discover Simulator destinations."
-    }
-    if model.needsExpoPreparation {
-      return "Generate the native iOS workspace once; Lys will detect it automatically."
-    }
-    if model.selectedDestination == nil { return "Choose a Simulator from the toolbar." }
-    if model.selectedContainer == nil {
-      return "No Xcode workspace or project was found in this folder."
-    }
-    if model.selectedScheme.isEmpty { return "Choose an app scheme from the App menu." }
-    return "Run the selected scheme to capture current app evidence."
+    return "Build and run to preview it."
   }
 }
 
@@ -2786,21 +2827,6 @@ private struct TaskActionBar: View {
 
   private var taskReviewBar: some View {
     HStack(spacing: 16) {
-      Spacer().frame(width: 156)
-      Button(action: showChanges) {
-        HStack(spacing: 10) {
-          Image(systemName: statusSymbol)
-            .foregroundStyle(statusColor)
-          Text(statusTitle)
-          .font(.system(size: 12, weight: .semibold)).monospacedDigit()
-          if canShowChanges {
-            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
-              .foregroundStyle(Studio.secondary)
-          }
-        }
-      }
-      .buttonStyle(.plain)
-      .disabled(!canShowChanges)
       Spacer()
       HStack(spacing: 10) {
         if model.activeWorktree != nil {
@@ -2837,36 +2863,6 @@ private struct TaskActionBar: View {
     } else {
       model.applyAll()
     }
-  }
-  private func showChanges() {
-    if model.activeWorktree != nil, model.proposedChanges.isEmpty { model.reviewChanges() }
-    model.section = .changes
-  }
-
-  private var canShowChanges: Bool {
-    model.activeWorktree != nil || !model.repositoryChanges.isEmpty
-  }
-
-  private var statusTitle: String {
-    if model.activeWorktree != nil {
-      return "\(model.proposedChanges.count) \(model.proposedChanges.count == 1 ? "file" : "files") changed"
-    }
-    if model.repository == nil { return "No project" }
-    if !model.isGitRepository { return "Repository status unavailable" }
-    if model.repositoryChanges.isEmpty { return "Working tree clean" }
-    return "\(model.repositoryChanges.count) uncommitted \(model.repositoryChanges.count == 1 ? "file" : "files")"
-  }
-
-  private var statusSymbol: String {
-    if model.activeWorktree != nil { return "shippingbox.fill" }
-    if !model.repositoryChanges.isEmpty { return "exclamationmark.circle" }
-    return model.repository == nil ? "folder" : "checkmark.circle"
-  }
-
-  private var statusColor: Color {
-    if model.activeWorktree != nil { return Studio.accent }
-    if !model.repositoryChanges.isEmpty { return Studio.warning }
-    return model.repository == nil ? Studio.secondary : Studio.success
   }
 }
 
@@ -4228,136 +4224,195 @@ private struct DeployWorkspace: View {
     .frame(minHeight: compact ? 42 : 56)
   }
 
-  private func feedbackRow(_ feedback: AppStoreFeedback, compact: Bool = false) -> some View {
-    let title = feedback.comment?.nonempty
-      ?? (feedback.kind == .crash ? "Crash report" : "Screenshot feedback")
+  @ViewBuilder private func feedbackRow(_ feedback: AppStoreFeedback, compact: Bool = false) -> some View {
+    if compact {
+      feedbackCompactRow(feedback)
+    } else {
+      feedbackCard(feedback)
+    }
+  }
 
-    return HStack(alignment: .top, spacing: compact ? 10 : 14) {
-      feedbackTypeIcon(feedback, compact: compact)
+  private func feedbackCard(_ feedback: AppStoreFeedback) -> some View {
+    let comment = feedback.comment?.nonempty
+    let title = feedbackTitle(for: feedback)
 
-      VStack(alignment: .leading, spacing: compact ? 5 : 8) {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+    return HStack(alignment: .top, spacing: 12) {
+      VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 7) {
           Text(title)
-            .font(.system(size: compact ? 9.5 : 11.5, weight: .semibold))
-            .lineLimit(compact ? 2 : 3)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(Color.primary)
+            .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
 
-          if !compact {
-            Spacer(minLength: 4)
-            feedbackKindBadge(feedback)
+          if let comment, comment.caseInsensitiveCompare(title) != .orderedSame {
+            Text(comment)
+              .font(.system(size: 13, weight: .regular))
+              .foregroundStyle(Color.primary)
+              .lineSpacing(1)
+              .fixedSize(horizontal: false, vertical: true)
           }
+
+          feedbackMetadata(feedback, fontSize: 10)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
 
-        feedbackMetadata(feedback, compact: compact)
+        feedbackFooter(feedback)
+          .padding(.top, 14)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
 
-        if !compact {
-          Button {
-            Task { await model.startAgentTask(for: feedback) }
-          } label: {
-            Label(
-              model.isPreparingFeedbackAgentTask ? "Preparing…" : "Fix with Agent",
-              systemImage: "wand.and.sparkles")
-          }
-          .buttonStyle(.bordered)
-          .controlSize(.small)
-          .tint(Studio.accent)
-          .font(.system(size: 9.5, weight: .medium))
-          .disabled(model.isBusy || model.isPreparingFeedbackAgentTask)
-          .help("Start a task in the selected coding agent with this feedback and its screenshots")
-          .padding(.top, 1)
+      if let imageURL = feedback.imageURL {
+        feedbackThumbnail(feedback, imageURL: imageURL, width: 48, height: 104)
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
+    .background(Studio.surface)
+    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .stroke(Studio.separator, lineWidth: 1)
+    }
+    .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
+    .accessibilityElement(children: .contain)
+  }
+
+  private func feedbackCompactRow(_ feedback: AppStoreFeedback) -> some View {
+    HStack(alignment: .top, spacing: 10) {
+      feedbackTypeIcon(feedback, size: 28)
+
+      VStack(alignment: .leading, spacing: 5) {
+        Text(feedbackTitle(for: feedback))
+          .font(.system(size: 9.5, weight: .semibold))
+          .lineLimit(1)
+        feedbackMetadata(feedback, fontSize: 8.5)
+        if let comment = feedback.comment?.nonempty,
+          comment.caseInsensitiveCompare(feedbackTitle(for: feedback)) != .orderedSame
+        {
+          Text(comment)
+            .font(.system(size: 9))
+            .foregroundStyle(Studio.secondary)
+            .lineLimit(2)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
 
       if let imageURL = feedback.imageURL {
-        feedbackThumbnail(feedback, imageURL: imageURL, compact: compact)
+        feedbackThumbnail(feedback, imageURL: imageURL, width: 44, height: 58)
       }
     }
-    .padding(.horizontal, compact ? 10 : 16)
-    .padding(.vertical, compact ? 10 : 16)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(Studio.raised.opacity(compact ? 0.58 : 0.52))
-    .clipShape(RoundedRectangle(cornerRadius: compact ? 10 : 12, style: .continuous))
+    .padding(10)
+    .background(Studio.raised.opacity(0.58))
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     .accessibilityElement(children: .contain)
   }
 
-  private func feedbackTypeIcon(_ feedback: AppStoreFeedback, compact: Bool) -> some View {
+  private func feedbackTitle(for feedback: AppStoreFeedback) -> String {
+    feedback.kind == .crash ? "Crash report" : "Test feedback"
+  }
+
+  private func feedbackTypeIcon(_ feedback: AppStoreFeedback, size: CGFloat) -> some View {
     let isCrash = feedback.kind == .crash
+    let iconSize = size * 0.47
     return Image(systemName: isCrash ? "exclamationmark.triangle" : "bubble.left")
-      .font(.system(size: compact ? 10 : 13, weight: .medium))
+      .font(.system(size: iconSize, weight: .medium))
       .foregroundStyle(isCrash ? Studio.warning : Studio.accent)
-      .frame(width: compact ? 26 : 36, height: compact ? 26 : 36)
+      .frame(width: size, height: size)
       .background(isCrash ? Studio.raised : Studio.accentSoft)
-      .clipShape(RoundedRectangle(cornerRadius: compact ? 7 : 10, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: size * 0.25, style: .continuous))
       .accessibilityHidden(true)
   }
 
-  private func feedbackKindBadge(_ feedback: AppStoreFeedback) -> some View {
-    let isCrash = feedback.kind == .crash
-    return Label(
-      isCrash ? "Crash" : "Screenshot",
-      systemImage: isCrash ? "exclamationmark.triangle.fill" : "photo")
-      .font(.system(size: 8.5, weight: .semibold))
-      .foregroundStyle(isCrash ? Studio.warning : Studio.accent)
-      .padding(.horizontal, 7)
-      .frame(height: 22)
-      .background((isCrash ? Studio.warning : Studio.accent).opacity(0.11))
-      .clipShape(Capsule())
+  @ViewBuilder private func feedbackMetadata(_ feedback: AppStoreFeedback, fontSize: CGFloat) -> some View {
+    let values = [
+      feedback.deviceModel?.nonempty,
+      feedback.osVersion?.nonempty,
+      feedbackBuildLabel(for: feedback),
+    ].compactMap { $0 }
+
+    if !values.isEmpty {
+      Text(values.joined(separator: "  ·  "))
+        .font(.system(size: fontSize, weight: .regular))
+        .foregroundStyle(Studio.secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
+    }
   }
 
-  private func feedbackMetadata(_ feedback: AppStoreFeedback, compact: Bool) -> some View {
-    HStack(spacing: 5) {
-      if let device = feedback.deviceModel?.nonempty {
-        Text(device)
+  private func feedbackBuildLabel(for feedback: AppStoreFeedback) -> String? {
+    guard let buildID = feedback.buildID,
+      let build = model.appStoreBuilds.first(where: { $0.id == buildID })
+    else { return nil }
+    if let marketingVersion = build.marketingVersion?.nonempty {
+      return "\(marketingVersion) (\(build.version))"
+    }
+    return build.version.nonempty
+  }
+
+  private func feedbackFooter(_ feedback: AppStoreFeedback) -> some View {
+    HStack(spacing: 12) {
+      Button {
+        Task { await model.startAgentTask(for: feedback) }
+      } label: {
+        HStack(spacing: 6) {
+          Text(model.isPreparingFeedbackAgentTask ? "Preparing…" : "Fix with agent")
+            .font(.system(size: 11, weight: .semibold))
+          Image(systemName: "arrow.right")
+            .font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundStyle(Studio.accent)
+        .contentShape(Rectangle())
       }
-      if let os = feedback.osVersion?.nonempty {
-        feedbackMetadataSeparator
-        Text(os)
-      }
+      .buttonStyle(.plain)
+      .disabled(model.isBusy || model.isPreparingFeedbackAgentTask)
+      .help("Start a task in the selected coding agent with this feedback and its screenshots")
+
+      Spacer(minLength: 16)
+
       if let date = feedback.createdDate {
-        feedbackMetadataSeparator
-        Text(date.formatted(date: .abbreviated, time: .omitted))
+        Text(feedbackDateLabel(date))
+          .font(.system(size: 10, weight: .regular))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
       }
     }
-    .font(.system(size: compact ? 8.5 : 9.5))
-    .foregroundStyle(Studio.secondary)
-    .lineLimit(1)
-    .truncationMode(.tail)
   }
 
-  private var feedbackMetadataSeparator: some View {
-    Text("·")
-      .foregroundStyle(Studio.tertiary)
+  private func feedbackDateLabel(_ date: Date) -> String {
+    let day = date.formatted(date: .abbreviated, time: .omitted)
+    let time = date.formatted(date: .omitted, time: .shortened)
+    return "\(day) · \(time)"
   }
 
   private func feedbackThumbnail(
-    _ feedback: AppStoreFeedback, imageURL: URL, compact: Bool
+    _ feedback: AppStoreFeedback, imageURL: URL, width: CGFloat, height: CGFloat
   ) -> some View {
     Button { feedbackScreenshot = feedback } label: {
       ZStack(alignment: .topTrailing) {
         AsyncImage(url: imageURL) { phase in
           switch phase {
-          case .success(let image): image.resizable().scaledToFit().padding(4)
+          case .success(let image): image.resizable().scaledToFit()
           case .failure:
             Image(systemName: "photo.badge.exclamationmark")
-              .font(.system(size: compact ? 11 : 14))
+              .font(.system(size: min(width, height) * 0.22))
               .foregroundStyle(Studio.tertiary)
-          default: ProgressView().controlSize(.mini)
+          default: ProgressView().controlSize(.small)
           }
         }
-        .frame(width: compact ? 44 : 76, height: compact ? 58 : 98)
-        .background(Studio.surface)
-        .clipShape(RoundedRectangle(cornerRadius: compact ? 7 : 9, style: .continuous))
+        .frame(width: width, height: height)
+        .background(Studio.raised)
+        .clipShape(RoundedRectangle(cornerRadius: width * 0.11, style: .continuous))
 
         if feedback.imageURLs.count > 1 {
           Text("\(feedback.imageURLs.count)")
-            .font(.system(size: 7.5, weight: .bold).monospacedDigit())
+            .font(.system(size: 9, weight: .bold).monospacedDigit())
             .foregroundStyle(.white)
-            .padding(.horizontal, 4)
-            .frame(minHeight: 14)
+            .padding(.horizontal, 5)
+            .frame(minHeight: 17)
             .background(Color.black.opacity(0.72))
             .clipShape(Capsule())
-            .padding(3)
+            .padding(5)
         }
       }
       .contentShape(Rectangle())
@@ -6364,38 +6419,12 @@ private struct CodeWorkspace: View {
   @EnvironmentObject var model: AppModel
 
   var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 16) {
-        WorkspaceHeader(
-          symbol: "chevron.left.forwardslash.chevron.right",
-          title: "Code",
-          detail: model.repository?.lastPathComponent ?? "Inspect source inside the current workspace"
-        )
-        Spacer(minLength: 0)
-        StatusBadge(
-          title: model.activeWorktree == nil ? "Read only" : "Task worktree",
-          state: model.activeWorktree == nil ? .neutral : .active
-        )
-        Button {
-          model.saveFile()
-        } label: {
-          Label("Save", systemImage: "checkmark")
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .disabled(model.selectedFile == nil || model.activeWorktree == nil)
-        .help("Save this file to the isolated task worktree")
-      }
-      .padding(.horizontal, 24)
-      .frame(height: 72)
-      .background(Studio.surface)
-      Divider().overlay(Studio.separator)
-
+    VStack(alignment: .leading, spacing: 0) {
       HStack(spacing: 0) {
-        FileBrowser().frame(width: 286)
+        FileBrowser().frame(width: 360)
         Divider().overlay(Studio.separator)
         VStack(spacing: 0) {
-          HStack(spacing: 9) {
+          HStack(spacing: 11) {
             Image(systemName: model.selectedFile == nil ? "doc" : "doc.text")
               .foregroundStyle(Studio.secondary)
             Text(model.selectedFile?.lastPathComponent ?? "No file selected")
@@ -6407,9 +6436,22 @@ private struct CodeWorkspace: View {
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(Studio.tertiary)
             }
+            StatusBadge(
+              title: model.activeWorktree == nil ? "Read only" : "Editable",
+              state: model.activeWorktree == nil ? .neutral : .active)
+            Button {
+              model.saveFile()
+            } label: {
+              Image(systemName: "square.and.arrow.down")
+                .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.activeWorktree == nil ? Studio.tertiary : Studio.accent)
+            .disabled(model.selectedFile == nil || model.activeWorktree == nil)
+            .help("Save this file to the isolated task worktree")
           }
-          .padding(.horizontal, 18)
-          .frame(height: 44)
+          .padding(.horizontal, 22)
+          .frame(height: 54)
           .background(Studio.surface)
           Divider().overlay(Studio.separator)
           if model.selectedFile == nil {
@@ -6439,33 +6481,44 @@ private struct CodeWorkspace: View {
 
 private struct FileBrowser: View {
   @EnvironmentObject var model: AppModel
+  @State private var filter = ""
+  @FocusState private var filterFocused: Bool
 
   var body: some View {
     VStack(spacing: 0) {
       HStack(spacing: 8) {
-        VStack(alignment: .leading, spacing: 2) {
-          Text(model.activeWorktree == nil ? "Repository" : "Task Files")
-            .font(.system(size: 12, weight: .semibold))
-          if !model.files.isEmpty {
-            Text("\(model.files.count) top-level items")
-              .font(.system(size: 9.5))
+        Image(systemName: "magnifyingglass")
+          .foregroundStyle(Studio.tertiary)
+        TextField("Filter files…", text: $filter)
+          .textFieldStyle(.plain)
+          .font(.system(size: 12))
+          .focused($filterFocused)
+        if !filter.isEmpty {
+          Button { filter = "" } label: {
+            Image(systemName: "xmark.circle.fill")
               .foregroundStyle(Studio.tertiary)
           }
+          .buttonStyle(.plain)
         }
-        Spacer(minLength: 0)
-        Button(action: model.chooseRepository) {
-          Image(systemName: "folder.badge.plus")
-            .font(.system(size: 13, weight: .medium))
-            .frame(width: 28, height: 28)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Studio.accent)
-        .help("Open a repository")
+        Text("⌘ P")
+          .font(.system(size: 9, weight: .medium).monospaced())
+          .foregroundStyle(Studio.tertiary)
       }
-      .padding(.horizontal, 16)
-      .frame(height: 52)
-      .background(Studio.surface)
+      .padding(.horizontal, 13)
+      .frame(height: 38)
+      .background(Studio.raised)
+      .overlay(RoundedRectangle(cornerRadius: 9).stroke(Studio.separator, lineWidth: 1))
+      .clipShape(RoundedRectangle(cornerRadius: 9))
+      .padding(.horizontal, 20)
+      .padding(.vertical, 16)
+      .background {
+        Button("Focus file filter") { filterFocused = true }
+          .keyboardShortcut("p", modifiers: .command)
+          .hidden()
+        Button("Focus file filter") { filterFocused = true }
+          .keyboardShortcut("p", modifiers: .control)
+          .hidden()
+      }
       Divider().overlay(Studio.separator)
       if model.files.isEmpty {
         WorkspaceEmpty(
@@ -6474,7 +6527,7 @@ private struct FileBrowser: View {
       } else {
         ScrollView {
           LazyVStack(spacing: 1) {
-            ForEach(model.files) { node in
+            ForEach(filteredFiles) { node in
               FileTreeNodeRow(node: node, depth: 0)
             }
           }
@@ -6483,6 +6536,11 @@ private struct FileBrowser: View {
       }
     }
     .background(Studio.surface)
+  }
+
+  private var filteredFiles: [FileNode] {
+    guard let query = filter.nonempty?.lowercased() else { return model.files }
+    return model.files.filter { $0.name.lowercased().contains(query) }
   }
 }
 
@@ -6516,6 +6574,11 @@ private struct FileTreeNodeRow: View {
             .lineLimit(1)
             .truncationMode(.middle)
           Spacer(minLength: 0)
+          if let changeKind {
+            Text(changeKind == .added ? "A" : changeKind == .deleted ? "D" : "M")
+              .font(.system(size: 10, weight: .bold).monospaced())
+              .foregroundStyle(changeKind == .added ? Studio.success : changeKind == .deleted ? .red : Studio.accent)
+          }
         }
         .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
         .padding(.leading, CGFloat(depth) * 16 + 8)
@@ -6590,6 +6653,13 @@ private struct FileTreeNodeRow: View {
 
   private var isSelected: Bool {
     !node.isDirectory && model.selectedFile == node.url
+  }
+
+  private var changeKind: ProposedChangeKind? {
+    guard !node.isDirectory else { return nil }
+    return model.visibleChanges.first(where: {
+      $0.path == node.name || $0.path.hasSuffix("/\(node.name)")
+    })?.kind
   }
 
   private var folderSymbol: String {

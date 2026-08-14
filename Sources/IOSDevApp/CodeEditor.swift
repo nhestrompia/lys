@@ -70,12 +70,12 @@ import SwiftUI
     editor.textColor = CodeEditorTheme.baseText
     editor.backgroundColor = CodeEditorTheme.background
     editor.selectedTextAttributes = CodeEditorTheme.selectionAttributes
-    editor.insertionPointColor = NSColor.white
+    editor.insertionPointColor = NSColor.systemBlue
     editor.isAutomaticQuoteSubstitutionEnabled = false
     editor.isAutomaticDashSubstitutionEnabled = false
     editor.usesFindBar = true
     editor.isIncrementalSearchingEnabled = true
-    editor.textContainerInset = NSSize(width: 42, height: 12)
+    editor.textContainerInset = NSSize(width: 22, height: 16)
     editor.textStorage?.setAttributedString(
       NSAttributedString(
         string: text,
@@ -200,13 +200,12 @@ import SwiftUI
 }
 
 @MainActor enum CodeEditorTheme {
-  static let background = NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1)
-  static let baseText = NSColor(white: 0.86, alpha: 1)
+  static let background = NSColor.white
+  static let baseText = NSColor(red: 0.12, green: 0.14, blue: 0.18, alpha: 1)
   static let baseFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
   static let headingFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .semibold)
-  static let selectionBackground = NSColor(
-    red: 0.23, green: 0.26, blue: 0.30, alpha: 1)
-  static let selectionText = NSColor(white: 0.96, alpha: 1)
+  static let selectionBackground = NSColor(red: 0.84, green: 0.91, blue: 1, alpha: 1)
+  static let selectionText = NSColor(red: 0.08, green: 0.16, blue: 0.3, alpha: 1)
   static let baseAttributes: [NSAttributedString.Key: Any] = [
     .foregroundColor: baseText,
     .font: baseFont,
@@ -221,34 +220,34 @@ import SwiftUI
     let font: NSFont
     switch kind {
     case .keyword:
-      color = NSColor(red: 0.39, green: 0.70, blue: 0.96, alpha: 1)
+      color = NSColor(red: 0.30, green: 0.22, blue: 0.66, alpha: 1)
       font = baseFont
     case .type:
       color = NSColor(red: 0.50, green: 0.79, blue: 0.76, alpha: 1)
       font = baseFont
     case .string, .code:
-      color = NSColor(red: 0.88, green: 0.70, blue: 0.46, alpha: 1)
+      color = NSColor(red: 0.70, green: 0.26, blue: 0.16, alpha: 1)
       font = baseFont
     case .number:
-      color = NSColor(red: 0.77, green: 0.65, blue: 0.92, alpha: 1)
+      color = NSColor(red: 0.10, green: 0.48, blue: 0.62, alpha: 1)
       font = baseFont
     case .comment:
-      color = NSColor(red: 0.48, green: 0.68, blue: 0.54, alpha: 1)
+      color = NSColor(red: 0.30, green: 0.48, blue: 0.34, alpha: 1)
       font = baseFont
     case .property:
-      color = NSColor(red: 0.61, green: 0.79, blue: 0.94, alpha: 1)
+      color = NSColor(red: 0.05, green: 0.37, blue: 0.72, alpha: 1)
       font = baseFont
     case .punctuation:
-      color = NSColor(red: 0.65, green: 0.68, blue: 0.72, alpha: 1)
+      color = NSColor(red: 0.38, green: 0.41, blue: 0.46, alpha: 1)
       font = baseFont
     case .heading:
-      color = NSColor(red: 0.43, green: 0.72, blue: 0.98, alpha: 1)
+      color = NSColor(red: 0.12, green: 0.32, blue: 0.68, alpha: 1)
       font = headingFont
     case .emphasis:
-      color = NSColor(red: 0.82, green: 0.66, blue: 0.89, alpha: 1)
+      color = NSColor(red: 0.58, green: 0.24, blue: 0.62, alpha: 1)
       font = baseFont
     case .link:
-      color = NSColor(red: 0.44, green: 0.75, blue: 0.95, alpha: 1)
+      color = NSColor(red: 0.04, green: 0.39, blue: 0.82, alpha: 1)
       font = baseFont
     }
     return [.foregroundColor: color, .font: font]
@@ -263,8 +262,8 @@ import SwiftUI
 }
 
 @MainActor final class CodeEditorScroller: NSScroller {
-  static let knobColor = NSColor(red: 0.38, green: 0.41, blue: 0.45, alpha: 0.96)
-  static let trackColor = NSColor(red: 0.12, green: 0.14, blue: 0.16, alpha: 1)
+  static let knobColor = NSColor(red: 0.62, green: 0.65, blue: 0.70, alpha: 0.96)
+  static let trackColor = NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1)
 
   override class var isCompatibleWithOverlayScrollers: Bool { true }
 
@@ -338,7 +337,7 @@ import SwiftUI
   override func drawHashMarksAndLabels(in rect: NSRect) {
     guard let textView, let layout = textView.layoutManager, let container = textView.textContainer
     else { return }
-    NSColor(red: 0.075, green: 0.085, blue: 0.1, alpha: 1).setFill()
+    NSColor.white.setFill()
     // AppKit passes this hook a client-space dirty rect that can be as wide as the document.
     // Painting that rect lets the ruler cover the text view itself, so constrain the fill to the
     // ruler's own bounds.
