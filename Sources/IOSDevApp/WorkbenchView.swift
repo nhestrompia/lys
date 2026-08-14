@@ -2909,6 +2909,7 @@ private struct DeployWorkspace: View {
   @State private var showsAppStoreConnection = false
   @State private var testerEditorGroupID: String?
   @State private var screenshotRemoval: ScreenshotRemoval?
+  @State private var overviewScreenshotSelection: DeployScreenshotViewerSelection?
   @State private var feedbackScreenshot: AppStoreFeedback?
   @State private var showsBuildUpload = false
   @State private var showsReleaseUpdate = false
@@ -2967,6 +2968,11 @@ private struct DeployWorkspace: View {
     }
     .sheet(item: $feedbackScreenshot) { feedback in
       FeedbackScreenshotViewer(feedback: feedback)
+    }
+    .sheet(item: $overviewScreenshotSelection) { selection in
+      AppStoreScreenshotViewer(
+        screenshots: selection.screenshots,
+        initialIndex: selection.selectedIndex)
     }
     .sheet(isPresented: $showsBuildUpload) {
       AppStoreUploadSheet {
@@ -3489,30 +3495,26 @@ private struct DeployWorkspace: View {
           detail: "Select the App Store app for this project to load live deployment data.")
       } else {
         ScrollView {
-        VStack(alignment: .leading, spacing: 0) {
-          HStack(alignment: .top, spacing: 14) {
-            deploySection(title: "App Preview") {
-              appPreview
+          VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 14) {
+              deploySection(title: "App Preview") {
+                appPreview
+              }
+              deploySection(title: "Release Information") {
+                releaseInformation
+              }
+              .frame(width: 250)
             }
-            deploySection(title: "Release Information") {
-              releaseInformation
-            }
-            .frame(width: 250)
-          }
-          .padding(18)
+            .padding(18)
 
-          Divider().overlay(Studio.separator)
-          deployTextSection(
-            title: "Processing",
-            detail: selectedBuildSummary)
-          Divider().overlay(Studio.separator)
-          deployTextSection(
-            title: "What's New",
-            detail: primaryWhatsNew ?? "Apple returned no release notes for this version.")
-          Divider().overlay(Studio.separator)
-          screenshotSection
+            Divider().overlay(Studio.separator)
+            deployTextSection(
+              title: "What's New",
+              detail: primaryWhatsNew ?? "Apple returned no release notes for this version.")
+            Divider().overlay(Studio.separator)
+            screenshotSection
+          }
         }
-      }
       }
     case .whatsNew:
       appStoreWhatsNewContent
@@ -4156,13 +4158,82 @@ private struct DeployWorkspace: View {
   }
 
   private var screenshotSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    let screenshots = overviewScreenshots
+
+    return VStack(alignment: .leading, spacing: 12) {
       Text("Screenshots").font(.system(size: 11.5, weight: .semibold))
       Text(screenshotSummary)
         .font(.system(size: 10.5))
         .foregroundStyle(Studio.secondary)
+
+      if !screenshots.isEmpty {
+        ScrollView(.horizontal) {
+          HStack(spacing: 12) {
+            ForEach(Array(screenshots.prefix(6).enumerated()), id: \.element.id) { index, screenshot in
+              Button {
+                overviewScreenshotSelection = DeployScreenshotViewerSelection(
+                  screenshots: screenshots, selectedIndex: index)
+              } label: {
+                overviewScreenshotThumbnail(screenshot)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Open screenshot \(index + 1) of \(screenshots.count)")
+              .accessibilityHint("Opens the screenshot viewer")
+            }
+
+            if screenshots.count > 6 {
+              Button {
+                overviewScreenshotSelection = DeployScreenshotViewerSelection(
+                  screenshots: screenshots, selectedIndex: 6)
+              } label: {
+                Text("+\(screenshots.count - 6)")
+                  .font(.system(size: 15, weight: .medium))
+                  .foregroundStyle(Color.primary)
+                  .frame(width: 88, height: 132)
+                  .background(Studio.raised)
+                  .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Open remaining screenshots")
+              .accessibilityHint("Opens the screenshot viewer")
+            }
+          }
+          .padding(.vertical, 2)
+        }
+        .scrollIndicators(.hidden)
+      }
     }
     .padding(18)
+  }
+
+  private var overviewScreenshots: [AppStoreScreenshot] {
+    model.appStoreScreenshotSets.flatMap { $0.screenshots }
+  }
+
+  private func overviewScreenshotThumbnail(_ screenshot: AppStoreScreenshot) -> some View {
+    AsyncImage(url: screenshot.downloadURL) { phase in
+      switch phase {
+      case .success(let image):
+        image
+          .resizable()
+          .scaledToFit()
+          .padding(5)
+      case .failure:
+        Image(systemName: "photo.badge.exclamationmark")
+          .font(.system(size: 19, weight: .light))
+          .foregroundStyle(Studio.tertiary)
+      default:
+        ProgressView().controlSize(.small)
+      }
+    }
+    .frame(width: 88, height: 132)
+    .background(Studio.raised)
+    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .stroke(Studio.separator, lineWidth: 1)
+    }
+    .contentShape(Rectangle())
   }
 
   private func deploySection<Content: View>(
@@ -4202,14 +4273,6 @@ private struct DeployWorkspace: View {
   private var buildForSelectedVersion: AppStoreBuild? {
     guard let buildID = model.selectedAppStoreVersion?.buildID else { return nil }
     return model.appStoreBuilds.first { $0.id == buildID }
-  }
-
-  private var selectedBuildSummary: String {
-    guard let build = buildForSelectedVersion ?? model.selectedAppStoreBuild else {
-      return "No build is attached to the selected App Store version."
-    }
-    let version = build.marketingVersion.map { "\($0) (\(build.version))" } ?? build.version
-    return "Build \(version) · \(friendlyBuildState(build.processingState))"
   }
 
   private var screenshotSummary: String {
@@ -4571,9 +4634,151 @@ private struct DeployWorkspace: View {
   }
 }
 
+private struct DeployScreenshotViewerSelection: Identifiable {
+  let id: UUID
+  let screenshots: [AppStoreScreenshot]
+  let selectedIndex: Int
+
+  init(screenshots: [AppStoreScreenshot], selectedIndex: Int) {
+    self.id = UUID()
+    self.screenshots = screenshots
+    self.selectedIndex = selectedIndex
+  }
+}
+
 private struct ScreenshotRemoval: Identifiable {
   var id: String
   var fileName: String
+}
+
+private struct AppStoreScreenshotViewer: View {
+  @Environment(\.dismiss) private var dismiss
+  let screenshots: [AppStoreScreenshot]
+  @State private var selectedIndex: Int
+
+  init(screenshots: [AppStoreScreenshot], initialIndex: Int) {
+    self.screenshots = screenshots
+    let safeIndex = screenshots.isEmpty
+      ? 0
+      : min(max(initialIndex, 0), screenshots.count - 1)
+    _selectedIndex = State(initialValue: safeIndex)
+  }
+
+  private var selectedScreenshot: AppStoreScreenshot? {
+    guard screenshots.indices.contains(selectedIndex) else { return nil }
+    return screenshots[selectedIndex]
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .top, spacing: 16) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(selectedScreenshot?.fileName ?? "App Store screenshot")
+            .font(.system(size: 17, weight: .bold))
+            .lineLimit(1)
+            .truncationMode(.middle)
+          Text(selectedMetadata)
+            .font(.system(size: 10))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer()
+        Button("Done") { dismiss() }
+          .keyboardShortcut(.cancelAction)
+      }
+      .padding(20)
+
+      Divider().overlay(Studio.separator)
+
+      Group {
+        if let url = selectedScreenshot?.downloadURL {
+          AsyncImage(url: url) { phase in
+            switch phase {
+            case .success(let image):
+              image
+                .resizable()
+                .scaledToFit()
+                .padding(20)
+            case .failure:
+              DeployEmptyState(
+                symbol: "photo.badge.exclamationmark", title: "Screenshot unavailable",
+                detail: "The App Store screenshot could not be downloaded.")
+            default:
+              ProgressView("Loading screenshot…")
+                .controlSize(.small)
+            }
+          }
+        } else {
+          DeployEmptyState(
+            symbol: "photo.badge.exclamationmark", title: "Screenshot unavailable",
+            detail: "Apple did not provide a valid screenshot URL.")
+        }
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Studio.raised)
+
+      if screenshots.count > 1 {
+        ScrollView(.horizontal) {
+          HStack(spacing: 8) {
+            ForEach(Array(screenshots.enumerated()), id: \.element.id) { index, screenshot in
+              Button { selectedIndex = index } label: {
+                viewerThumbnail(screenshot)
+                  .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                      .stroke(
+                        selectedIndex == index ? Studio.accent : .clear,
+                        lineWidth: 2)
+                  }
+                  .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Show screenshot \(index + 1) of \(screenshots.count)")
+            }
+          }
+          .padding(.horizontal, 20)
+        }
+        .scrollIndicators(.hidden)
+        .frame(height: 78)
+      }
+
+      Divider().overlay(Studio.separator)
+      HStack {
+        Text(screenshots.isEmpty ? "" : "Screenshot \(selectedIndex + 1) of \(screenshots.count)")
+          .font(.system(size: 9.5))
+          .foregroundStyle(Studio.secondary)
+        Spacer()
+        Button("Done") { dismiss() }
+          .keyboardShortcut(.cancelAction)
+      }
+      .padding(.horizontal, 20)
+      .frame(height: 58)
+    }
+    .frame(width: 760, height: 720)
+    .background(Studio.surface)
+  }
+
+  private var selectedMetadata: String {
+    guard let selectedScreenshot else { return "Remote App Store screenshot" }
+    var metadata = ["Remote App Store screenshot"]
+    if let width = selectedScreenshot.width, let height = selectedScreenshot.height {
+      metadata.append("\(width) × \(height)")
+    }
+    return metadata.joined(separator: " · ")
+  }
+
+  private func viewerThumbnail(_ screenshot: AppStoreScreenshot) -> some View {
+    AsyncImage(url: screenshot.downloadURL) { phase in
+      switch phase {
+      case .success(let image): image.resizable().scaledToFit().padding(3)
+      case .failure:
+        Image(systemName: "photo.badge.exclamationmark")
+          .foregroundStyle(Studio.tertiary)
+      default: ProgressView().controlSize(.mini)
+      }
+    }
+    .frame(width: 58, height: 58)
+    .background(Studio.raised)
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
 }
 
 private struct FeedbackScreenshotViewer: View {
