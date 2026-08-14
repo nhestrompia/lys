@@ -3217,7 +3217,10 @@ private struct DeployWorkspace: View {
       DeployEmptyState(
         symbol: "exclamationmark.triangle", title: "Releases unavailable", detail: error,
         actionTitle: "Retry", action: {
-          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+          Task {
+            await model.refreshAppStoreDeploymentData(
+              discoverTarget: false, forceRefresh: true)
+          }
         })
     } else if model.appStoreVersions.isEmpty && model.appStoreDeploymentPhase == .loading {
       ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3248,7 +3251,10 @@ private struct DeployWorkspace: View {
       DeployEmptyState(
         symbol: "exclamationmark.triangle", title: "Builds unavailable", detail: error,
         actionTitle: "Retry", action: {
-          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+          Task {
+            await model.refreshAppStoreDeploymentData(
+              discoverTarget: false, forceRefresh: true)
+          }
         })
     } else if model.appStoreBuilds.isEmpty && model.appStoreDeploymentPhase == .loading {
       ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3393,7 +3399,10 @@ private struct DeployWorkspace: View {
             .controlSize(.small)
             .disabled(model.appStoreDeploymentPhase == .loading)
             Button {
-              Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+              Task {
+                await model.refreshAppStoreDeploymentData(
+                  discoverTarget: false, forceRefresh: true)
+              }
             } label: {
               if model.appStoreDeploymentPhase == .loading {
                 ProgressView().controlSize(.mini)
@@ -3679,7 +3688,10 @@ private struct DeployWorkspace: View {
       DeployEmptyState(
         symbol: "exclamationmark.triangle", title: "Tester access unavailable", detail: error,
         actionTitle: "Retry", action: {
-          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+          Task {
+            await model.refreshAppStoreDeploymentData(
+              discoverTarget: false, forceRefresh: true)
+          }
         })
     } else if model.appStoreBetaGroups.isEmpty {
       DeployEmptyState(
@@ -3976,7 +3988,10 @@ private struct DeployWorkspace: View {
       DeployEmptyState(
         symbol: "exclamationmark.triangle", title: "Feedback unavailable", detail: error,
         actionTitle: "Retry", action: {
-          Task { await model.refreshAppStoreDeploymentData(discoverTarget: false) }
+          Task {
+            await model.refreshAppStoreDeploymentData(
+              discoverTarget: false, forceRefresh: true)
+          }
         })
     } else if model.appStoreFeedback.isEmpty {
       DeployEmptyState(

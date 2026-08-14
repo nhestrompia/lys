@@ -20,6 +20,16 @@ enum AppStoreDeploymentPhase: Equatable, Sendable {
   case failed
 }
 
+enum AppStoreDeploymentCachePolicy {
+  static let maxAge: TimeInterval = 45
+
+  static func isFresh(lastSyncedAt: Date?, now: Date = Date()) -> Bool {
+    guard let lastSyncedAt else { return false }
+    let age = now.timeIntervalSince(lastSyncedAt)
+    return age >= 0 && age < maxAge
+  }
+}
+
 enum AppStoreUploadPhase: String, CaseIterable, Sendable {
   case idle
   case preflighting
@@ -229,7 +239,7 @@ extension AppModel {
       appStoreLastSyncedAt = Date()
       appStoreConnectionPhase = .connected
       appStoreConnectionError = nil
-      Task { await self.refreshAppStoreDeploymentData() }
+      Task { await self.refreshAppStoreDeploymentData(forceRefresh: true) }
       return true
     } catch {
       appStoreConnectionPhase = .failed
@@ -263,7 +273,7 @@ extension AppModel {
       appStoreApps = apps
       appStoreLastSyncedAt = Date()
       appStoreConnectionPhase = .connected
-      await refreshAppStoreDeploymentData()
+      await refreshAppStoreDeploymentData(forceRefresh: true)
     } catch {
       guard appStoreConnection?.id == connection.id else { return }
       appStoreConnectionPhase = .failed
@@ -386,12 +396,23 @@ extension AppModel {
     Task { await loadSelectedAppStoreBuildIcon() }
   }
 
-  func refreshAppStoreDeploymentData(discoverTarget: Bool = true) async {
+  func refreshAppStoreDeploymentData(
+    discoverTarget: Bool = true, forceRefresh: Bool = false
+  ) async {
     guard appStoreDeploymentPhase != .discoveringTarget,
       appStoreDeploymentPhase != .loading
     else { return }
     guard appStoreConnectionPhase == .connected, let connection = appStoreConnection else {
       resetAppStoreDeploymentData()
+      return
+    }
+
+    // DeployWorkspace is recreated during navigation, but AppModel retains the loaded response.
+    if !forceRefresh,
+      appStoreDeploymentPhase == .loaded,
+      selectedAppStoreApp != nil,
+      AppStoreDeploymentCachePolicy.isFresh(lastSyncedAt: appStoreDeploymentLastSyncedAt)
+    {
       return
     }
 
@@ -748,13 +769,13 @@ extension AppModel {
         ? "Version \(versionString) was submitted to App Review."
         : "Version \(versionString) is prepared in App Store Connect."
       appStoreReleasePhase = .complete
-      await refreshAppStoreDeploymentData(discoverTarget: false)
+      await refreshAppStoreDeploymentData(discoverTarget: false, forceRefresh: true)
       return true
     } catch {
       appStoreReleaseError = error.localizedDescription
       appStoreReleaseStatus = "Release stopped at the current step. Completed Apple changes were kept."
       appStoreReleasePhase = .failed
-      await refreshAppStoreDeploymentData(discoverTarget: false)
+      await refreshAppStoreDeploymentData(discoverTarget: false, forceRefresh: true)
       return false
     }
   }
@@ -771,10 +792,11 @@ extension AppModel {
       let privateKey = try await appStoreCredentialSession.privateKey(for: connection.id)
       let client = try AppStoreConnectClient(connection: connection, privateKeyPEM: privateKey)
       try await client.releaseApprovedVersion(version.id)
-      await refreshAppStoreDeploymentData(discoverTarget: false)
+      await refreshAppStoreDeploymentData(discoverTarget: false, forceRefresh: true)
       return true
     } catch {
       appStoreMutationError = error.localizedDescription
+      await refreshAppStoreDeploymentData(discoverTarget: false, forceRefresh: true)
       return false
     }
   }
@@ -1159,14 +1181,14 @@ extension AppModel {
         ? "Build \(build.version) was assigned and submitted for external TestFlight review."
         : "Build \(build.version) is available to the selected TestFlight groups."
       appStoreReleasePhase = .complete
-      await refreshAppStoreDeploymentData(discoverTarget: false)
+      await refreshAppStoreDeploymentData(discoverTarget: false, forceRefresh: true)
       return true
     } catch {
       appStoreReleaseError = error.localizedDescription
       appStoreReleaseStatus =
         "TestFlight distribution stopped at the current step. Completed Apple changes were kept."
       appStoreReleasePhase = .failed
-      await refreshAppStoreDeploymentData(discoverTarget: false)
+      await refreshAppStoreDeploymentData(discoverTarget: false, forceRefresh: true)
       return false
     }
   }
