@@ -109,7 +109,8 @@ assets.
 ## Local Mac packaging
 
 The packaging script builds all three executables, constructs `Lys.app`, embeds SwiftPM resource
-bundles and helpers, creates the `.icns`, signs nested code, and produces a compressed DMG:
+bundles and helpers, creates the `.icns`, signs nested code, and produces a compressed,
+drag-to-Applications DMG with its Finder layout persisted:
 
 ```sh
 LYS_VERSION=0.4.0 ./Scripts/package-macos.sh

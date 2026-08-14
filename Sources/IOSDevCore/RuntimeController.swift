@@ -21,6 +21,8 @@ public enum RuntimeControllerError: Error, LocalizedError {
 
 public actor RuntimeController {
   private var process: Process?
+  private var standardOutputHandle: FileHandle?
+  private var standardErrorHandle: FileHandle?
   private var socketPath: String?
   private var token: String?
   private var nextID = 1
@@ -50,10 +52,24 @@ public actor RuntimeController {
     child.environment = ProcessInfo.processInfo.environment.merging(
       developerDirectory.map { ["DEVELOPER_DIR": $0.path] } ?? [:]
     ) { _, task in task }
-    output.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
-    errors.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
-    try child.run()
+    let outputHandle = output.fileHandleForReading
+    let errorHandle = errors.fileHandleForReading
+    outputHandle.readabilityHandler = { handle in
+      if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+    }
+    errorHandle.readabilityHandler = { handle in
+      if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+    }
+    do {
+      try child.run()
+    } catch {
+      outputHandle.readabilityHandler = nil
+      errorHandle.readabilityHandler = nil
+      throw error
+    }
     process = child
+    standardOutputHandle = outputHandle
+    standardErrorHandle = errorHandle
     socketPath = socket
     token = taskToken
 
@@ -94,13 +110,19 @@ public actor RuntimeController {
   }
 
   public func stop() async {
-    guard let child = process else { return }
-    child.interrupt()
-    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-    while child.isRunning && ContinuousClock.now < deadline {
-      try? await Task.sleep(for: .milliseconds(50))
+    let child = process
+    standardOutputHandle?.readabilityHandler = nil
+    standardErrorHandle?.readabilityHandler = nil
+    standardOutputHandle = nil
+    standardErrorHandle = nil
+    if let child {
+      child.interrupt()
+      let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+      while child.isRunning && ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(50))
+      }
+      if child.isRunning { child.terminate() }
     }
-    if child.isRunning { child.terminate() }
     if let socketPath { unlink(socketPath) }
     process = nil
     socketPath = nil

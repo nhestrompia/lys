@@ -17,6 +17,7 @@ struct WDANormalizedPoint: Equatable, Sendable {
 public actor WDAController {
   private let stateRoot: URL
   private var process: Process?
+  private var processOutputHandle: FileHandle?
   private var activeUDID: String?
   private var sessionID: String?
   private var sessionBundleID: String?
@@ -25,8 +26,18 @@ public actor WDAController {
 
   public init(stateRoot: URL) { self.stateRoot = stateRoot }
 
-  public func stop() {
-    if process?.isRunning == true { process?.interrupt() }
+  public func stop() async {
+    let child = process
+    processOutputHandle?.readabilityHandler = nil
+    processOutputHandle = nil
+    if child?.isRunning == true { child?.interrupt() }
+    if let child {
+      let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+      while child.isRunning && ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(50))
+      }
+      if child.isRunning { child.terminate() }
+    }
     process = nil
     activeUDID = nil
     sessionID = nil
@@ -341,7 +352,7 @@ public actor WDAController {
     {
       return
     }
-    stop()
+    await stop()
     let status = WDACompatibilityGate.status(
       preflight: preflight, runtime: runtime, stateRoot: stateRoot)
     guard status.availability == .ready, let cache = status.cacheDirectory,
@@ -362,8 +373,17 @@ public actor WDAController {
     child.standardError = output
     child.environment = ProcessInfo.processInfo.environment.merging(
       ["DEVELOPER_DIR": developer]) { _, managed in managed }
-    output.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
-    try child.run()
+    let outputHandle = output.fileHandleForReading
+    outputHandle.readabilityHandler = { handle in
+      if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+    }
+    do {
+      try child.run()
+    } catch {
+      outputHandle.readabilityHandler = nil
+      throw error
+    }
+    processOutputHandle = outputHandle
     process = child
     activeUDID = udid
     for _ in 0..<120 {
@@ -375,7 +395,7 @@ public actor WDAController {
       }
       try await Task.sleep(for: .milliseconds(250))
     }
-    stop()
+    await stop()
     throw RPCError(code: -32077, message: "WebDriverAgent did not become ready within 30 seconds")
   }
 

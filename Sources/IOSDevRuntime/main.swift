@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import IOSDevCore
 
@@ -18,13 +19,62 @@ enum IOSDevRuntimeMain {
       let service = RuntimeService(
         workspace: URL(fileURLWithPath: workspacePath), token: token,
         stateRoot: URL(fileURLWithPath: socketPath).deletingLastPathComponent())
-      while true {
-        let connection = try server.accept()
-        Task.detached { await serve(connection, using: service) }
+      let parentPID = getppid()
+      let parentMonitor = monitorParent(
+        parentPID: parentPID, socketPath: socketPath, service: service)
+      let terminationSources = installTerminationSources(
+        socketPath: socketPath, service: service)
+      withExtendedLifetime(parentMonitor) {
+        withExtendedLifetime(terminationSources) {
+          while true {
+            do {
+              let connection = try server.accept()
+              Task.detached { await serve(connection, using: service) }
+            } catch {
+              FileHandle.standardError.write(
+                Data("lysd: \(error.localizedDescription)\n".utf8))
+              exit(1)
+            }
+          }
+        }
       }
     } catch {
       FileHandle.standardError.write(Data("lysd: \(error.localizedDescription)\n".utf8))
       exit(1)
+    }
+  }
+
+  private static func monitorParent(
+    parentPID: pid_t, socketPath: String, service: RuntimeService
+  ) -> Task<Void, Never> {
+    Task.detached(priority: .utility) {
+      while true {
+        try? await Task.sleep(for: .milliseconds(250))
+        guard getppid() == parentPID else {
+          await service.shutdown()
+          unlink(socketPath)
+          exit(0)
+        }
+      }
+    }
+  }
+
+  private static func installTerminationSources(
+    socketPath: String, service: RuntimeService
+  ) -> [DispatchSourceSignal] {
+    [SIGINT, SIGTERM].map { signalNumber in
+      signal(signalNumber, SIG_IGN)
+      let source = DispatchSource.makeSignalSource(
+        signal: signalNumber, queue: .global(qos: .utility))
+      source.setEventHandler {
+        Task {
+          await service.shutdown()
+          unlink(socketPath)
+          exit(0)
+        }
+      }
+      source.resume()
+      return source
     }
   }
 

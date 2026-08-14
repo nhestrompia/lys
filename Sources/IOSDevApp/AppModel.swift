@@ -366,6 +366,7 @@ public final class AppModel: ObservableObject {
       && selectedDestination != nil && preflight?.isFullXcode == true && !isBusy
   }
   var canRun: Bool { canBuild && taskWorkspace != nil }
+  var canStop: Bool { isBusy || embeddedSimulatorSessionActive }
   var visibleChanges: [ProposedChange] {
     activeWorktree == nil ? repositoryChanges : proposedChanges
   }
@@ -1362,7 +1363,12 @@ public final class AppModel: ObservableObject {
   }
 
   func stop() {
+    guard canStop else { return }
     agentStopRequested = true
+    let shouldStopApp = embeddedSimulatorSessionActive
+    let destination = selectedDestination
+    let target = selectedTarget
+    isBusy = true
     Task {
       if let sessionID = activeACPSessionID {
         try? activeACPClient?.notify(
@@ -1370,16 +1376,29 @@ public final class AppModel: ObservableObject {
           params: .object(["sessionId": .string(sessionID)]))
       }
       resolveAgentPermission(optionID: nil)
-      _ = try? await runtime.request(method: "build.cancel")
       disableMetroPersistence()
+      _ = try? await runtime.request(method: "build.cancel")
       await stopOwnedMetro()
-      status = "Cancelled"
+      if shouldStopApp, let destination, let target {
+        _ = try? await runtime.request(
+          method: "app.terminate",
+          params: .object([
+            "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
+          ]))
+      }
+      resetPreviewInteraction()
+      if shouldStopApp { setCurrentScreenshot(nil) }
+      status = shouldStopApp ? "Application stopped" : "Cancelled"
       isBusy = false
       appOperation = .idle
       timeline.append(
         .init(
-          time: Self.now(), title: "Operation cancelled",
-          detail: "Child processes were interrupted.", state: .warning))
+          time: Self.now(),
+          title: shouldStopApp ? "Application stopped" : "Operation cancelled",
+          detail: shouldStopApp
+            ? "The selected app was terminated and the embedded Simulator was disconnected."
+            : "Child processes were interrupted.",
+          state: .warning))
     }
   }
 
@@ -1998,7 +2017,10 @@ public final class AppModel: ObservableObject {
   }
 
   private func suppressExternalSimulatorWindow(_ application: NSRunningApplication) {
-    guard embeddedSimulatorSessionActive, !application.isHidden else { return }
+    guard embeddedSimulatorSessionActive,
+      application.bundleIdentifier == "com.apple.iphonesimulator",
+      !application.isHidden
+    else { return }
     _ = application.hide()
   }
 

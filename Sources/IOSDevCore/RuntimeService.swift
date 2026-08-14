@@ -86,6 +86,9 @@ public actor RuntimeService {
     guard authenticated else { return failure(request.id, -32000, "Authenticate first") }
     do {
       switch method {
+      case "runtime.shutdown":
+        await shutdown()
+        return success(request.id, .object(["stopped": .bool(true)]))
       case "workspace.describe":
         return success(
           request.id,
@@ -228,6 +231,14 @@ public actor RuntimeService {
       default: return failure(request.id, -32601, "Unknown runtime method: \(method)")
       }
     } catch { return failure(request.id, -32603, error.localizedDescription) }
+  }
+
+  /// Stops every process owned by this runtime before the host exits or loses its parent.
+  public func shutdown() async {
+    await stopDevelopmentServer()
+    await runner.cancelAll()
+    await devServerRunner.cancelAll()
+    await wda.stop()
   }
 
   private func configureSession(_ request: RPCEnvelope) async -> RPCEnvelope {

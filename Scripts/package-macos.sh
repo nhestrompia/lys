@@ -26,7 +26,12 @@ if [ -e "$final_app" ] || [ -e "$final_dmg" ]; then
 fi
 
 stage=$(mktemp -d "${TMPDIR:-/private/tmp}/lys-package.XXXXXX")
+mount_point=""
+mounted=0
 cleanup() {
+  if [ "$mounted" -eq 1 ] && [ -n "$mount_point" ]; then
+    hdiutil detach "$mount_point" -quiet -force >/dev/null 2>&1 || true
+  fi
   rm -rf "$stage"
 }
 trap cleanup EXIT INT TERM
@@ -93,11 +98,62 @@ sign_code "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 
 dmg_stage="$stage/dmg"
-mkdir -p "$dmg_stage"
-cp -R "$app" "$dmg_stage/Lys.app"
-ln -s /Applications "$dmg_stage/Applications"
-hdiutil create -quiet -volname "Lys $version" -srcfolder "$dmg_stage" \
-  -format UDZO -imagekey zlib-level=9 "$dmg"
+rw_dmg="$stage/Lys-rw.dmg"
+mkdir -p "$dmg_stage/.background"
+swift_runner=$(xcrun --find swift)
+CLANG_MODULE_CACHE_PATH="$module_cache" SWIFTPM_MODULECACHE_OVERRIDE="$module_cache" \
+  "$swift_runner" "$root/Scripts/create-installer-background.swift" \
+  "$dmg_stage/.background/installer-background.png"
+cp "$app/Contents/Resources/Lys.icns" "$dmg_stage/.VolumeIcon.icns"
+
+# Build a writable image first so Finder can persist the icon positions, background, and window
+# bounds in the image's .DS_Store before it is compressed for distribution.
+hdiutil create -quiet -size 256m -fs HFS+ -volname "Lys" "$rw_dmg"
+attach_output=$(hdiutil attach -readwrite -noverify -noautoopen "$rw_dmg")
+mounted=1
+mount_point=$(printf '%s\n' "$attach_output" | awk -F '\t' '$NF ~ /^\// { print $NF; exit }')
+if [ -z "$mount_point" ]; then
+  echo "Could not find the mounted Lys volume" >&2
+  exit 65
+fi
+ditto "$app" "$mount_point/Lys.app"
+ln -s /Applications "$mount_point/Applications"
+mkdir -p "$mount_point/.background"
+cp "$dmg_stage/.background/installer-background.png" \
+  "$mount_point/.background/installer-background.png"
+cp "$dmg_stage/.VolumeIcon.icns" "$mount_point/.VolumeIcon.icns"
+
+osascript <<'APPLESCRIPT'
+tell application "Finder"
+  tell disk "Lys"
+    open
+    delay 1
+    set installerWindow to container window
+    set toolbar visible of installerWindow to false
+    set statusbar visible of installerWindow to false
+    set bounds of installerWindow to {120, 120, 1020, 720}
+
+    set viewOptions to icon view options of installerWindow
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 128
+    set text size of viewOptions to 16
+    set background picture of viewOptions to file ".background:installer-background.png"
+
+    set position of item "Lys.app" to {185, 270}
+    set position of item "Applications" to {715, 270}
+    close installerWindow
+    open
+    delay 1
+    update without registering applications
+    delay 2
+    close container window
+  end tell
+end tell
+APPLESCRIPT
+
+hdiutil detach "$mount_point" -quiet
+mounted=0
+hdiutil convert "$rw_dmg" -quiet -format UDZO -imagekey zlib-level=9 -o "$dmg"
 if [ "$signing_identity" != "-" ]; then
   codesign --force --timestamp --sign "$signing_identity" "$dmg"
   codesign --verify --verbose=2 "$dmg"

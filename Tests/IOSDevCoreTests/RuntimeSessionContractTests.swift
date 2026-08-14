@@ -198,6 +198,22 @@ private func temporaryRuntimeRoot() throws -> URL {
   #expect(events.result?["events"]?.arrayValue?.first?["kind"] == .string("sessionConfigured"))
 }
 
+@Test func runtimeShutdownRequiresAuthenticationAndReportsCompletion() async throws {
+  let root = try temporaryRuntimeRoot()
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = false
+
+  let rejected = await service.handle(
+    .init(id: .int(1), method: "runtime.shutdown"), authenticated: &authenticated)
+  #expect(rejected.error?.code == -32000)
+
+  authenticated = true
+  let shutdown = await service.handle(
+    .init(id: .int(2), method: "runtime.shutdown"), authenticated: &authenticated)
+  #expect(shutdown.error == nil)
+  #expect(shutdown.result?["stopped"] == .bool(true))
+}
+
 @Test func cancellingJourneyPreservesRuntimeOwnership() async throws {
   let root = try temporaryRuntimeRoot()
   let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)

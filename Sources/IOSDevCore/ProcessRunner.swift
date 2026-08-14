@@ -158,6 +158,7 @@ public actor ProcessRunner {
 
   public func cancelAll() async {
     let processes = Array(active.values)
+    guard !processes.isEmpty else { return }
     for process in processes { process.interrupt() }
     try? await Task.sleep(for: .seconds(5))
     for process in processes where process.isRunning { process.terminate() }

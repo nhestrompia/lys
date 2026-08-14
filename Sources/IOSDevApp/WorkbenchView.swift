@@ -460,7 +460,7 @@ private struct ToolbarMoreButton: View {
         Button("Build", action: model.build)
           .disabled(!model.canBuild)
         Button("Stop", action: model.stop)
-          .disabled(!model.isBusy)
+          .disabled(!model.canStop)
         if model.isExpoRepository {
           Divider()
           Toggle("Start Expo development server", isOn: $model.startDevServerOnRun)
@@ -1326,10 +1326,10 @@ private struct AppStage: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(model.isBusy ? Studio.warning : Studio.tertiary)
-            .disabled(!model.isBusy)
-            .accessibilityLabel("Stop current operation")
-            .help("Stop the current operation")
+            .foregroundStyle(model.canStop ? Studio.warning : Studio.tertiary)
+            .disabled(!model.canStop)
+            .accessibilityLabel("Stop app or current operation")
+            .help("Stop the running app or current operation")
           }
           Menu {
             Button(
