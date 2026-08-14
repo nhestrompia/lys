@@ -199,6 +199,14 @@ private struct TerminalDrawer: View {
   }
 }
 
+private enum HeaderMetrics {
+  static let actionHorizontalPadding: CGFloat = 10
+  static let actionVerticalPadding: CGFloat = 6
+  static let actionHeight: CGFloat = 40
+  static let actionSpacing: CGFloat = 12
+  static let trailingInset: CGFloat = 20
+}
+
 private struct LysToolbar: View {
   @EnvironmentObject var model: AppModel
 
@@ -211,31 +219,35 @@ private struct LysToolbar: View {
 
         Spacer(minLength: 12)
 
-        WorkspaceStatusButton()
+        HStack(spacing: HeaderMetrics.actionSpacing) {
+          WorkspaceStatusButton()
 
-        Button(action: model.run) {
-          Label("Run", systemImage: "play.fill")
-            .font(.system(size: 12, weight: .semibold))
-            .frame(width: 92, height: 40)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Color.primary)
-        .background(Studio.surface)
-        .overlay {
-          RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .stroke(Studio.separator, lineWidth: 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .disabled(!model.canRun)
+          Button(action: model.run) {
+            Label("Run", systemImage: "play.fill")
+              .font(.system(size: 12, weight: .semibold))
+              .padding(.horizontal, HeaderMetrics.actionHorizontalPadding)
+              .padding(.vertical, HeaderMetrics.actionVerticalPadding)
+              .frame(minHeight: HeaderMetrics.actionHeight)
+              .fixedSize(horizontal: true, vertical: false)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(Color.primary)
+          .background(Studio.surface)
+          .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+              .stroke(Studio.separator, lineWidth: 1)
+          }
+          .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+          .disabled(!model.canRun)
 
-        ToolbarMoreButton()
-          .padding(.leading, 16)
-          .padding(.trailing, 24)
+          ToolbarMoreButton()
+        }
+        .padding(.trailing, HeaderMetrics.trailingInset)
       }
       .frame(maxWidth: .infinity)
 
-      HStack(spacing: 10) {
+      HStack(spacing: HeaderMetrics.actionSpacing) {
         Menu {
           Button("Open Repository…") { model.chooseRepository() }
           if !model.containers.isEmpty {
@@ -252,18 +264,20 @@ private struct LysToolbar: View {
           }
         } label: {
           ToolbarControl(
-            symbol: "cube", title: model.repository?.lastPathComponent ?? "Open Project",
-            width: 126)
+            symbol: "cube", title: model.repository?.lastPathComponent ?? "Open Project")
         }
         .menuStyle(.borderlessButton)
         .tint(Color(nsColor: .labelColor))
-        .frame(width: 126, height: 40)
+        .padding(.horizontal, HeaderMetrics.actionHorizontalPadding)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minHeight: HeaderMetrics.actionHeight)
         .background(Studio.surface)
         .overlay {
           RoundedRectangle(cornerRadius: 10, style: .continuous)
             .stroke(Studio.separator, lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.014), radius: 4, y: 1)
 
         Menu {
           if model.branchName == "—" || model.branchName.isEmpty {
@@ -276,17 +290,21 @@ private struct LysToolbar: View {
             Button("Open Changes", systemImage: "doc.text.magnifyingglass") { model.section = .changes }
           }
         } label: {
-          ToolbarControl(symbol: "arrow.triangle.branch", title: model.branchName, width: 117)
+          ToolbarControl(
+            symbol: "arrow.triangle.branch", title: model.branchName)
         }
         .menuStyle(.borderlessButton)
         .tint(Color(nsColor: .labelColor))
-        .frame(width: 117, height: 40)
+        .padding(.horizontal, HeaderMetrics.actionHorizontalPadding)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minHeight: HeaderMetrics.actionHeight)
         .background(Studio.surface)
         .overlay {
           RoundedRectangle(cornerRadius: 10, style: .continuous)
             .stroke(Studio.separator, lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.014), radius: 4, y: 1)
 
         Menu {
           if !model.destinations.isEmpty {
@@ -309,17 +327,20 @@ private struct LysToolbar: View {
             title: model.selectedDestination.map {
               "\($0.name) · \(runtimeName($0.runtime))"
             }
-              ?? "Select Simulator", width: 232)
+              ?? "Select Simulator")
         }
         .menuStyle(.borderlessButton)
         .tint(Color(nsColor: .labelColor))
-        .frame(width: 232, height: 40)
+        .padding(.horizontal, HeaderMetrics.actionHorizontalPadding)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minHeight: HeaderMetrics.actionHeight)
         .background(Studio.surface)
         .overlay {
           RoundedRectangle(cornerRadius: 10, style: .continuous)
             .stroke(Studio.separator, lineWidth: 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.014), radius: 4, y: 1)
       }
       .fixedSize(horizontal: true, vertical: false)
     }
@@ -345,7 +366,7 @@ private struct WorkspaceStatusButton: View {
         }
         if model.isBusy { ProgressView().controlSize(.small).scaleEffect(0.72) }
       }
-      .padding(.horizontal, 10)
+      .padding(.horizontal, HeaderMetrics.actionHorizontalPadding)
       .frame(minWidth: 125, minHeight: 40, maxHeight: 40, alignment: .leading)
       .contentShape(Rectangle())
     }
@@ -388,31 +409,22 @@ private struct WorkspaceStatusButton: View {
 private struct ToolbarControl: View {
   let symbol: String
   let title: String
-  let width: CGFloat
 
   var body: some View {
-    ZStack(alignment: .leading) {
-      RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(Studio.surface)
-        .overlay {
-          RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .stroke(Studio.separator, lineWidth: 1)
-        }
-      HStack(spacing: 8) {
-        Image(systemName: symbol).font(.system(size: 13, weight: .medium))
-        Text(title).lineLimit(1)
-        Spacer(minLength: 0)
-        Image(systemName: "chevron.down")
-          .font(.system(size: 9, weight: .semibold))
-          .foregroundStyle(Studio.secondary)
-      }
-      .font(.system(size: 12, weight: .medium))
-      .padding(.horizontal, 10)
+    HStack(spacing: 8) {
+      Image(systemName: symbol).font(.system(size: 13, weight: .medium))
+      Text(title)
+        .lineLimit(1)
+        .truncationMode(.middle)
+      Image(systemName: "chevron.down")
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(Studio.secondary)
     }
-    .frame(width: width, height: 40)
-    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .font(.system(size: 12, weight: .medium))
+    .padding(.vertical, HeaderMetrics.actionVerticalPadding)
+    .frame(height: HeaderMetrics.actionHeight)
+    .fixedSize(horizontal: true, vertical: false)
     .contentShape(Rectangle())
-    .shadow(color: .black.opacity(0.014), radius: 4, y: 1)
   }
 }
 
@@ -424,19 +436,23 @@ private struct ToolbarMoreButton: View {
     Button {
       isPresented.toggle()
     } label: {
-      ZStack {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .fill(Studio.surface)
-          .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-              .stroke(Studio.separator, lineWidth: 1)
-          }
-        Image(systemName: "ellipsis")
-          .font(.system(size: 14, weight: .semibold))
-          .foregroundStyle(Color.primary)
-      }
-      .frame(width: 52, height: 40)
-      .contentShape(Rectangle())
+      Image(systemName: "ellipsis")
+        .font(.system(size: 14, weight: .semibold))
+        .foregroundStyle(Color.primary)
+        .padding(.horizontal, HeaderMetrics.actionHorizontalPadding)
+        .padding(.vertical, HeaderMetrics.actionVerticalPadding)
+        .frame(minWidth: 40, minHeight: HeaderMetrics.actionHeight)
+        .background {
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Studio.surface)
+            .overlay {
+              RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Studio.separator, lineWidth: 1)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .fixedSize(horizontal: true, vertical: false)
+        .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .popover(isPresented: $isPresented, arrowEdge: .bottom) {
@@ -6774,6 +6790,7 @@ private struct GitWorkspace: View {
   @State private var isLoadingDiff = false
   @State private var fileFilter = ""
   @State private var copiedDiff = false
+  @State private var diffReloadToken = 0
   @FocusState private var isFileFilterFocused: Bool
 
   var body: some View {
@@ -6992,13 +7009,20 @@ private struct GitWorkspace: View {
     return visibleChanges.first
   }
 
+  private func selectChange(_ change: ProposedChange) {
+    selectedPath = change.path
+    selectedDiff = nil
+    isLoadingDiff = true
+    diffReloadToken += 1
+  }
+
   private var diffTaskID: String {
     let files = changes.map {
       "\($0.path):\($0.kind.rawValue):\($0.binary)"
     }.joined(separator: "|")
     let revision = model.activeWorktree == nil
       ? model.repositoryChangesRevision : model.proposedChangesRevision
-    return "\(revision)::\(model.generation)::\(selectedChange?.path ?? "none")::\(files)"
+    return "\(revision)::\(model.generation)::\(diffReloadToken)::\(selectedChange?.path ?? "none")::\(files)"
   }
 
   private var changeFileList: some View {
@@ -7060,7 +7084,7 @@ private struct GitWorkspace: View {
           LazyVStack(spacing: 3) {
             ForEach(filteredChanges) { change in
               Button {
-                selectedPath = change.path
+                selectChange(change)
               } label: {
                 ChangeFileRow(
                   change: change, selected: selectedChange?.path == change.path)
@@ -7099,7 +7123,7 @@ private struct GitWorkspace: View {
               .padding(.top, 8)
             }
           }
-          .padding(.horizontal, 12)
+          .padding(.horizontal, 8)
           .padding(.vertical, 12)
         }
       }
@@ -7168,12 +7192,12 @@ private struct GitWorkspace: View {
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let selectedDiff {
-          if let message = selectedDiff.message, selectedDiff.lines.isEmpty {
+          if selectedDiff.lines.isEmpty {
             VStack(spacing: 10) {
               Image(systemName: selectedDiff.binary ? "shippingbox" : "doc.text.magnifyingglass")
                 .font(.system(size: 26, weight: .light))
                 .foregroundStyle(Studio.tertiary)
-              Text(message)
+              Text(selectedDiff.message ?? "No text lines to display")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Studio.secondary)
             }
@@ -7206,7 +7230,7 @@ private struct GitWorkspace: View {
   private func diffLines(_ diff: ProposedFileDiff) -> some View {
     let language = SyntaxLanguage(fileURL: URL(fileURLWithPath: diff.path))
     return ScrollView([.vertical, .horizontal]) {
-      LazyVStack(spacing: 0) {
+      VStack(spacing: 0) {
         Text(hunkSummary(for: diff))
           .font(.system(size: 10.5, weight: .medium).monospaced())
           .foregroundStyle(Studio.secondary)
@@ -7219,10 +7243,14 @@ private struct GitWorkspace: View {
           DiffLineRow(line: line, language: language)
         }
       }
-      .frame(minWidth: 900, alignment: .leading)
-      .padding(.vertical, 0)
+      .frame(minWidth: 900, maxWidth: .infinity, alignment: .topLeading)
     }
-    .background(Studio.surface)
+    .id(diffViewportID(for: diff))
+    .background(Studio.raised.opacity(0.42))
+  }
+
+  private func diffViewportID(for diff: ProposedFileDiff) -> String {
+    "\(diff.path):\(diff.lines.count):\(diff.addedLineCount):\(diff.removedLineCount):\(diffReloadToken)"
   }
 
   private func hunkSummary(for diff: ProposedFileDiff) -> String {
@@ -7254,11 +7282,11 @@ private struct ChangeFileRow: View {
   let selected: Bool
 
   var body: some View {
-    HStack(spacing: 12) {
+    HStack(spacing: 8) {
       Image(systemName: change.binary ? "shippingbox" : "doc.text")
         .font(.system(size: 16, weight: .medium))
         .foregroundStyle(proposedChangeColor(change.kind))
-        .frame(width: 24, height: 24)
+        .frame(width: 22, height: 24)
 
       VStack(alignment: .leading, spacing: 3) {
         Text(fileName)
@@ -7276,7 +7304,7 @@ private struct ChangeFileRow: View {
         .font(.system(size: 11, weight: .bold).monospaced())
         .foregroundStyle(proposedChangeColor(change.kind))
     }
-    .padding(.horizontal, 14)
+    .padding(.horizontal, 10)
     .frame(minHeight: 70)
     .background(selected ? Studio.accentSoft : Color.clear)
     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
