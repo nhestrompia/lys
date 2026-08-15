@@ -2984,7 +2984,8 @@ public actor RuntimeService {
           "-RCT_jsLocation", "127.0.0.1:\(developmentServerPort)", "-RCT_enableDev", "YES",
         ] : []
       let launch = AppleCommandBuilder.launch(
-        simctl: simctl, udid: udid, bundleID: bundleID, arguments: launchArguments)
+        simctl: simctl, udid: udid, bundleID: bundleID, arguments: launchArguments,
+        terminateRunningProcess: true)
       let launched = try await runner.run(
         executable: launch.executable, arguments: launch.arguments, workingDirectory: workspace,
         environment: environment)
