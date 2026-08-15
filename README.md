@@ -33,21 +33,6 @@ swift run --skip-build Lys
 
 You can also use `./Scripts/run-local.sh` when the selected Xcode toolchain needs a local workaround.
 
-## Distribution
-
-Create a local Apple-silicon app bundle and DMG with ad-hoc signing:
-
-```sh
-LYS_VERSION=0.4.0 npm run package:macos
-```
-
-The resulting DMG is a drag-to-install image: open it and drag `Lys.app` onto the Applications
-folder. The Finder window layout, arrow, and icon positions are embedded in the DMG when it is
-created.
-
-Tagged releases publish the Expo/React Native SDK to npm, expose the Swift SDK through SwiftPM,
-and attach a Developer ID-signed and notarized DMG to a GitHub Release. See
-[RELEASING.md](RELEASING.md) for the one-time npm and Apple setup and the release procedure.
 
 ## SDKs
 
