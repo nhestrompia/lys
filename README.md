@@ -17,6 +17,7 @@ to **Applications**. The release includes a SHA-256 checksum alongside the DMG.
 - Swift 6.2 or newer
 - Full Xcode with an iOS Simulator runtime
 - [AXe 1.8.0](https://github.com/cameroncooke/axe) for the in-app Simulator surface
+- Node.js/npm when using a managed ACP bridge or Expo project
 
 ## Develop Lys
 

@@ -323,6 +323,28 @@ public struct DetectedAdapter: Codable, Identifiable, Sendable {
   public var availability: AdapterAvailability
 }
 
+public struct AdapterProvisioningFailure: Equatable, Sendable {
+  public var adapterID: String
+  public var message: String
+
+  public init(adapterID: String, message: String) {
+    self.adapterID = adapterID
+    self.message = message
+  }
+}
+
+public struct AdapterProvisioningReport: Equatable, Sendable {
+  public var installedAdapterIDs: [String]
+  public var failures: [AdapterProvisioningFailure]
+
+  public init(
+    installedAdapterIDs: [String] = [], failures: [AdapterProvisioningFailure] = []
+  ) {
+    self.installedAdapterIDs = installedAdapterIDs
+    self.failures = failures
+  }
+}
+
 public enum AdapterManager {
   public static let pinned: [AdapterLockEntry] = [
     .init(
@@ -370,10 +392,7 @@ public enum AdapterManager {
     return pinned.map { entry in
       var adapterDirectories = directories
       if let managedRoot {
-        adapterDirectories.insert(
-          managedRoot.appending(path: entry.id).appending(path: entry.version)
-            .appending(path: "node_modules/.bin").path,
-          at: 0)
+        adapterDirectories.insert(managedExecutableDirectory(for: entry, in: managedRoot).path, at: 0)
       }
       let executable = findExecutable(entry.executableNames, in: adapterDirectories)
       let cliExecutable = findExecutable(entry.cliExecutableNames, in: directories)
@@ -387,7 +406,7 @@ public enum AdapterManager {
         : configurationDetected ? .configurationOnly : .missing
       let limitation: String? = switch availability {
       case .ready: nil
-      case .cliDetected: "CLI detected; install the pinned ACP adapter to connect it"
+      case .cliDetected: "CLI detected; Lys will set up the pinned ACP adapter automatically"
       case .configurationOnly: "Configuration found, but no runnable CLI was detected"
       case .missing: "CLI and ACP adapter were not found on standard executable paths"
       }
@@ -398,6 +417,113 @@ public enum AdapterManager {
         mode: structured ? "read-write" : "unavailable",
         limitation: limitation, availability: availability)
     }
+  }
+
+  /// Returns the directory where Lys keeps the exact adapter version for an entry.
+  public static func managedInstallRoot(for entry: AdapterLockEntry, in managedRoot: URL) -> URL {
+    managedRoot.appending(path: entry.id).appending(path: entry.version)
+  }
+
+  /// Returns the managed npm bin directory used during discovery and runtime.
+  public static func managedExecutableDirectory(
+    for entry: AdapterLockEntry, in managedRoot: URL
+  ) -> URL {
+    managedInstallRoot(for: entry, in: managedRoot).appending(path: "node_modules/.bin")
+  }
+
+  /// Extracts a package name only for entries deliberately pinned to an npm package.
+  public static func npmPackage(for entry: AdapterLockEntry) -> String? {
+    let suffix = "@\(entry.version)"
+    guard entry.source.hasSuffix(suffix) else { return nil }
+    let package = String(entry.source.dropLast(suffix.count))
+    return package.isEmpty ? nil : package
+  }
+
+  /// Builds a Finder-safe runtime environment. GUI-launched apps do not inherit a shell PATH,
+  /// so managed adapter bins and the common Node installation locations must be explicit.
+  public static func runtimeEnvironment(
+    for adapter: DetectedAdapter,
+    inherited: [String: String] = ProcessInfo.processInfo.environment,
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+  ) -> [String: String] {
+    let standardDirectories = [
+      "/opt/homebrew/bin", "/usr/local/bin",
+      homeDirectory.appending(path: ".local/bin").path,
+      homeDirectory.appending(path: ".bun/bin").path,
+      homeDirectory.appending(path: ".volta/bin").path,
+      homeDirectory.appending(path: "Library/pnpm").path,
+      "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+    ]
+    let executableDirectory = adapter.executable?.deletingLastPathComponent().path
+    let inheritedDirectories = (inherited["PATH"] ?? "").split(separator: ":").map(String.init)
+    var seen = Set<String>()
+    let path = ([executableDirectory].compactMap { $0 } + standardDirectories + inheritedDirectories)
+      .filter { !$0.isEmpty && seen.insert($0).inserted }
+      .joined(separator: ":")
+    var environment = inherited
+    environment["PATH"] = path
+    return environment
+  }
+
+  /// Installs missing ACP bridges into Lys's managed directory. The actual agent remains
+  /// user-owned: provisioning is attempted only when that agent's CLI is already detected.
+  public static func provisionMissing(
+    detected: [DetectedAdapter],
+    entries: [AdapterLockEntry] = AdapterManager.pinned,
+    npm: URL,
+    managedRoot: URL,
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    runner: ProcessRunner = ProcessRunner()
+  ) async -> AdapterProvisioningReport {
+    guard FileManager.default.isExecutableFile(atPath: npm.path) else {
+      return .init(
+        failures: [
+          .init(adapterID: "all", message: "npm was not found at \(npm.path)")
+        ])
+    }
+
+    var report = AdapterProvisioningReport()
+    for entry in entries {
+      guard let package = npmPackage(for: entry),
+        let current = detected.first(where: { $0.id == entry.id }),
+        current.executable == nil,
+        current.cliExecutable != nil
+      else { continue }
+
+      let installRoot = managedInstallRoot(for: entry, in: managedRoot)
+      let executable = managedExecutableDirectory(for: entry, in: managedRoot)
+        .appending(path: entry.executableNames[0])
+      do {
+        try FileManager.default.createDirectory(
+          at: installRoot, withIntermediateDirectories: true)
+        let outcome = try await runner.run(
+          executable: npm,
+          arguments: [
+            "install", "--prefix", installRoot.path, "--no-package-lock", "--no-save",
+            "--ignore-scripts", "--no-audit", "--no-fund", "\(package)@\(entry.version)",
+          ],
+          workingDirectory: installRoot,
+          environment: environment,
+          maximumOutputBytes: 16 * 1_024 * 1_024)
+        guard outcome.succeeded else {
+          let diagnostic = outcome.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+          throw RPCError(
+            code: -32110,
+            message: diagnostic.isEmpty
+              ? "npm exited with status \(outcome.terminationStatus)" : diagnostic)
+        }
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+          throw RPCError(
+            code: -32111,
+            message: "npm completed, but \(entry.executableNames[0]) was not installed")
+        }
+        report.installedAdapterIDs.append(entry.id)
+      } catch {
+        report.failures.append(
+          .init(adapterID: entry.id, message: error.localizedDescription))
+      }
+    }
+    return report
   }
 
   private static func findExecutable(_ names: [String], in directories: [String]) -> URL? {

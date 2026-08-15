@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-The current package has no fetched Swift package dependencies and contains no bundled agent adapter, WebDriverAgent, or AXe binary.
+The current package has no fetched Swift package dependencies and contains no bundled agent adapter, WebDriverAgent, or AXe binary. On first launch, Lys may retrieve the pinned ACP bridge packages for detected agent CLIs into its per-user Application Support directory; those downloads are not embedded in the app bundle.
 
 Validated downloads must preserve their upstream notices. WebDriverAgent is maintained by Appium and distributed under the BSD 3-Clause license. The app downloads its pinned archive only on explicit setup and verifies the promoted SHA-256 before use. Apple SDKs, Xcode, Simulator, XCTest, and system frameworks are Apple-provided prerequisites and are not redistributed by this repository.
 

@@ -106,6 +106,68 @@ import Testing
   #expect(adapters.first { $0.id == "opencode" }?.availability == .configurationOnly)
 }
 
+@Test func pinnedNpmAdaptersAreProvisionableWithoutTreatingOpenCodeAsAnAdapterPackage() throws {
+  let entries = AdapterManager.pinned
+  #expect(
+    entries.compactMap(AdapterManager.npmPackage(for:)) == [
+      "@agentclientprotocol/codex-acp",
+      "@agentclientprotocol/claude-agent-acp",
+      "pi-acp",
+    ])
+  #expect(AdapterManager.npmPackage(for: entries.first { $0.id == "opencode" }!) == nil)
+}
+
+@Test func managedAdapterPathsAndRuntimePathAreStable() throws {
+  let root = URL(fileURLWithPath: "/tmp/lys-adapters")
+  let entry = try #require(AdapterManager.pinned.first { $0.id == "codex" })
+  let managedBin = AdapterManager.managedExecutableDirectory(for: entry, in: root)
+  #expect(
+    managedBin.path == "/tmp/lys-adapters/codex/1.1.14/node_modules/.bin")
+
+  let adapter = DetectedAdapter(
+    id: "codex", displayName: "Codex", executable: managedBin.appending(path: "codex-acp"),
+    cliExecutable: nil, configurationDetected: false, launchArguments: [], mode: "read-write",
+    limitation: nil, availability: .ready)
+  let environment = AdapterManager.runtimeEnvironment(
+    for: adapter, inherited: ["PATH": "/custom/bin"],
+    homeDirectory: URL(fileURLWithPath: "/Users/test"))
+  #expect(
+    environment["PATH"] == "/tmp/lys-adapters/codex/1.1.14/node_modules/.bin:/opt/homebrew/bin:/usr/local/bin:/Users/test/.local/bin:/Users/test/.bun/bin:/Users/test/.volta/bin:/Users/test/Library/pnpm:/usr/bin:/bin:/usr/sbin:/sbin:/custom/bin")
+}
+
+@Test func adapterProvisioningUsesTheManagedPrefixAndPinnedPackage() async throws {
+  let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let npm = root.appending(path: "npm")
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  try """
+  #!/bin/sh
+  prefix=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--prefix" ]; then prefix="$2"; shift 2; else shift; fi
+  done
+  mkdir -p "$prefix/node_modules/.bin"
+  touch "$prefix/node_modules/.bin/codex-acp"
+  chmod 755 "$prefix/node_modules/.bin/codex-acp"
+  """.write(to: npm, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: npm.path)
+
+  let entry = try #require(AdapterManager.pinned.first { $0.id == "codex" })
+  let cli = URL(fileURLWithPath: "/usr/bin/codex")
+  let detected = DetectedAdapter(
+    id: "codex", displayName: "Codex", executable: nil, cliExecutable: cli,
+    configurationDetected: false, launchArguments: [], mode: "unavailable",
+    limitation: "setup", availability: .cliDetected)
+
+  let report = await AdapterManager.provisionMissing(
+    detected: [detected], entries: [entry], npm: npm, managedRoot: root)
+  #expect(report.installedAdapterIDs == ["codex"])
+  #expect(report.failures.isEmpty)
+  #expect(
+    FileManager.default.fileExists(
+      atPath: AdapterManager.managedExecutableDirectory(for: entry, in: root)
+        .appending(path: "codex-acp").path))
+}
+
 @Test func bundledWDAManifestPromotesOnlyTheValidatedXcodeBuildAndRuntime() throws {
   let manifest = try WDACompatibilityManifest.bundled()
   let entry = try #require(manifest.entry(xcodeBuild: "17F113"))

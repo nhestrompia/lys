@@ -8070,6 +8070,9 @@ private struct SettingsWorkspace: View {
   private func adapterDetail(_ adapter: DetectedAdapter) -> String {
     if let executable = adapter.executable { return "ACP v1 ready · \(executable.path)" }
     if let cli = adapter.cliExecutable {
+      if model.isProvisioningAdapters {
+        return "CLI detected at \(cli.path). Lys is installing the pinned ACP adapter automatically."
+      }
       return "CLI detected at \(cli.path). \(adapter.limitation ?? "ACP adapter setup required.")"
     }
     return adapter.limitation ?? "Not installed"

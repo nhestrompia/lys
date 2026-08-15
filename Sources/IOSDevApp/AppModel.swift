@@ -285,6 +285,7 @@ public final class AppModel: ObservableObject {
   @Published var previewLatencyMS: Int?
   @Published var appOperation: AppOperation = .idle
   @Published var adapters: [DetectedAdapter] = []
+  @Published private(set) var isProvisioningAdapters = false
   @Published var selectedAdapterID = ""
   @Published var agentConfigOptions: [ACPConfigOption] = []
   @Published private(set) var localAgentConfigOptions: [ACPConfigOption] = []
@@ -399,6 +400,9 @@ public final class AppModel: ObservableObject {
     let pendingIntent = AgentTaskIntentRouter.classify(taskPrompt)
     if pendingIntent.allowsSourceWrites && !isGitRepository {
       return "Editing requires a Git repository. Inspection and app testing remain available."
+    }
+    if isProvisioningAdapters {
+      return "Setting up coding-agent adapters…"
     }
     if selectedAdapterID.isEmpty
       || !adapters.contains(where: { $0.id == selectedAdapterID && $0.executable != nil })
@@ -564,6 +568,7 @@ public final class AppModel: ObservableObject {
       }
     }
     Task {
+      await provisionAdaptersIfNeeded()
       await refreshToolchain()
       await refreshRecovery()
       await loadAppStoreConnection()
@@ -854,6 +859,36 @@ public final class AppModel: ObservableObject {
     pendingAgentConfigValues = [:]
     localAgentConfigOptions = Self.readLocalAgentConfigOptions(
       for: adapters.first(where: { $0.id == selectedAdapterID }))
+  }
+
+  private func provisionAdaptersIfNeeded() async {
+    guard ProcessInfo.processInfo.processName != "IOSDevSnapshot",
+      let npm = npmExecutable()
+    else { return }
+
+    let detected = adapters
+    let needsProvisioning = AdapterManager.pinned.contains { entry in
+      guard let adapter = detected.first(where: { $0.id == entry.id }) else { return false }
+      return adapter.executable == nil && adapter.cliExecutable != nil
+        && AdapterManager.npmPackage(for: entry) != nil
+    }
+    guard needsProvisioning else { return }
+
+    isProvisioningAdapters = true
+    defer { isProvisioningAdapters = false }
+    let report = await AdapterManager.provisionMissing(
+      detected: detected,
+      npm: npm,
+      managedRoot: adapterRoot,
+      environment: ["PATH": executableSearchPath()],
+      runner: runner)
+    refreshAdapters()
+    guard !report.failures.isEmpty else { return }
+    let details = report.failures
+      .map { "\($0.adapterID): \($0.message)" }
+      .joined(separator: "\n")
+    notice =
+      "Lys could not finish setting up one or more coding-agent adapters. It will retry on the next launch.\n\n\(details)"
   }
 
   func selectAgentAdapter(_ id: String) {
@@ -2469,6 +2504,7 @@ public final class AppModel: ObservableObject {
       didMutate: { [weak self] in await self?.recordAgentMutation() })
     let client = try ACPClient(
       executable: executable, arguments: adapter.launchArguments, workspace: workspace,
+      environment: AdapterManager.runtimeEnvironment(for: adapter),
       onUpdate: { [weak self] update in
         Task { @MainActor in self?.consumeAgentUpdate(update) }
       },
@@ -3652,7 +3688,14 @@ public final class AppModel: ObservableObject {
   }
 
   private func npmExecutable() -> URL? {
-    ["/opt/homebrew/bin/npm", "/usr/local/bin/npm", "/usr/bin/npm"]
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    return [
+      "/opt/homebrew/bin/npm", "/usr/local/bin/npm", "/usr/bin/npm",
+      home.appending(path: ".local/bin/npm").path,
+      home.appending(path: ".bun/bin/npm").path,
+      home.appending(path: ".volta/bin/npm").path,
+      home.appending(path: "Library/pnpm/npm").path,
+    ]
       .map(URL.init(fileURLWithPath:))
       .first { FileManager.default.isExecutableFile(atPath: $0.path) }
   }
