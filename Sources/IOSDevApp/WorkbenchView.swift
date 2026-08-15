@@ -1727,8 +1727,11 @@ private struct InteractionPalette: View {
         }
         if model.wdaStatus.availability == .setupRequired {
           Divider()
-          Button("Set up semantic automation", systemImage: "lock.open", action: model.setupWebDriverAgent)
-            .disabled(model.isBusy)
+          Button(
+            model.isWDASetupInProgress ? "Preparing semantic automation…" : "Retry semantic setup",
+            systemImage: model.isWDASetupInProgress ? "hourglass" : "arrow.clockwise",
+            action: model.setupWebDriverAgent)
+            .disabled(model.isBusy || model.isWDASetupInProgress)
         }
       } label: {
         Image(systemName: "ellipsis")
@@ -7911,12 +7914,15 @@ private struct SettingsWorkspace: View {
                 SimulatorLiveSession.helperAvailable ? Studio.success : Studio.warning)
           }
           SettingRow(
-            symbol: wdaSymbol, title: model.wdaStatus.title, detail: model.wdaStatus.detail
+            symbol: wdaSymbol, title: model.wdaStatus.title,
+            detail: model.wdaSetupMessage ?? model.wdaStatus.detail
           ) {
-            if model.wdaStatus.availability == .setupRequired,
+            if model.isWDASetupInProgress {
+              ProgressView().controlSize(.small)
+            } else if model.wdaStatus.availability == .setupRequired,
               model.selectedDestination != nil
             {
-              Button("Build Runner…", action: model.setupWebDriverAgent)
+              Button("Retry setup", action: model.setupWebDriverAgent)
                 .disabled(model.isBusy)
             } else {
               Text(wdaBadge)
@@ -8070,6 +8076,9 @@ private struct SettingsWorkspace: View {
   private func adapterDetail(_ adapter: DetectedAdapter) -> String {
     if let executable = adapter.executable { return "ACP v1 ready · \(executable.path)" }
     if let cli = adapter.cliExecutable {
+      if model.isProvisioningAdapters {
+        return "CLI detected at \(cli.path). Lys is installing the pinned ACP adapter automatically."
+      }
       return "CLI detected at \(cli.path). \(adapter.limitation ?? "ACP adapter setup required.")"
     }
     return adapter.limitation ?? "Not installed"

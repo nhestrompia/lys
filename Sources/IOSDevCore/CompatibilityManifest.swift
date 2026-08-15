@@ -23,17 +23,68 @@ public struct WDACompatibilityManifest: Codable, Sendable {
     return value
   }
   public static func bundled() throws -> Self {
-    let resourceBundle: Bundle
-    if let resources = Bundle.main.resourceURL,
-      let packaged = Bundle(url: resources.appending(path: "Lys_IOSDevCore.bundle"))
-    {
-      resourceBundle = packaged
-    } else {
-      resourceBundle = Bundle.module
+    // `lysd` and `lys-mcp` are shipped as loose helper executables inside
+    // Lys.app/Contents/Resources/bin. `Bundle.main` therefore points at the
+    // helper directory, while SwiftPM places the resource bundle alongside
+    // that directory in Contents/Resources. Search both locations (and the
+    // normal SwiftPM build output ancestors) before touching Bundle.module.
+    // Bundle.module uses fatalError when its generated path is unavailable,
+    // which would otherwise take down the whole host runtime during WDA setup.
+    guard let resourceBundle = resourceBundle(named: "Lys_IOSDevCore.bundle") else {
+      throw RPCError(code: -32070, message: "Bundled WDA compatibility resources are missing")
     }
     guard let url = resourceBundle.url(forResource: "wda-compatibility", withExtension: "json")
     else { throw RPCError(code: -32070, message: "Bundled WDA compatibility manifest is missing") }
     return try load(from: url)
+  }
+
+  private static func resourceBundle(named name: String) -> Bundle? {
+    var roots: [URL] = []
+    func appendRoot(_ root: URL?) {
+      guard let root else { return }
+      let normalized = root.standardizedFileURL
+      if !roots.contains(normalized) { roots.append(normalized) }
+    }
+
+    appendRoot(Bundle.main.resourceURL)
+    appendRoot(Bundle.main.bundleURL)
+    appendRoot(Bundle.main.executableURL?.deletingLastPathComponent())
+    if let executable = CommandLine.arguments.first {
+      appendRoot(URL(fileURLWithPath: executable).deletingLastPathComponent())
+    }
+
+    return resourceBundle(named: name, roots: roots)
+  }
+
+  static func resourceBundle(named name: String, roots: [URL]) -> Bundle? {
+
+    // A raw executable may report either its directory or its own path as the
+    // bundle URL. Walking a few parents covers both the installed app layout
+    // and SwiftPM's .build/<triple>/<configuration> output.
+    var candidates: [URL] = []
+    for root in roots {
+      var current = root
+      for _ in 0..<5 {
+        if !candidates.contains(current) { candidates.append(current) }
+        current = current.deletingLastPathComponent()
+      }
+    }
+
+    for directory in candidates {
+      let path = directory.appending(path: name)
+      if let bundle = Bundle(path: path.path) { return bundle }
+    }
+#if DEBUG
+    // SwiftPM's test runner can execute through the package manager helper,
+    // whose Bundle.main is not the test binary. The generated module accessor
+    // has a valid build-output fallback in debug builds; never use this path
+    // in the shipped release helpers, where it may call fatalError.
+    let development = Bundle.module
+    if development.url(forResource: "wda-compatibility", withExtension: "json") != nil {
+      return development
+    }
+#endif
+    return nil
   }
   public func entry(xcodeBuild: String) -> Entry? {
     entries.first { $0.xcodeBuild == xcodeBuild && $0.integrationResult == "passed" }
@@ -109,7 +160,7 @@ public enum WDACompatibilityGate {
       return .init(
         availability: .setupRequired, title: "WebDriverAgent compatibility passed",
         detail:
-          "Validated for Xcode \(version) and \(displayName(forRuntime: runtime)). Build the pinned runner once on this Mac.",
+          "Validated for Xcode \(version) and \(displayName(forRuntime: runtime)). Lys will prepare the pinned runner automatically before semantic testing.",
         entry: entry, cacheDirectory: cache)
     }
     return .init(

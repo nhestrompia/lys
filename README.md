@@ -17,6 +17,11 @@ to **Applications**. The release includes a SHA-256 checksum alongside the DMG.
 - Swift 6.2 or newer
 - Full Xcode with an iOS Simulator runtime
 - [AXe 1.8.0](https://github.com/cameroncooke/axe) for the in-app Simulator surface
+- Node.js/npm when using a managed ACP bridge or Expo project
+
+Once Lys discovers a supported Xcode and Simulator, it automatically prepares the verified
+WebDriverAgent runner in the background. The one-time setup is shared by all supported agents and
+its progress is shown in Settings; users do not need to start it manually.
 
 ## Develop Lys
 
