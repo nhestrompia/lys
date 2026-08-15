@@ -30,6 +30,20 @@ if [ ! -S "$socket" ]; then
   echo "lysd did not create its authenticated runtime socket" >&2
   exit 1
 fi
+
+mcp_response=$(
+  printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"workspace.describe","arguments":{}}}' |
+    LYS_RUNTIME_SOCKET="$socket" \
+    LYS_TASK_TOKEN="smoke-token" \
+    LYS_INTENT_KIND="runTests" \
+    "$bin_path/lys-mcp"
+)
+if ! printf '%s' "$mcp_response" | grep -q '"isError":false'; then
+  echo "lys-mcp could not complete an authenticated runtime request" >&2
+  exit 1
+fi
+
 kill "$runtime_pid"
 wait "$runtime_pid" 2>/dev/null || true
 runtime_pid=""
