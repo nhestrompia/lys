@@ -2622,10 +2622,14 @@ private struct EvidenceWorkspace: View {
   }
 
   private var evidenceContent: some View {
-    HStack(spacing: 0) {
-      ScrollView(.horizontal) {
-        HStack(spacing: 12) {
-          ForEach(Array(model.verificationEvidence.reversed().prefix(4))) { evidence in
+    HStack(alignment: .top, spacing: 0) {
+      ScrollView(.vertical) {
+        LazyVGrid(
+          columns: [GridItem(.adaptive(minimum: 104, maximum: 104), spacing: 12)],
+          alignment: .leading,
+          spacing: 12
+        ) {
+          ForEach(Array(model.verificationEvidence.reversed())) { evidence in
             Button { selectedEvidence = evidence } label: {
               EvidenceThumbnail(evidence: evidence)
                 .contentShape(Rectangle())
@@ -2656,9 +2660,12 @@ private struct EvidenceWorkspace: View {
           .disabled(model.selectedTarget == nil)
           .help("Capture a current Simulator screenshot")
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 18)
+        .padding(.vertical, 12)
       }
-      .scrollIndicators(.hidden)
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+      .scrollIndicators(.automatic)
       Divider().padding(.vertical, 12)
       VStack(alignment: .leading, spacing: 8) {
         HStack {
@@ -2682,8 +2689,11 @@ private struct EvidenceWorkspace: View {
           .lineLimit(3)
       }
       .padding(.horizontal, 18)
+      .padding(.vertical, 18)
       .frame(width: 250)
+      .frame(maxHeight: .infinity, alignment: .topLeading)
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private func tabButton(_ tab: EvidenceWorkspaceTab) -> some View {
