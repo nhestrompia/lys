@@ -262,7 +262,7 @@ import SwiftUI
 }
 
 @MainActor final class CodeEditorScroller: NSScroller {
-  static let knobColor = NSColor(red: 0.62, green: 0.65, blue: 0.70, alpha: 0.96)
+  static let knobColor = NSColor(red: 0.46, green: 0.49, blue: 0.55, alpha: 0.96)
   static let trackColor = NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1)
 
   override class var isCompatibleWithOverlayScrollers: Bool { true }
