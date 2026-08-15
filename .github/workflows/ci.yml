@@ -28,7 +28,7 @@ jobs:
       - run: npm run check:expo-sdk
       - run: npm run check:contract
       - name: Inspect the public npm payload
-        run: npm pack --workspace @lys/testkit --dry-run
+        run: npm pack --workspace @nhestrompia/lys --dry-run
 
   swift:
     name: macOS app and Swift SDK
