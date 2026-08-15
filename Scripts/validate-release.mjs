@@ -25,7 +25,8 @@ if (manifest.version !== version) {
 if (locked !== version) {
   throw new Error(`package-lock.json has ${locked ?? "no SDK version"}; expected ${version}`);
 }
-if (manifest.repository?.url !== "https://github.com/nhestrompia/lys.git") {
+const repositoryUrl = manifest.repository?.url?.replace(/^git\+/, "");
+if (repositoryUrl !== "https://github.com/nhestrompia/lys.git") {
   throw new Error("The npm repository URL must match the GitHub trusted publisher repository");
 }
 
