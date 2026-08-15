@@ -33,10 +33,12 @@ jobs:
     name: Verify Swift release
     runs-on: macos-26
     env:
-      CLANG_MODULE_CACHE_PATH: ${{ runner.temp }}/lys-clang-module-cache
-      SWIFTPM_MODULECACHE_OVERRIDE: ${{ runner.temp }}/lys-swiftpm-module-cache
+      CLANG_MODULE_CACHE_PATH: ${{ github.workspace }}/.build/release-clang-module-cache
+      SWIFTPM_MODULECACHE_OVERRIDE: ${{ github.workspace }}/.build/release-swiftpm-module-cache
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare Swift module caches
+        run: mkdir -p "$CLANG_MODULE_CACHE_PATH" "$SWIFTPM_MODULECACHE_OVERRIDE"
       - run: swift test --package-path Packages/LysSwift --disable-sandbox
       - name: Verify a real standalone package consumer
         run: |

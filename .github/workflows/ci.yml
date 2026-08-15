@@ -34,10 +34,12 @@ jobs:
     name: macOS app and Swift SDK
     runs-on: macos-26
     env:
-      CLANG_MODULE_CACHE_PATH: ${{ runner.temp }}/lys-clang-module-cache
-      SWIFTPM_MODULECACHE_OVERRIDE: ${{ runner.temp }}/lys-swiftpm-module-cache
+      CLANG_MODULE_CACHE_PATH: ${{ github.workspace }}/.build/ci-clang-module-cache
+      SWIFTPM_MODULECACHE_OVERRIDE: ${{ github.workspace }}/.build/ci-swiftpm-module-cache
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare Swift module caches
+        run: mkdir -p "$CLANG_MODULE_CACHE_PATH" "$SWIFTPM_MODULECACHE_OVERRIDE"
       - name: Show toolchain
         run: |
           uname -m
