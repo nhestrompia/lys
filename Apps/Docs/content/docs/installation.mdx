@@ -1,10 +1,16 @@
 ---
 title: Install Lys
-description: Build and run the Lys public alpha from the monorepo with the supported Apple toolchain.
+description: Download the signed Lys macOS app and start testing iOS projects with the supported Apple toolchain.
 ---
 
-Lys currently documents a source installation. This repository does not contain a public binary
-download URL, so the steps below deliberately avoid implying one.
+## Download the app
+
+Download the latest Apple-silicon release from [GitHub Releases](https://github.com/nhestrompia/lys/releases/latest).
+Each release includes a Developer ID-signed and notarized `Lys-X.Y.Z-arm64.dmg` plus a SHA-256
+checksum.
+
+Open the DMG and drag `Lys.app` to **Applications**. Launch Lys from Applications, then approve
+the macOS security prompt if it appears on the first launch.
 
 ## Requirements
 
@@ -14,34 +20,6 @@ download URL, so the steps below deliberately avoid implying one.
 - Full Xcode with an iOS Simulator runtime
 - [AXe 1.8.0](https://github.com/cameroncooke/axe) for the in-app Simulator surface
 
-## Clone and verify
-
-```sh title="Terminal"
-git clone https://github.com/nhestrompia/lys.git
-cd lys
-swift build
-swift test
-```
-
-Run the repository validation harness when you need the app, SDK, contract, and binary smoke checks
-together:
-
-```sh title="Terminal"
-./Scripts/test-local.sh
-```
-
-## Launch the app
-
-```sh title="Terminal"
-swift run --skip-build Lys
-```
-
-If the selected Xcode toolchain needs the repository's local workaround, use:
-
-```sh title="Terminal"
-./Scripts/run-local.sh
-```
-
 ## First project
 
 Open an existing Git repository that contains an Xcode project or workspace, then select its app
@@ -49,7 +27,8 @@ scheme and an installed Simulator. Git repositories support isolated task worktr
 folders are browse/build-only.
 
 Lys uses Xcode as the compiler, SDK, Simulator, test, and signing infrastructure. It does not
-replace the Apple toolchain.
+replace the Apple toolchain. The GitHub release is the supported installation path; source builds
+are only needed when contributing to Lys itself.
 
 ## Next
 

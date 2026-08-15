@@ -4,6 +4,17 @@ Small semantic test contracts for Expo and React Native apps tested with Lys. Ad
 real controls, declare bounded flows, and export `.lys/contract.json`; Lys performs physical input
 and deterministic verification outside the app.
 
+## Install
+
+Install the published package from npm:
+
+```sh
+npm install @lys/testkit
+```
+
+Add `@lys/testkit` to the Expo `plugins` array and rebuild the native app with `npx expo prebuild
+--platform ios`.
+
 Declare guaranteed bootstrap/restoration screens and reuse shared screen/action objects in both UI
 and export code. Contract export rejects missing guaranteed paths and copied string IDs, then adds
 every other declared screen that can safely reach each flow start. A restored app therefore resumes

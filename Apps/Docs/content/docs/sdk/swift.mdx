@@ -1,36 +1,34 @@
 ---
 title: Swift, SwiftUI, and UIKit SDK
-description: Add the local Lys Swift package, instrument native controls, declare a bounded flow, and export its contract.
+description: Add the published Lys Swift package, instrument native controls, declare a bounded flow, and export its contract.
 ---
 
 The standalone package in `Packages/LysSwift` supports iOS 15+ and macOS 13+. Its library product is
 named `Lys`.
 
-## Install the local package
+## Install from GitHub
 
-In Xcode, choose **File → Add Package Dependencies → Add Local**, select
-`Packages/LysSwift`, and add the `Lys` product to the application and tooling/test targets that use
-it.
+In Xcode, choose **File → Add Package Dependencies** and enter
+`https://github.com/nhestrompia/lys-swift.git`. Select the latest stable version and add the `Lys`
+product to the application and tooling/test targets that use it.
 
-For a Swift package consumer inside this monorepo:
+For a Swift package manifest:
 
 ```swift title="Package.swift"
 let package = Package(
   name: "ExampleApp",
   platforms: [.iOS(.v15)],
   dependencies: [
-    .package(path: "../../Packages/LysSwift"),
+    .package(url: "https://github.com/nhestrompia/lys-swift.git", from: "0.4.0"),
   ],
   targets: [
     .target(
       name: "ExampleApp",
-      dependencies: [.product(name: "Lys", package: "LysSwift")]
+      dependencies: [.product(name: "Lys", package: "lys-swift")]
     ),
   ]
 )
 ```
-
-This repository does not declare a published Swift package URL, so the guide does not invent one.
 
 ## Define semantics once
 

@@ -3,14 +3,20 @@ title: React Native and Expo SDK
 description: Install @lys/testkit, bind stable semantics to real React Native controls, and export a validated contract.
 ---
 
-`@lys/testkit` supports Expo 52+, React Native 0.76+, React 18+, and `expo-modules-core` 2+. The
-native module exposes only the test-session flag and a requested launch credential; it is not an
-automation server.
+The published `@lys/testkit` package supports Expo 52+, React Native 0.76+, React 18+, and
+`expo-modules-core` 2+. The native module exposes only the test-session flag and a requested launch
+credential; it is not an automation server.
 
 ## Install
 
 ```package-install
 @lys/testkit
+```
+
+Or install it directly from npm:
+
+```sh title="Terminal"
+npm install @lys/testkit
 ```
 
 Add the Expo config plugin, then rebuild the native iOS app:
