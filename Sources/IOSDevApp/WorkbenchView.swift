@@ -2283,14 +2283,14 @@ private struct EvidenceArtifactInspector: View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .top, spacing: 10) {
         VStack(alignment: .leading, spacing: 3) {
-          Text(title)
+          Text(evidenceTitle(evidence.kind))
             .font(.system(size: 14, weight: .semibold))
           Text("Generation \(evidence.taskGeneration) · \(statusLabel)")
             .font(.system(size: 10).monospacedDigit())
             .foregroundStyle(Studio.secondary)
         }
         Spacer(minLength: 8)
-        Image(systemName: symbol)
+        Image(systemName: evidenceSymbol(evidence.kind))
           .foregroundStyle(Studio.accent)
       }
 
@@ -2305,11 +2305,13 @@ private struct EvidenceArtifactInspector: View {
               .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
           }
 
+          EvidenceFacts(evidence: evidence)
+
           if evidence.artifactPaths.isEmpty {
             VStack(alignment: .leading, spacing: 5) {
-              Label("No file attached", systemImage: "doc.questionmark")
+              Label("Diagnostics-only record", systemImage: "info.circle")
                 .font(.system(size: 11, weight: .semibold))
-              Text("This record contains diagnostics only.")
+              Text("No file was attached; the recorded result and metadata are shown above.")
                 .font(.system(size: 10))
                 .foregroundStyle(Studio.secondary)
             }
@@ -2336,19 +2338,6 @@ private struct EvidenceArtifactInspector: View {
               }
             }
           }
-
-          if !evidence.diagnosticSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            VStack(alignment: .leading, spacing: 5) {
-              Text("Record detail")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Studio.secondary)
-              Text(evidence.diagnosticSummary)
-                .font(.system(size: 10))
-                .foregroundStyle(Studio.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-          }
         }
       }
       .frame(minHeight: 80, maxHeight: 420)
@@ -2370,38 +2359,78 @@ private struct EvidenceArtifactInspector: View {
     }.first
   }
 
-  private var title: String {
-    switch evidence.kind {
-    case .build: "Build log"
-    case .test: "Test result"
-    case .launch: "Launch record"
-    case .uiAction: "UI action"
-    case .uiAssertion: "UI assertion"
-    case .screenshot: "Screenshot"
-    case .runtimeLog: "App log"
-    case .diff: "Change set"
-    }
-  }
-
-  private var symbol: String {
-    switch evidence.kind {
-    case .build: "terminal"
-    case .test: "checklist"
-    case .launch: "play.rectangle"
-    case .uiAction, .uiAssertion: "viewfinder"
-    case .screenshot: "iphone"
-    case .runtimeLog: "list.bullet.rectangle"
-    case .diff: "doc.text.magnifyingglass"
-    }
-  }
-
   private var statusLabel: String {
-    switch evidence.status {
-    case .passed: "passed"
-    case .failed: "failed"
-    case .blocked: "blocked"
-    case .informational: "informational"
+    evidenceStatusLabel(evidence.status).lowercased()
+  }
+}
+
+private struct EvidenceFacts: View {
+  let evidence: Evidence
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 7) {
+        Circle()
+          .fill(evidenceStatusColor(evidence.status))
+          .frame(width: 8, height: 8)
+        Text(evidenceStatusLabel(evidence.status))
+          .font(.system(size: 10.5, weight: .semibold))
+          .foregroundStyle(evidenceStatusColor(evidence.status))
+        Spacer(minLength: 8)
+        Text(evidence.deterministic ? "Deterministic" : "Manual")
+          .font(.system(size: 9.5, weight: .medium))
+          .foregroundStyle(Studio.secondary)
+      }
+
+      LazyVGrid(
+        columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+        alignment: .leading,
+        spacing: 8
+      ) {
+        fact("Generation", "\(evidence.taskGeneration)")
+        fact("Recorded", evidence.createdAt.formatted(date: .omitted, time: .shortened))
+        fact("Artifacts", "\(evidence.artifactPaths.count)")
+        if let criterionID = evidence.criterionID?.nonempty {
+          fact("Criterion", criterionID)
+        }
+        if let destination = evidence.destinationUDID?.nonempty {
+          fact("Simulator", shortIdentifier(destination))
+        }
+      }
+
+      Text(summary)
+        .font(.system(size: 10))
+        .foregroundStyle(Studio.secondary)
+        .textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
     }
+    .padding(12)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(evidenceStatusColor(evidence.status).opacity(0.08))
+    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+  }
+
+  @ViewBuilder
+  private func fact(_ label: String, _ value: String) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text(label)
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(Studio.secondary)
+      Text(value)
+        .font(.system(size: 10).monospacedDigit())
+        .lineLimit(1)
+        .textSelection(.enabled)
+    }
+  }
+
+  private var summary: String {
+    let detail = evidence.diagnosticSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !detail.isEmpty { return detail }
+    return "No diagnostic summary was recorded for this evidence."
+  }
+
+  private func shortIdentifier(_ value: String) -> String {
+    value.count > 12 ? "…\(value.suffix(8))" : value
   }
 }
 
@@ -2504,7 +2533,6 @@ private struct ArtifactActionBar: View {
 
 private struct EvidenceWorkspace: View {
   @EnvironmentObject var model: AppModel
-  @State private var selectedEvidence: Evidence?
 
   var body: some View {
     VStack(spacing: 0) {
@@ -2624,20 +2652,9 @@ private struct EvidenceWorkspace: View {
   private var evidenceContent: some View {
     HStack(alignment: .top, spacing: 0) {
       ScrollView(.vertical) {
-        LazyVGrid(
-          columns: [GridItem(.adaptive(minimum: 104, maximum: 104), spacing: 12)],
-          alignment: .leading,
-          spacing: 12
-        ) {
+        EvidenceFlowLayout(columnSpacing: 12, rowSpacing: 12) {
           ForEach(Array(model.verificationEvidence.reversed())) { evidence in
-            Button { selectedEvidence = evidence } label: {
-              EvidenceThumbnail(evidence: evidence)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .popover(item: $selectedEvidence, arrowEdge: .top) { selected in
-              EvidenceArtifactInspector(evidence: selected)
-            }
+            EvidenceTile(evidence: evidence)
           }
           Button {
             model.captureCurrentScreenshot()
@@ -2772,28 +2789,168 @@ private struct EvidenceWorkspace: View {
 
 }
 
+private struct EvidenceFlowLayout: Layout {
+  let columnSpacing: CGFloat
+  let rowSpacing: CGFloat
+  typealias Cache = ()
+
+  func sizeThatFits(
+    proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache
+  ) -> CGSize {
+    let rows = makeRows(
+      maxWidth: proposal.width ?? .greatestFiniteMagnitude,
+      subviews: subviews)
+    let width = proposal.width ?? rows.map(rowWidth).max() ?? 0
+    let height = rows.enumerated().reduce(CGFloat.zero) { result, pair in
+      result + rowHeight(pair.element) + (pair.offset == rows.count - 1 ? 0 : rowSpacing)
+    }
+    return CGSize(width: width, height: height)
+  }
+
+  func placeSubviews(
+    in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache
+  ) {
+    let rows = makeRows(maxWidth: bounds.width, subviews: subviews)
+    var y = bounds.minY
+    var subviewIndex = 0
+
+    for (rowIndex, row) in rows.enumerated() {
+      var x = bounds.minX
+      for size in row {
+        subviews[subviewIndex].place(
+          at: CGPoint(x: x, y: y),
+          anchor: .topLeading,
+          proposal: ProposedViewSize(width: size.width, height: size.height))
+        x += size.width + columnSpacing
+        subviewIndex += 1
+      }
+      y += rowHeight(row) + (rowIndex == rows.count - 1 ? 0 : rowSpacing)
+    }
+  }
+
+  private func makeRows(maxWidth: CGFloat, subviews: Subviews) -> [[CGSize]] {
+    var rows: [[CGSize]] = []
+    var currentRow: [CGSize] = []
+    var currentWidth: CGFloat = 0
+
+    for subview in subviews {
+      let size = subview.sizeThatFits(ProposedViewSize(width: nil, height: nil))
+      let nextWidth = currentRow.isEmpty ? size.width : currentWidth + columnSpacing + size.width
+      if !currentRow.isEmpty && nextWidth > maxWidth {
+        rows.append(currentRow)
+        currentRow = [size]
+        currentWidth = size.width
+      } else {
+        currentRow.append(size)
+        currentWidth = nextWidth
+      }
+    }
+
+    if !currentRow.isEmpty {
+      rows.append(currentRow)
+    }
+    return rows
+  }
+
+  private func rowWidth(_ row: [CGSize]) -> CGFloat {
+    row.reduce(CGFloat.zero) { $0 + $1.width }
+      + CGFloat(max(0, row.count - 1)) * columnSpacing
+  }
+
+  private func rowHeight(_ row: [CGSize]) -> CGFloat {
+    row.map(\.height).max() ?? 0
+  }
+}
+
+private struct EvidenceTile: View {
+  let evidence: Evidence
+  @State private var isInspectorPresented = false
+
+  var body: some View {
+    Button {
+      isInspectorPresented = true
+    } label: {
+      EvidenceThumbnail(evidence: evidence)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .popover(
+      isPresented: $isInspectorPresented,
+      attachmentAnchor: .rect(.bounds),
+      arrowEdge: .top
+    ) {
+      EvidenceArtifactInspector(evidence: evidence)
+    }
+    .help("Open \(evidenceTitle(evidence.kind).lowercased()) evidence")
+    .accessibilityLabel("Open \(evidenceTitle(evidence.kind).lowercased()) evidence")
+  }
+}
+
 private struct EvidenceThumbnail: View {
   let evidence: Evidence
 
   var body: some View {
+    switch evidence.kind {
+    case .screenshot:
+      screenshotThumbnail
+    default:
+      diagnosticThumbnail
+    }
+  }
+
+  private var screenshotThumbnail: some View {
     VStack(alignment: .leading, spacing: 5) {
       ZStack {
         RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Studio.raised)
         if let image = previewImage {
           Image(nsImage: image).resizable().scaledToFill()
         } else {
-          Image(systemName: symbol)
+          Image(systemName: evidenceSymbol(evidence.kind))
             .font(.system(size: 19, weight: .light))
             .foregroundStyle(Studio.secondary)
         }
       }
       .frame(width: 92, height: 104)
       .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-      Text(title)
+      Text(evidenceTitle(evidence.kind))
         .font(.system(size: 9.5, weight: .medium))
         .lineLimit(1)
         .frame(width: 92, alignment: .center)
     }
+    .foregroundStyle(Color.primary)
+  }
+
+  private var diagnosticThumbnail: some View {
+    ZStack(alignment: .topLeading) {
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(evidenceStatusColor(evidence.status).opacity(0.08))
+      VStack(alignment: .leading, spacing: 5) {
+        HStack(spacing: 5) {
+          Image(systemName: evidenceSymbol(evidence.kind))
+            .font(.system(size: 12, weight: .medium))
+          Text(evidenceStatusLabel(evidence.status))
+            .font(.system(size: 9, weight: .semibold))
+          Spacer(minLength: 0)
+        }
+        .foregroundStyle(evidenceStatusColor(evidence.status))
+        Text(evidenceTitle(evidence.kind))
+          .font(.system(size: 11, weight: .semibold))
+          .lineLimit(1)
+        Text(summary)
+          .font(.system(size: 9))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(2)
+          .fixedSize(horizontal: false, vertical: true)
+        Spacer(minLength: 0)
+        Text(metadata)
+          .font(.system(size: 8.5).monospacedDigit())
+          .foregroundStyle(Studio.tertiary)
+          .lineLimit(1)
+      }
+      .padding(9)
+    }
+    .frame(width: 184, height: 104)
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     .foregroundStyle(Color.primary)
   }
 
@@ -2803,29 +2960,76 @@ private struct EvidenceThumbnail: View {
     }.first
   }
 
-  private var title: String {
-    switch evidence.kind {
-    case .build: "Build"
-    case .test: "Tests"
-    case .launch: "Launch"
-    case .uiAction: "UI action"
-    case .uiAssertion: "Assertion"
-    case .screenshot: "Screenshot"
-    case .runtimeLog: "App log"
-    case .diff: "Changes"
+  private var summary: String {
+    let detail = evidence.diagnosticSummary
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "\n", with: " ")
+    if !detail.isEmpty {
+      return detail
+    }
+    return switch evidence.kind {
+    case .build: "Build completed without a diagnostic file."
+    case .test: "Test result recorded by the host."
+    case .launch: "The app launch was recorded."
+    case .uiAction: "A deterministic UI action was recorded."
+    case .uiAssertion: "A UI acceptance check was recorded."
+    case .screenshot: "Simulator frame captured."
+    case .runtimeLog: "Runtime diagnostics were recorded."
+    case .diff: "A change-set artifact was recorded."
     }
   }
 
-  private var symbol: String {
-    switch evidence.kind {
-    case .build: "terminal"
-    case .test: "checklist"
-    case .launch: "play.rectangle"
-    case .uiAction, .uiAssertion: "viewfinder"
-    case .screenshot: "iphone"
-    case .runtimeLog: "list.bullet.rectangle"
-    case .diff: "doc.text.magnifyingglass"
+  private var metadata: String {
+    let timestamp = evidence.createdAt.formatted(date: .omitted, time: .shortened)
+    var values = ["Gen \(evidence.taskGeneration)", timestamp]
+    let count = evidence.artifactPaths.count
+    if count > 0 {
+      values.append("\(count) \(count == 1 ? "file" : "files")")
     }
+    return values.joined(separator: " · ")
+  }
+}
+
+private func evidenceTitle(_ kind: EvidenceKind) -> String {
+  switch kind {
+  case .build: "Build"
+  case .test: "Tests"
+  case .launch: "Launch"
+  case .uiAction: "UI action"
+  case .uiAssertion: "Assertion"
+  case .screenshot: "Screenshot"
+  case .runtimeLog: "App log"
+  case .diff: "Changes"
+  }
+}
+
+private func evidenceSymbol(_ kind: EvidenceKind) -> String {
+  switch kind {
+  case .build: "terminal"
+  case .test: "checklist"
+  case .launch: "play.rectangle"
+  case .uiAction, .uiAssertion: "viewfinder"
+  case .screenshot: "iphone"
+  case .runtimeLog: "list.bullet.rectangle"
+  case .diff: "doc.text.magnifyingglass"
+  }
+}
+
+private func evidenceStatusLabel(_ status: EvidenceStatus) -> String {
+  switch status {
+  case .passed: "Passed"
+  case .failed: "Failed"
+  case .blocked: "Blocked"
+  case .informational: "Info"
+  }
+}
+
+private func evidenceStatusColor(_ status: EvidenceStatus) -> Color {
+  switch status {
+  case .passed: Studio.success
+  case .failed: .red
+  case .blocked: Studio.warning
+  case .informational: Studio.accent
   }
 }
 
