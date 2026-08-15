@@ -1,13 +1,13 @@
 # Expo and React Native integration
 
-Add `@lys/testkit` and its Expo config plugin. Define semantics in a shared module imported by both
+Add `@nhestrompia/lys` and its Expo config plugin. Define semantics in a shared module imported by both
 the app and export script so IDs and transitions cannot drift. Helpers accept the declared object:
 
 ```tsx
 import {
   action, actionProps, application, flow, invoke, route, screen, screenProps, stateProps,
   testSession,
-} from "@lys/testkit";
+} from "@nhestrompia/lys";
 
 export const home = screen("home", "Home");
 export const quizSetup = screen("quiz.setup", "Quiz setup");
@@ -53,8 +53,8 @@ control. Do not add fixed scroll actions to reach it—Lys reveals semantic cont
 ## Define and export
 
 ```ts
-import { defineContract, route } from "@lys/testkit";
-import { writeContract } from "@lys/testkit/node";
+import { defineContract, route } from "@nhestrompia/lys";
+import { writeContract } from "@nhestrompia/lys/node";
 
 const contract = defineContract({ app, routes, capabilities, contexts, flows });
 await writeContract(contract); // writes .lys/contract.json
@@ -69,7 +69,7 @@ package, run the export script, parse the emitted JSON, and inspect an iOS acces
 Raw string IDs are rejected by semantic helpers. Put declarations in one shared module and import
 the same objects from UI and export code; this prevents an instrumented button from being omitted
 from the contract, as happened when separate handwritten lists drifted.
-The `@lys/testkit/node` export is Node-safe and must work without mocking `expo-modules-core` or
+The `@nhestrompia/lys/node` export is Node-safe and must work without mocking `expo-modules-core` or
 patching Node's module loader. Treat either workaround as a broken SDK installation.
 
 The native module exposes the test-session flag, requested context, reset marker, and requested

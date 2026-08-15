@@ -2,7 +2,7 @@
 
 A stable `vX.Y.Z` tag drives three release paths:
 
-- `@lys/testkit@X.Y.Z` is published to npm with GitHub OIDC trusted publishing.
+- `@nhestrompia/lys@X.Y.Z` is published to npm with GitHub OIDC trusted publishing.
 - The Swift SDK subtree is mirrored to a dedicated repository with the same tag. Consumers resolve
   its `Lys` product and import the `Lys` module.
 - An Apple-silicon `Lys-X.Y.Z-arm64.dmg` is Developer ID signed, notarized, stapled, checksummed,
@@ -25,10 +25,10 @@ npm ci
 npm run build:expo-sdk
 npm run check:expo-sdk
 npm login
-npm publish --workspace @lys/testkit --access public
+npm publish --workspace @nhestrompia/lys --access public
 ```
 
-Then open the `@lys/testkit` package settings on npm and add a GitHub Actions trusted publisher:
+Then open the `@nhestrompia/lys` package settings on npm and add a GitHub Actions trusted publisher:
 
 - Organization or user: `nhestrompia`
 - Repository: `lys`

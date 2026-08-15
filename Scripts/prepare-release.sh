@@ -17,7 +17,7 @@ if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
 fi
 
 cd "$root"
-npm version "$version" --workspace @lys/testkit --no-git-tag-version
+npm version "$version" --workspace @nhestrompia/lys --no-git-tag-version
 npm run release:check -- "v$version"
 
 echo "Prepared v$version. Review and commit the package metadata, then create tag v$version."

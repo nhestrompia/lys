@@ -18,7 +18,7 @@ for (const symbol of required) {
     throw new Error(`Missing SDK symbol: ${symbol}`);
   }
 }
-if (manifest.name !== "@lys/testkit") throw new Error("Unexpected package name");
+if (manifest.name !== "@nhestrompia/lys") throw new Error("Unexpected package name");
 if (manifest.main !== "dist/index.js") throw new Error("Package must load compiled JavaScript");
 if (manifest.types !== "dist/index.d.ts") throw new Error("Package types must load built declarations");
 if (manifest.publishConfig?.access !== "public") throw new Error("Scoped package must publish publicly");

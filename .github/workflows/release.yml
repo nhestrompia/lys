@@ -27,7 +27,7 @@ jobs:
       - run: npm run build:expo-sdk
       - run: npm run check:expo-sdk
       - run: npm run check:contract
-      - run: npm pack --workspace @lys/testkit --dry-run
+      - run: npm pack --workspace @nhestrompia/lys --dry-run
 
   verify-swift-sdk:
     name: Verify Swift release
@@ -67,7 +67,7 @@ jobs:
         run: ./Scripts/publish-swift-sdk.sh "$GITHUB_REF_NAME"
 
   publish-npm:
-    name: Publish @lys/testkit
+    name: Publish @nhestrompia/lys
     needs:
       - verify-expo-sdk
       - verify-swift-sdk
@@ -88,10 +88,10 @@ jobs:
       - name: Publish with npm trusted publishing
         run: |
           version=${GITHUB_REF_NAME#v}
-          if npm view "@lys/testkit@$version" version >/dev/null 2>&1; then
-            echo "@lys/testkit@$version is already published"
+          if npm view "@nhestrompia/lys@$version" version >/dev/null 2>&1; then
+            echo "@nhestrompia/lys@$version is already published"
           else
-            npm publish --workspace @lys/testkit --access public
+            npm publish --workspace @nhestrompia/lys --access public
           fi
 
   release-macos:

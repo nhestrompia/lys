@@ -1,4 +1,4 @@
-# @lys/testkit
+# @nhestrompia/lys
 
 Small semantic test contracts for Expo and React Native apps tested with Lys. Add stable props to
 real controls, declare bounded flows, and export `.lys/contract.json`; Lys performs physical input
@@ -9,10 +9,10 @@ and deterministic verification outside the app.
 Install the published package from npm:
 
 ```sh
-npm install @lys/testkit
+npm install @nhestrompia/lys
 ```
 
-Add `@lys/testkit` to the Expo `plugins` array and rebuild the native app with `npx expo prebuild
+Add `@nhestrompia/lys` to the Expo `plugins` array and rebuild the native app with `npx expo prebuild
 --platform ios`.
 
 Declare guaranteed bootstrap/restoration screens and reuse shared screen/action objects in both UI

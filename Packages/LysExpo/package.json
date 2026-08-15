@@ -1,12 +1,12 @@
 {
-  "name": "@lys/testkit",
+  "name": "@nhestrompia/lys",
   "version": "0.4.0",
   "description": "Small semantic test contract for Lys and Expo/React Native apps",
   "license": "MIT",
   "homepage": "https://github.com/nhestrompia/lys#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nhestrompia/lys.git",
+    "url": "git+https://github.com/nhestrompia/lys.git",
     "directory": "Packages/LysExpo"
   },
   "bugs": "https://github.com/nhestrompia/lys/issues",

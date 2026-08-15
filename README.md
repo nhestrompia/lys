@@ -43,7 +43,7 @@ You can also use `./Scripts/run-local.sh` when the selected Xcode toolchain need
 ## SDKs
 
 - [Swift SDK](https://github.com/nhestrompia/lys-swift) — install from Swift Package Manager
-- [Expo and React Native SDK](https://www.npmjs.com/package/@lys/testkit) — install with `npm install @lys/testkit`
+- [Expo and React Native SDK](https://www.npmjs.com/package/@nhestrompia/lys) — install with `npm install @nhestrompia/lys`
 - [SDK integration guide](LYS_SDK.md)
 
 More project details are available in [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

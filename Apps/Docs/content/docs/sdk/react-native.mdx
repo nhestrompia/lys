@@ -1,22 +1,22 @@
 ---
 title: React Native and Expo SDK
-description: Install @lys/testkit, bind stable semantics to real React Native controls, and export a validated contract.
+description: Install @nhestrompia/lys, bind stable semantics to real React Native controls, and export a validated contract.
 ---
 
-The published `@lys/testkit` package supports Expo 52+, React Native 0.76+, React 18+, and
+The published `@nhestrompia/lys` package supports Expo 52+, React Native 0.76+, React 18+, and
 `expo-modules-core` 2+. The native module exposes only the test-session flag and a requested launch
 credential; it is not an automation server.
 
 ## Install
 
 ```package-install
-@lys/testkit
+@nhestrompia/lys
 ```
 
 Or install it directly from npm:
 
 ```sh title="Terminal"
-npm install @lys/testkit
+npm install @nhestrompia/lys
 ```
 
 Add the Expo config plugin, then rebuild the native iOS app:
@@ -24,7 +24,7 @@ Add the Expo config plugin, then rebuild the native iOS app:
 ```json title="app.json"
 {
   "expo": {
-    "plugins": ["@lys/testkit"]
+    "plugins": ["@nhestrompia/lys"]
   }
 }
 ```
@@ -46,7 +46,7 @@ import {
   invoke,
   route,
   screen,
-} from '@lys/testkit';
+} from '@nhestrompia/lys';
 
 export const home = screen('home', 'Home');
 export const quizSetup = screen('quiz.setup', 'Quiz setup');
@@ -82,7 +82,7 @@ export const completeQuiz = flow({
 ## Bind the real UI
 
 ```tsx title="src/screens/Quiz.tsx"
-import { actionProps, screenProps, stateProps } from '@lys/testkit';
+import { actionProps, screenProps, stateProps } from '@nhestrompia/lys';
 import { useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { quizSetup, startQuiz } from '../testing/lys-semantics';
@@ -115,8 +115,8 @@ label.
 ## Export the contract
 
 ```ts title="scripts/export-lys-contract.ts"
-import { defineContract } from '@lys/testkit';
-import { writeContract } from '@lys/testkit/node';
+import { defineContract } from '@nhestrompia/lys';
+import { writeContract } from '@nhestrompia/lys/node';
 import {
   app,
   completeQuiz,
@@ -152,7 +152,7 @@ need for either indicates an incorrect SDK installation.
 Read a host-injected credential only through the protected bridge:
 
 ```tsx
-import { testSession } from '@lys/testkit';
+import { testSession } from '@nhestrompia/lys';
 
 const token = testSession.credential('LYS_TEST_SESSION_TOKEN');
 if (token) await auth.restoreTestSession(token);

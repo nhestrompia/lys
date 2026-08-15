@@ -9,7 +9,7 @@ physical input, bounded flow execution, evidence, cancellation, and verification
 
 - `Packages/LysSwift`: standalone Swift package, product `Lys`; stable releases mirror this subtree
   to the `lys-swift` repository so the SDK retains its iOS 15 and macOS 13 deployment targets.
-- `Packages/LysExpo`: Expo module and TypeScript helpers, package `@lys/testkit`.
+- `Packages/LysExpo`: Expo module and TypeScript helpers, package `@nhestrompia/lys`.
 - `Schemas/lys-test-contract.schema.json`: shared versioned wire contract.
 - `Examples/lys-contract.json`: authenticated-session and UI-auth flow example.
 
@@ -109,13 +109,13 @@ malformed contract fails in the developer's tooling target before Lys can run it
 
 ## Expo integration
 
-Add `@lys/testkit` and its config plugin, then spread the generated semantic props onto real React
+Add `@nhestrompia/lys` and its config plugin, then spread the generated semantic props onto real React
 Native controls:
 
 ```tsx
 import {
   action, actionProps, application, screen, screenProps, stateProps, testSession,
-} from "@lys/testkit";
+} from "@nhestrompia/lys";
 
 const home = screen("home", "Home");
 const quizSetup = screen("quiz.setup", "Quiz setup");
@@ -137,8 +137,8 @@ const token = testSession.credential("LYS_TEST_SESSION_TOKEN");
 Define the contract in TypeScript and export it from a Node script or test setup:
 
 ```ts
-import { defineContract } from "@lys/testkit";
-import { writeContract } from "@lys/testkit/node";
+import { defineContract } from "@nhestrompia/lys";
+import { writeContract } from "@nhestrompia/lys/node";
 
 const contract = defineContract({ app, routes, capabilities, contexts, flows });
 await writeContract(contract); // .lys/contract.json
