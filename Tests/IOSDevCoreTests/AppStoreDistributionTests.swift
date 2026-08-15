@@ -41,6 +41,40 @@ import Testing
   #expect(upload.arguments.contains("-authenticationKeyIssuerID"))
 }
 
+@Test func appStoreArchiveCommandCanOverrideOnlyTheArchivedBuildNumber() {
+  let target = LocalDistributionTarget(
+    container: URL(fileURLWithPath: "/tmp/Release.xcodeproj"), scheme: "Release",
+    target: "Release", bundleID: "com.example.app", productName: "Release",
+    marketingVersion: "2.4", buildNumber: "7")
+  let command = AppStoreDistributionSupport.archiveCommand(
+    xcodebuild: URL(fileURLWithPath: "/usr/bin/xcodebuild"), target: target,
+    archivePath: URL(fileURLWithPath: "/tmp/App.xcarchive"),
+    derivedDataPath: URL(fileURLWithPath: "/tmp/DerivedData"),
+    developerDirectory: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
+    allowProvisioningUpdates: false, buildNumberOverride: "8")
+
+  #expect(command.arguments.contains("CURRENT_PROJECT_VERSION=8"))
+  #expect(command.arguments.contains("INFOPLIST_KEY_CFBundleVersion=8"))
+}
+
+@Test func appStoreUniqueBuildNumberAdvancesOnlyWhenNeeded() {
+  #expect(
+    AppStoreDistributionSupport.uniqueBuildNumber(
+      preferred: "42", existing: ["40", "41"]) == "42")
+  #expect(
+    AppStoreDistributionSupport.uniqueBuildNumber(
+      preferred: "42", existing: ["40", "42"]) == "43")
+  #expect(
+    AppStoreDistributionSupport.uniqueBuildNumber(
+      preferred: "1.0", existing: ["1.0", "1.0.3"]) == "1.0.4")
+  #expect(
+    AppStoreDistributionSupport.uniqueBuildNumber(
+      preferred: "42", existing: ["000042"]) == "43")
+  #expect(
+    AppStoreDistributionSupport.uniqueBuildNumber(
+      preferred: "build-42", existing: ["build-41"]) == nil)
+}
+
 @Test func appStoreExportOptionsKeepReviewedBuildNumberAndInternalRestriction() throws {
   let data = try AppStoreDistributionSupport.exportOptionsData(
     teamID: "TEAM123ABC", internalTestingOnly: true, uploadSymbols: true)

@@ -158,6 +158,9 @@ is unavailable.
   it immediately afterward.
 - [x] Inspect the `.xcarchive` for its actual bundle ID, marketing version, build number, signing
   identity, team, application path, and architectures.
+- [x] Refresh the live App Store Connect build list during upload preflight, advance a reused
+  numeric build number for the selected app version without editing the source project, and pass
+  the reviewed number only to the archive operation.
 - [ ] Inspect and compare archived entitlements, embedded provisioning profiles, and dSYMs.
 - [x] Reject local/archive/remote bundle, version, build, and signing-team mismatches before upload.
 - [x] Upload with `xcodebuild -exportArchive`, `method=app-store-connect`, and
@@ -260,6 +263,8 @@ is unavailable.
 - [x] Command construction preserves paths and schemes containing spaces and shell metacharacters.
 - [x] Export-options fixtures verify upload destination, App Store Connect method, fixed build
   number, symbols, team, and internal-only restriction.
+- [x] Build-number fixtures verify reuse of an available number, advancement past uploaded numeric
+  and dotted values, and rejection of unsupported values.
 - [x] Archive inspection fixtures verify the identity extracted from the actual `.xcarchive`.
 - [ ] Deployment state-machine restart and retry behavior.
 - [ ] UI snapshots for disconnected, connecting, connected, forbidden, no matching app, processing,

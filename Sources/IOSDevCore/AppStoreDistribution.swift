@@ -116,6 +116,7 @@ public struct AppStoreTemporaryCredential: Equatable, Sendable {
 
 public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
   case missingBuildSetting(String)
+  case invalidBuildNumber(String)
   case commandFailed(stage: String, detail: String)
   case invalidArchive(String)
   case identityMismatch(expected: String, actual: String)
@@ -124,6 +125,9 @@ public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
     switch self {
     case .missingBuildSetting(let key):
       "The Release target does not provide the required \(key) build setting."
+    case .invalidBuildNumber(let value):
+      "The Release build number \"\(value)\" is not a numeric Apple build number "
+        + "that Lys can advance automatically."
     case .commandFailed(let stage, let detail):
       "\(stage) failed: \(detail)"
     case .invalidArchive(let detail):
@@ -138,14 +142,21 @@ public enum AppStoreDistributionSupport {
   public static func archiveCommand(
     xcodebuild: URL, target: LocalDistributionTarget, archivePath: URL, derivedDataPath: URL,
     developerDirectory: URL, authentication: AppStoreDistributionAuthentication? = nil,
-    allowProvisioningUpdates: Bool
+    allowProvisioningUpdates: Bool, buildNumberOverride: String? = nil
   ) -> CommandSpec {
     var arguments = [
       target.container.pathExtension == "xcworkspace" ? "-workspace" : "-project",
       target.container.path, "-scheme", target.scheme, "-configuration", "Release",
       "-destination", "generic/platform=iOS", "-archivePath", archivePath.path,
-      "-derivedDataPath", derivedDataPath.path, "archive",
+      "-derivedDataPath", derivedDataPath.path,
     ]
+    if let buildNumberOverride {
+      arguments += [
+        "CURRENT_PROJECT_VERSION=\(buildNumberOverride)",
+        "INFOPLIST_KEY_CFBundleVersion=\(buildNumberOverride)",
+      ]
+    }
+    arguments.append("archive")
     if let teamID = normalizedTeamID(target.developmentTeam) {
       arguments.append("DEVELOPMENT_TEAM=\(teamID)")
     }
@@ -158,6 +169,28 @@ public enum AppStoreDistributionSupport {
     return .init(
       executable: xcodebuild, arguments: arguments,
       environment: ["DEVELOPER_DIR": developerDirectory.path])
+  }
+
+  /// Returns the preferred build number when it is above every uploaded number, otherwise
+  /// returns the next numeric build number after Apple's highest uploaded build.
+  ///
+  /// Apple accepts numeric and period-separated numeric CFBundleVersion values. Lys keeps the
+  /// source project unchanged and advances only the archive's build settings. Unsupported local
+  /// values return nil so the caller can stop with an actionable preflight message.
+  public static func uniqueBuildNumber(preferred: String, existing: [String]) -> String? {
+    guard let preferred = NumericBuildNumber(preferred) else { return nil }
+    let existingNumbers = existing.compactMap(NumericBuildNumber.init)
+    guard let highestExisting = existingNumbers.max(by: {
+      NumericBuildNumber.compare($0, $1) == .orderedAscending
+    }) else {
+      return preferred.value
+    }
+    switch NumericBuildNumber.compare(preferred, highestExisting) {
+    case .orderedDescending:
+      return preferred.value
+    case .orderedAscending, .orderedSame:
+      return highestExisting.incremented().value
+    }
   }
 
   public static func uploadCommand(
@@ -306,5 +339,68 @@ public enum AppStoreDistributionSupport {
   private static func unique(_ values: [String]) -> [String] {
     var seen = Set<String>()
     return values.filter { seen.insert($0).inserted }
+  }
+
+  private struct NumericBuildNumber: Sendable {
+    let components: [String]
+
+    init?(_ value: String) {
+      let pieces = value.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+      guard !pieces.isEmpty,
+        pieces.allSatisfy({ piece in
+          !piece.isEmpty
+            && piece.unicodeScalars.allSatisfy { scalar in scalar.value >= 48 && scalar.value <= 57 }
+        })
+      else { return nil }
+      components = pieces.map(Self.normalize)
+    }
+
+    private init(components: [String]) {
+      self.components = components
+    }
+
+    var value: String { components.joined(separator: ".") }
+
+    func incremented() -> Self {
+      var components = self.components
+      components[components.index(before: components.endIndex)] = Self.increment(
+        components[components.index(before: components.endIndex)])
+      return .init(components: components)
+    }
+
+    static func compare(_ lhs: Self, _ rhs: Self) -> ComparisonResult {
+      let count = max(lhs.components.count, rhs.components.count)
+      for index in 0..<count {
+        let left = index < lhs.components.count ? lhs.components[index] : "0"
+        let right = index < rhs.components.count ? rhs.components[index] : "0"
+        if left.count != right.count {
+          return left.count < right.count ? .orderedAscending : .orderedDescending
+        }
+        if left != right {
+          return left < right ? .orderedAscending : .orderedDescending
+        }
+      }
+      return .orderedSame
+    }
+
+    private static func normalize(_ value: String) -> String {
+      let normalized = value.drop(while: { $0 == "0" })
+      return normalized.isEmpty ? "0" : String(normalized)
+    }
+
+    private static func increment(_ value: String) -> String {
+      var digits = Array(value.utf8)
+      var index = digits.count
+      while index > 0 {
+        index -= 1
+        if digits[index] == 57 {
+          digits[index] = 48
+        } else {
+          digits[index] += 1
+          return String(decoding: digits, as: UTF8.self)
+        }
+      }
+      return "1" + String(decoding: digits, as: UTF8.self)
+    }
   }
 }

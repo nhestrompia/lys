@@ -831,6 +831,20 @@ extension AppModel {
     }
   }
 
+  private func liveBuildsForUpload(appID: String) async throws -> [AppStoreBuild] {
+    guard let connection = appStoreConnection else {
+      throw AppStoreConnectError.invalidConnection(
+        "Connect App Store Connect before Lys checks the next available build number.")
+    }
+    let privateKey = try await appStoreCredentialSession.privateKey(for: connection.id)
+    let client = try AppStoreConnectClient(connection: connection, privateKeyPEM: privateKey)
+    let builds = try await client.listBuilds(appID: appID)
+    guard selectedAppStoreApp?.id == appID else { throw CancellationError() }
+    appStoreBuilds = builds
+    appStoreSectionErrors.removeValue(forKey: .builds)
+    return builds
+  }
+
   func prepareAppStoreUpload() async {
     guard !appStoreUploadPhase.isRunning else { return }
     appStoreUploadPhase = .preflighting
@@ -878,6 +892,19 @@ extension AppModel {
         throw AppStoreDistributionError.identityMismatch(
           expected: app.bundleID, actual: target.bundleID)
       }
+      let originalBuildNumber = target.buildNumber
+      let existingBuilds = try await liveBuildsForUpload(appID: app.id)
+      let existingBuildNumbers = existingBuilds
+        .filter {
+          $0.marketingVersion == nil || $0.marketingVersion == target.marketingVersion
+        }
+        .map(\.version)
+      guard let uniqueBuildNumber = AppStoreDistributionSupport.uniqueBuildNumber(
+        preferred: target.buildNumber, existing: existingBuildNumbers)
+      else {
+        throw AppStoreDistributionError.invalidBuildNumber(target.buildNumber)
+      }
+      target.buildNumber = uniqueBuildNumber
       var teamID = AppStoreDistributionSupport.normalizedTeamID(target.developmentTeam)
         ?? AppStoreDistributionSupport.normalizedTeamID(appStoreConnection?.teamID)
       if teamID == nil, let connection = appStoreConnection,
@@ -906,6 +933,12 @@ extension AppModel {
         warnings.append(
           "Version \(target.marketingVersion) does not yet have an App Store version record. "
             + "The upload can still be used by TestFlight.")
+      }
+      if target.buildNumber != originalBuildNumber {
+        warnings.append(
+          "Lys advanced the archive build number from \(originalBuildNumber) to "
+            + "\(target.buildNumber) because the original number was already used. The source "
+            + "project is not changed.")
       }
       if activeWorktree != nil {
         warnings.append("This archive will use the active task worktree shown below.")
@@ -952,7 +985,7 @@ extension AppModel {
         resolvedPreflight = await ToolchainDiscovery.preflight(
           developerDirectory: developerDirectory)
       }
-      guard let uploadPreflight = appStoreUploadPreflight,
+      guard var uploadPreflight = appStoreUploadPreflight,
         let connection = appStoreConnection, let app = selectedAppStoreApp,
         let issuerID = connection.issuerID,
         let xcodebuildPath = resolvedPreflight.xcodebuildPath,
@@ -964,6 +997,29 @@ extension AppModel {
       guard uploadPreflight.target.bundleID == app.bundleID else {
         throw AppStoreDistributionError.identityMismatch(
           expected: app.bundleID, actual: uploadPreflight.target.bundleID)
+      }
+      appStoreUploadPhase = .preflighting
+      appStoreUploadStatus = "Checking App Store Connect for an unused build number…"
+      let latestBuilds = try await liveBuildsForUpload(appID: app.id)
+      let latestBuildNumbers = latestBuilds
+        .filter {
+          $0.marketingVersion == nil
+            || $0.marketingVersion == uploadPreflight.target.marketingVersion
+        }
+        .map(\.version)
+      guard let uniqueBuildNumber = AppStoreDistributionSupport.uniqueBuildNumber(
+        preferred: uploadPreflight.target.buildNumber, existing: latestBuildNumbers)
+      else {
+        throw AppStoreDistributionError.invalidBuildNumber(uploadPreflight.target.buildNumber)
+      }
+      if uniqueBuildNumber != uploadPreflight.target.buildNumber {
+        let previousBuildNumber = uploadPreflight.target.buildNumber
+        uploadPreflight.target.buildNumber = uniqueBuildNumber
+        uploadPreflight.warnings.append(
+          "Lys advanced the archive build number from \(previousBuildNumber) to "
+            + "\(uniqueBuildNumber) because the original number was used while this upload was "
+            + "waiting for approval. The source project is not changed.")
+        appStoreUploadPreflight = uploadPreflight
       }
       guard let teamID = uploadPreflight.effectiveTeamID(
         override: options.developmentTeamID)
@@ -1005,7 +1061,8 @@ extension AppModel {
         archivePath: archiveURL, derivedDataPath: derivedDataURL,
         developerDirectory: URL(fileURLWithPath: developerPath),
         authentication: options.allowProvisioningUpdates ? credential : nil,
-        allowProvisioningUpdates: options.allowProvisioningUpdates)
+        allowProvisioningUpdates: options.allowProvisioningUpdates,
+        buildNumberOverride: archiveTarget.buildNumber)
       let archiveOutcome = try await runAppStoreDistributionCommand(
         archiveCommand, credentialPath: credential.privateKeyURL.path)
       guard archiveOutcome.succeeded else {

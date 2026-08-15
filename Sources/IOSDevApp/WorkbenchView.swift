@@ -6178,12 +6178,10 @@ private struct AppStoreUploadSheet: View {
         } label: {
           Label("View Build Log", systemImage: "terminal")
         }
-        Button(model.appStoreUploadPreflight == nil ? "Run Preflight" : "Try Again") {
-          if model.appStoreUploadPreflight == nil {
-            Task { await model.prepareAppStoreUpload() }
-          } else {
-            model.startAppStoreUpload()
-          }
+        Button {
+          Task { await model.prepareAppStoreUpload() }
+        } label: {
+          Text(model.appStoreUploadPreflight == nil ? "Run Preflight" : "Try Again")
         }
         .buttonStyle(.borderedProminent)
       }
