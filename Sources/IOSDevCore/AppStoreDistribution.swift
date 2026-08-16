@@ -148,7 +148,7 @@ public enum AppStoreDistributionSupport {
       target.container.pathExtension == "xcworkspace" ? "-workspace" : "-project",
       target.container.path, "-scheme", target.scheme, "-configuration", "Release",
       "-destination", "generic/platform=iOS", "-archivePath", archivePath.path,
-      "-derivedDataPath", derivedDataPath.path,
+      "-derivedDataPath", derivedDataPath.path, "archive",
     ]
     if let buildNumberOverride {
       arguments += [
@@ -156,7 +156,6 @@ public enum AppStoreDistributionSupport {
         "INFOPLIST_KEY_CFBundleVersion=\(buildNumberOverride)",
       ]
     }
-    arguments.append("archive")
     if let teamID = normalizedTeamID(target.developmentTeam) {
       arguments.append("DEVELOPMENT_TEAM=\(teamID)")
     }

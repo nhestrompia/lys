@@ -55,6 +55,9 @@ import Testing
 
   #expect(command.arguments.contains("CURRENT_PROJECT_VERSION=8"))
   #expect(command.arguments.contains("INFOPLIST_KEY_CFBundleVersion=8"))
+  #expect(
+    command.arguments.firstIndex(of: "archive")!
+      < command.arguments.firstIndex(of: "CURRENT_PROJECT_VERSION=8")!)
 }
 
 @Test func appStoreUniqueBuildNumberAdvancesOnlyWhenNeeded() {
