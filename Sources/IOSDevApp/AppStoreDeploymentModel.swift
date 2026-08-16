@@ -1063,8 +1063,17 @@ extension AppModel {
         authentication: options.allowProvisioningUpdates ? credential : nil,
         allowProvisioningUpdates: options.allowProvisioningUpdates,
         buildNumberOverride: archiveTarget.buildNumber)
-      let archiveOutcome = try await runAppStoreDistributionCommand(
-        archiveCommand, credentialPath: credential.privateKeyURL.path)
+      let infoPlistOverride = try AppStoreDistributionSupport.temporaryBuildNumberOverride(
+        target: archiveTarget, buildNumber: archiveTarget.buildNumber)
+      let archiveOutcome: ProcessOutcome
+      do {
+        archiveOutcome = try await runAppStoreDistributionCommand(
+          archiveCommand, credentialPath: credential.privateKeyURL.path)
+      } catch {
+        try? infoPlistOverride?.restore()
+        throw error
+      }
+      try infoPlistOverride?.restore()
       guard archiveOutcome.succeeded else {
         throw distributionStageError("Archive", outcome: archiveOutcome)
       }

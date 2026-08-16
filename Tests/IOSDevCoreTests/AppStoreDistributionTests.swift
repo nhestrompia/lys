@@ -60,6 +60,37 @@ import Testing
       < command.arguments.firstIndex(of: "CURRENT_PROJECT_VERSION=8")!)
 }
 
+@Test func appStoreTemporaryInfoPlistOverrideUpdatesAndRestoresHardcodedBuildNumber() throws {
+  let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let infoPlist = root.appending(path: "Info.plist")
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let originalData = try PropertyListSerialization.data(
+    fromPropertyList: [
+      "CFBundleIdentifier": "com.example.app",
+      "CFBundleVersion": "1",
+    ], format: .xml, options: 0)
+  try originalData.write(to: infoPlist)
+  let target = LocalDistributionTarget(
+    container: URL(fileURLWithPath: "/tmp/Release.xcodeproj"), scheme: "Release",
+    target: "Release", bundleID: "com.example.app", productName: "Release",
+    marketingVersion: "2.4", buildNumber: "42", infoPlistFile: infoPlist)
+
+  let overrideValue = try AppStoreDistributionSupport.temporaryBuildNumberOverride(
+    target: target, buildNumber: "202606092310")
+  let override = try #require(overrideValue)
+  let overridden = try #require(
+    PropertyListSerialization.propertyList(from: Data(contentsOf: infoPlist), format: nil)
+      as? [String: Any])
+  #expect(overridden["CFBundleVersion"] as? String == "202606092310")
+
+  try override.restore()
+  let restored = try #require(
+    PropertyListSerialization.propertyList(from: Data(contentsOf: infoPlist), format: nil)
+      as? [String: Any])
+  #expect(restored["CFBundleVersion"] as? String == "1")
+}
+
 @Test func appStoreUniqueBuildNumberAdvancesOnlyWhenNeeded() {
   #expect(
     AppStoreDistributionSupport.uniqueBuildNumber(

@@ -159,8 +159,11 @@ is unavailable.
 - [x] Inspect the `.xcarchive` for its actual bundle ID, marketing version, build number, signing
   identity, team, application path, and architectures.
 - [x] Refresh the live App Store Connect build list during upload preflight, advance a reused
-  numeric build number for the selected app version without editing the source project, and pass
-  the reviewed number only to the archive operation.
+  numeric build number for the selected app version without persisting an edit to the source
+  project, and pass the reviewed number only to the archive operation.
+- [x] For projects with a source Info.plist that hard-codes CFBundleVersion, temporarily apply the
+  reviewed build number during archiving, verify the file was not concurrently changed, and restore
+  the original bytes before continuing.
 - [ ] Inspect and compare archived entitlements, embedded provisioning profiles, and dSYMs.
 - [x] Reject local/archive/remote bundle, version, build, and signing-team mismatches before upload.
 - [x] Upload with `xcodebuild -exportArchive`, `method=app-store-connect`, and

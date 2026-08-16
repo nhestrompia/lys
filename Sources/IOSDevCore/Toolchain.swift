@@ -230,6 +230,11 @@ public enum ToolchainDiscovery {
       return value.flatMap { $0.isEmpty ? nil : $0 }
     }
     let stringBuildSettings = entry.buildSettings.compactMapValues(\.stringValue)
+    let infoPlistFile = sourceInfoPlistURL(
+      buildSettings: stringBuildSettings, container: container)
+    let usesGeneratedInfoPlist = ["YES", "TRUE", "1"].contains {
+      stringBuildSettings["GENERATE_INFOPLIST_FILE"]?.caseInsensitiveCompare($0) == .orderedSame
+    }
     let bundleVersions = effectiveBundleVersions(
       buildSettings: stringBuildSettings, container: container)
     guard let marketingVersion = bundleVersions.marketingVersion else {
@@ -248,7 +253,8 @@ public enum ToolchainDiscovery {
       developmentTeam: optional("DEVELOPMENT_TEAM"), codeSignStyle: optional("CODE_SIGN_STYLE"),
       codeSignIdentity: optional("CODE_SIGN_IDENTITY"),
       provisioningProfileSpecifier: optional("PROVISIONING_PROFILE_SPECIFIER"),
-      entitlementsPath: optional("CODE_SIGN_ENTITLEMENTS"))
+      entitlementsPath: optional("CODE_SIGN_ENTITLEMENTS"), infoPlistFile: infoPlistFile,
+      usesGeneratedInfoPlist: usesGeneratedInfoPlist)
   }
 
   static func effectiveBundleVersions(
@@ -288,6 +294,20 @@ public enum ToolchainDiscovery {
   private static func resolvedInfoPlist(
     buildSettings: [String: String], container: URL
   ) -> [String: Any]? {
+    guard let plistURL = sourceInfoPlistURL(buildSettings: buildSettings, container: container)
+    else { return nil }
+    guard let data = try? Data(contentsOf: plistURL.standardizedFileURL),
+      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
+        as? [String: Any]
+    else {
+      return nil
+    }
+    return plist
+  }
+
+  private static func sourceInfoPlistURL(
+    buildSettings: [String: String], container: URL
+  ) -> URL? {
     guard let rawPath = normalizedBuildValue(buildSettings["INFOPLIST_FILE"]) else {
       return nil
     }
@@ -297,16 +317,9 @@ public enum ToolchainDiscovery {
       .compactMap { normalizedBuildValue(buildSettings[$0]) }
       .map { URL(fileURLWithPath: expand($0, with: buildSettings), isDirectory: true) }
       .first ?? container.deletingLastPathComponent()
-    let plistURL = path.hasPrefix("/")
-      ? URL(fileURLWithPath: path)
-      : baseURL.appending(path: path)
-    guard let data = try? Data(contentsOf: plistURL.standardizedFileURL),
-      let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
-        as? [String: Any]
-    else {
-      return nil
-    }
-    return plist
+    return path.hasPrefix("/")
+      ? URL(fileURLWithPath: path).standardizedFileURL
+      : baseURL.appending(path: path).standardizedFileURL
   }
 
   private static func expand(_ rawValue: String, with buildSettings: [String: String]) -> String {

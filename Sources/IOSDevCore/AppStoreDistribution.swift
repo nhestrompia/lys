@@ -13,12 +13,15 @@ public struct LocalDistributionTarget: Codable, Equatable, Sendable {
   public var codeSignIdentity: String?
   public var provisioningProfileSpecifier: String?
   public var entitlementsPath: String?
+  public var infoPlistFile: URL?
+  public var usesGeneratedInfoPlist: Bool
 
   public init(
     container: URL, scheme: String, target: String, bundleID: String, productName: String,
     marketingVersion: String, buildNumber: String, developmentTeam: String? = nil,
     codeSignStyle: String? = nil, codeSignIdentity: String? = nil,
-    provisioningProfileSpecifier: String? = nil, entitlementsPath: String? = nil
+    provisioningProfileSpecifier: String? = nil, entitlementsPath: String? = nil,
+    infoPlistFile: URL? = nil, usesGeneratedInfoPlist: Bool = false
   ) {
     self.container = container
     self.scheme = scheme
@@ -32,6 +35,8 @@ public struct LocalDistributionTarget: Codable, Equatable, Sendable {
     self.codeSignIdentity = codeSignIdentity
     self.provisioningProfileSpecifier = provisioningProfileSpecifier
     self.entitlementsPath = entitlementsPath
+    self.infoPlistFile = infoPlistFile
+    self.usesGeneratedInfoPlist = usesGeneratedInfoPlist
   }
 }
 
@@ -85,6 +90,35 @@ public struct AppStoreDistributionAuthentication: Equatable, Sendable {
   }
 }
 
+public struct AppStoreInfoPlistBuildNumberOverride: Sendable {
+  private let url: URL
+  private let originalData: Data
+  private let overriddenData: Data
+  private let originalPOSIXPermissions: Int?
+
+  fileprivate init(
+    url: URL, originalData: Data, overriddenData: Data, originalPOSIXPermissions: Int?
+  ) {
+    self.url = url
+    self.originalData = originalData
+    self.overriddenData = overriddenData
+    self.originalPOSIXPermissions = originalPOSIXPermissions
+  }
+
+  public func restore() throws {
+    guard let currentData = try? Data(contentsOf: url), currentData == overriddenData else {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "\(url.lastPathComponent) changed while the archive was running; Lys left it untouched."
+      )
+    }
+    try originalData.write(to: url, options: .atomic)
+    if let originalPOSIXPermissions {
+      try FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: originalPOSIXPermissions)], ofItemAtPath: url.path)
+    }
+  }
+}
+
 public struct AppStoreTemporaryCredential: Equatable, Sendable {
   public var directoryURL: URL
   public var privateKeyURL: URL
@@ -117,6 +151,7 @@ public struct AppStoreTemporaryCredential: Equatable, Sendable {
 public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
   case missingBuildSetting(String)
   case invalidBuildNumber(String)
+  case buildNumberOverrideFailed(String)
   case commandFailed(stage: String, detail: String)
   case invalidArchive(String)
   case identityMismatch(expected: String, actual: String)
@@ -128,6 +163,8 @@ public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
     case .invalidBuildNumber(let value):
       "The Release build number \"\(value)\" is not a numeric Apple build number "
         + "that Lys can advance automatically."
+    case .buildNumberOverrideFailed(let detail):
+      "Lys could not safely prepare the Release build number: \(detail)"
     case .commandFailed(let stage, let detail):
       "\(stage) failed: \(detail)"
     case .invalidArchive(let detail):
@@ -139,6 +176,58 @@ public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
 }
 
 public enum AppStoreDistributionSupport {
+  public static func temporaryBuildNumberOverride(
+    target: LocalDistributionTarget, buildNumber: String
+  ) throws -> AppStoreInfoPlistBuildNumberOverride? {
+    guard !target.usesGeneratedInfoPlist, let infoPlistFile = target.infoPlistFile else {
+      return nil
+    }
+    let url = infoPlistFile.standardizedFileURL
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist file could not be found at \(url.path).")
+    }
+    let originalData: Data
+    do {
+      originalData = try Data(contentsOf: url)
+    } catch {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist file could not be read (\(error.localizedDescription)).")
+    }
+    var format = PropertyListSerialization.PropertyListFormat.xml
+    guard var plist = try? PropertyListSerialization.propertyList(
+      from: originalData, options: [], format: &format) as? [String: Any]
+    else {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist file is not a readable property list.")
+    }
+    plist["CFBundleVersion"] = buildNumber
+    let overriddenData: Data
+    do {
+      overriddenData = try PropertyListSerialization.data(
+        fromPropertyList: plist, format: format, options: 0)
+    } catch {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist could not be updated (\(error.localizedDescription)).")
+    }
+    guard overriddenData != originalData else { return nil }
+    let originalAttributes = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+    let originalPermissions = originalAttributes[.posixPermissions] as? NSNumber
+    do {
+      try overriddenData.write(to: url, options: .atomic)
+      if let originalPermissions {
+        try FileManager.default.setAttributes(
+          [.posixPermissions: originalPermissions], ofItemAtPath: url.path)
+      }
+    } catch {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist could not be temporarily updated (\(error.localizedDescription)).")
+    }
+    return .init(
+      url: url, originalData: originalData, overriddenData: overriddenData,
+      originalPOSIXPermissions: originalPermissions?.intValue)
+  }
+
   public static func archiveCommand(
     xcodebuild: URL, target: LocalDistributionTarget, archivePath: URL, derivedDataPath: URL,
     developerDirectory: URL, authentication: AppStoreDistributionAuthentication? = nil,
