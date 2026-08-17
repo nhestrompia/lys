@@ -31,6 +31,7 @@ public actor RuntimeService {
   private let operationCoordinator: WorkspaceOperationCoordinator
   private let xcodeOperations = CoalescingOperationRegistry<XcodeOperationKey, XcodeExecution>()
   private let artifactCache: BuildArtifactCache
+  private let derivedDataPath: URL
   private let appGraph = AppGraph()
   private let store: SQLiteStore?
   private let wda: WDAController
@@ -58,10 +59,12 @@ public actor RuntimeService {
   private var rejectedActionStates: [String: String] = [:]
 
   public init(workspace: URL, token: String, stateRoot: URL? = nil) {
-    self.workspace = workspace.standardizedFileURL
+    let normalizedWorkspace = workspace.standardizedFileURL
+    self.workspace = normalizedWorkspace
     self.token = token
-    operationCoordinator = WorkspaceOperationCoordinator(workspace: workspace)
-    artifactCache = BuildArtifactCache(workspace: workspace)
+    operationCoordinator = WorkspaceOperationCoordinator(workspace: normalizedWorkspace)
+    artifactCache = BuildArtifactCache(workspace: normalizedWorkspace)
+    derivedDataPath = BuildDerivedDataStore.url(for: normalizedWorkspace)
     let support =
       (try? FileManager.default.url(
         for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil,
@@ -2082,6 +2085,7 @@ public actor RuntimeService {
       let runner = runner
       let ledger = ledger
       let artifactCache = artifactCache
+      let derived = derivedDataPath
       let previouslySelectedTarget = sessionConfiguration?.target
       let execution = try await xcodeOperations.run(key: key) {
         let lease = try await coordinator.acquire(action == "test" ? .test : .build)
@@ -2095,7 +2099,6 @@ public actor RuntimeService {
         }
         let resultPath = workspace.appending(
           path: ".lys/artifacts/build-\(UUID().uuidString).xcresult")
-        let derived = workspace.appending(path: ".lys/cache/DerivedData")
         try FileManager.default.createDirectory(
           at: resultPath.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: true)
@@ -2907,7 +2910,7 @@ public actor RuntimeService {
         configuration: request.params?["configuration"]?.stringValue ?? "Debug",
         destination: destination, xcodebuild: URL(fileURLWithPath: path),
         developerDirectory: URL(fileURLWithPath: developer),
-        derivedData: workspace.appending(path: ".lys/cache/DerivedData"))
+        derivedData: derivedDataPath)
       return success(request.id, try jsonValue(targets))
     } catch let error as WorkspaceOperationBusyError {
       return failure(request.id, -32098, error.localizedDescription)

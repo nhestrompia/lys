@@ -175,3 +175,18 @@ import Testing
   #expect(entry.validatedRuntimes == ["com.apple.CoreSimulator.SimRuntime.iOS-26-5"])
   #expect(manifest.entry(xcodeBuild: "unvalidated") == nil)
 }
+
+@Test func packagedHelperResourceLookupWalksFromBinToAppResources() throws {
+  let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let resources = root.appending(path: "Lys.app/Contents/Resources", directoryHint: .isDirectory)
+  let bundle = resources.appending(path: "Lys_IOSDevCore.bundle", directoryHint: .isDirectory)
+  let helperDirectory = resources.appending(path: "bin", directoryHint: .isDirectory)
+  try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: helperDirectory, withIntermediateDirectories: true)
+  try "{\"schemaVersion\":1,\"entries\":[]}".write(
+    to: bundle.appending(path: "wda-compatibility.json"), atomically: true, encoding: .utf8)
+
+  let located = WDACompatibilityManifest.resourceBundle(
+    named: "Lys_IOSDevCore.bundle", roots: [helperDirectory])
+  #expect(located?.url(forResource: "wda-compatibility", withExtension: "json") != nil)
+}

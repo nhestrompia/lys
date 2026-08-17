@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 
 public enum WorkspaceOperationKind: String, Codable, Sendable {
@@ -53,6 +54,26 @@ public final class WorkspaceOperationLease: @unchecked Sendable {
   }
 
   deinit { release() }
+}
+
+/// Xcode's DerivedData is rebuildable and can be very large, so it belongs in the system Caches
+/// directory rather than inside a durable Application Support task worktree.
+public enum BuildDerivedDataStore {
+  public static func url(for workspace: URL) -> URL {
+    let cacheRoot =
+      (try? FileManager.default.url(
+        for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
+      ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    let key = SHA256.hash(data: Data(workspace.standardizedFileURL.path.utf8))
+      .prefix(16).map { String(format: "%02x", $0) }.joined()
+    return cacheRoot.appending(path: "Lys/DerivedData/\(key)", directoryHint: .isDirectory)
+  }
+
+  public static func remove(for workspace: URL) throws {
+    let path = url(for: workspace)
+    guard FileManager.default.fileExists(atPath: path.path) else { return }
+    try FileManager.default.removeItem(at: path)
+  }
 }
 
 /// Serializes every operation that reads or mutates Xcode's shared workspace state. The advisory

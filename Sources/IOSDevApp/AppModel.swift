@@ -3512,11 +3512,12 @@ public final class AppModel: ObservableObject {
       .init(
         time: Self.now(), title: "Build started",
         detail: "\(selectedScheme) · \(destination.name)", state: .active))
+    let derivedData = BuildDerivedDataStore.url(
+      for: taskWorkspace ?? container.deletingLastPathComponent())
     let buildArguments = [
       container.pathExtension == "xcworkspace" ? "-workspace" : "-project", container.path,
       "-scheme", selectedScheme, "-configuration", "Debug", "-destination",
-      "platform=iOS Simulator,id=\(destination.udid)", "-derivedDataPath",
-      taskWorkspace?.appending(path: ".lys/cache/DerivedData").path ?? "<derived-data>",
+      "platform=iOS Simulator,id=\(destination.udid)", "-derivedDataPath", derivedData.path,
       "build",
     ]
     let terminalID = beginTerminal(

@@ -71,6 +71,76 @@ private let fixtureGitSettings = [
   #expect(!FileManager.default.fileExists(atPath: prepared.worktree.path))
 }
 
+@Test func taskIsolationExcludesAppGeneratedStateFromBaselineAndReview() async throws {
+  let base = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
+  let repository = base.appending(path: "repo")
+  let taskRoot = base.appending(path: "tasks")
+  let generatedFiles = [
+    ".iosdev/cache/DerivedData/build.db",
+    ".lys/cache/DerivedData/build.db",
+    ".lys/artifacts/result.xcresult/data",
+  ]
+  for path in generatedFiles {
+    let url = repository.appending(path: path)
+    try FileManager.default.createDirectory(
+      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(repeating: 7, count: 64 * 1_024).write(to: url)
+  }
+  try FileManager.default.createDirectory(
+    at: repository.appending(path: ".lys"), withIntermediateDirectories: true)
+  try Data("project-owned contract\n".utf8)
+    .write(to: repository.appending(path: ".lys/contract.json"))
+
+  let runner = ProcessRunner()
+  let git = URL(fileURLWithPath: "/usr/bin/git")
+  func runGit(_ arguments: [String]) async throws {
+    let result = try await runner.run(
+      executable: git, arguments: ["-C", repository.path] + arguments)
+    guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
+  }
+  try await runGit(["init"])
+  try await runGit(["config", "user.email", "fixture@example.com"])
+  try await runGit(["config", "user.name", "Fixture"])
+  try await runGit(["add", "."])
+  try await runGit(["-c", "commit.gpgsign=false", "commit", "-m", "baseline"])
+
+  let manager = WorkspaceManager()
+  let prepared = try await manager.createTask(repository: repository, taskRoot: taskRoot)
+  let generatedManifestPaths = prepared.manifest.entries.keys.filter {
+    $0 == ".iosdev" || $0.hasPrefix(".iosdev/") || $0.hasPrefix(".lys/cache/")
+      || $0.hasPrefix(".lys/artifacts/")
+  }
+  #expect(generatedManifestPaths.isEmpty)
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: prepared.worktree.appending(path: ".lys/baseline/.iosdev").path))
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: prepared.worktree.appending(path: ".lys/baseline/.lys/cache").path))
+
+  try Data(repeating: 9, count: 64 * 1_024).write(
+    to: prepared.worktree.appending(path: ".iosdev/cache/DerivedData/build.db"))
+  try Data(repeating: 9, count: 64 * 1_024).write(
+    to: prepared.worktree.appending(path: ".lys/cache/DerivedData/build.db"))
+  let buildCache = BuildDerivedDataStore.url(for: prepared.worktree)
+  try FileManager.default.createDirectory(at: buildCache, withIntermediateDirectories: true)
+  try Data("rebuildable\n".utf8).write(to: buildCache.appending(path: "build.db"))
+  #expect(!buildCache.path.contains(prepared.worktree.path))
+  let changes = try await manager.proposedChanges(
+    worktree: prepared.worktree, baseline: prepared.manifest)
+  #expect(changes.isEmpty)
+
+  let report = try await manager.apply(
+    paths: [".iosdev/cache/DerivedData/build.db"], from: prepared.worktree, to: repository,
+    baseline: prepared.manifest)
+  #expect(report.applied.isEmpty)
+  #expect(report.conflicts.map(\.path) == [".iosdev/cache/DerivedData/build.db"])
+
+  try await manager.discard(
+    worktree: prepared.worktree, repository: repository, taskRoot: taskRoot)
+  #expect(!FileManager.default.fileExists(atPath: buildCache.path))
+}
+
 @Test func taskReviewPreservesProjectMetadataAndExcludesLysInternals() async throws {
   let base = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   let repository = base.appending(path: "repo")
