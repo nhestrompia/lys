@@ -13,12 +13,15 @@ public struct LocalDistributionTarget: Codable, Equatable, Sendable {
   public var codeSignIdentity: String?
   public var provisioningProfileSpecifier: String?
   public var entitlementsPath: String?
+  public var infoPlistFile: URL?
+  public var usesGeneratedInfoPlist: Bool
 
   public init(
     container: URL, scheme: String, target: String, bundleID: String, productName: String,
     marketingVersion: String, buildNumber: String, developmentTeam: String? = nil,
     codeSignStyle: String? = nil, codeSignIdentity: String? = nil,
-    provisioningProfileSpecifier: String? = nil, entitlementsPath: String? = nil
+    provisioningProfileSpecifier: String? = nil, entitlementsPath: String? = nil,
+    infoPlistFile: URL? = nil, usesGeneratedInfoPlist: Bool = false
   ) {
     self.container = container
     self.scheme = scheme
@@ -32,6 +35,8 @@ public struct LocalDistributionTarget: Codable, Equatable, Sendable {
     self.codeSignIdentity = codeSignIdentity
     self.provisioningProfileSpecifier = provisioningProfileSpecifier
     self.entitlementsPath = entitlementsPath
+    self.infoPlistFile = infoPlistFile
+    self.usesGeneratedInfoPlist = usesGeneratedInfoPlist
   }
 }
 
@@ -85,6 +90,35 @@ public struct AppStoreDistributionAuthentication: Equatable, Sendable {
   }
 }
 
+public struct AppStoreInfoPlistBuildNumberOverride: Sendable {
+  private let url: URL
+  private let originalData: Data
+  private let overriddenData: Data
+  private let originalPOSIXPermissions: Int?
+
+  fileprivate init(
+    url: URL, originalData: Data, overriddenData: Data, originalPOSIXPermissions: Int?
+  ) {
+    self.url = url
+    self.originalData = originalData
+    self.overriddenData = overriddenData
+    self.originalPOSIXPermissions = originalPOSIXPermissions
+  }
+
+  public func restore() throws {
+    guard let currentData = try? Data(contentsOf: url), currentData == overriddenData else {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "\(url.lastPathComponent) changed while the archive was running; Lys left it untouched."
+      )
+    }
+    try originalData.write(to: url, options: .atomic)
+    if let originalPOSIXPermissions {
+      try FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: originalPOSIXPermissions)], ofItemAtPath: url.path)
+    }
+  }
+}
+
 public struct AppStoreTemporaryCredential: Equatable, Sendable {
   public var directoryURL: URL
   public var privateKeyURL: URL
@@ -116,6 +150,8 @@ public struct AppStoreTemporaryCredential: Equatable, Sendable {
 
 public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
   case missingBuildSetting(String)
+  case invalidBuildNumber(String)
+  case buildNumberOverrideFailed(String)
   case commandFailed(stage: String, detail: String)
   case invalidArchive(String)
   case identityMismatch(expected: String, actual: String)
@@ -124,6 +160,11 @@ public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
     switch self {
     case .missingBuildSetting(let key):
       "The Release target does not provide the required \(key) build setting."
+    case .invalidBuildNumber(let value):
+      "The Release build number \"\(value)\" is not a numeric Apple build number "
+        + "that Lys can advance automatically."
+    case .buildNumberOverrideFailed(let detail):
+      "Lys could not safely prepare the Release build number: \(detail)"
     case .commandFailed(let stage, let detail):
       "\(stage) failed: \(detail)"
     case .invalidArchive(let detail):
@@ -135,10 +176,62 @@ public enum AppStoreDistributionError: Error, LocalizedError, Equatable {
 }
 
 public enum AppStoreDistributionSupport {
+  public static func temporaryBuildNumberOverride(
+    target: LocalDistributionTarget, buildNumber: String
+  ) throws -> AppStoreInfoPlistBuildNumberOverride? {
+    guard !target.usesGeneratedInfoPlist, let infoPlistFile = target.infoPlistFile else {
+      return nil
+    }
+    let url = infoPlistFile.standardizedFileURL
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist file could not be found at \(url.path).")
+    }
+    let originalData: Data
+    do {
+      originalData = try Data(contentsOf: url)
+    } catch {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist file could not be read (\(error.localizedDescription)).")
+    }
+    var format = PropertyListSerialization.PropertyListFormat.xml
+    guard var plist = try? PropertyListSerialization.propertyList(
+      from: originalData, options: [], format: &format) as? [String: Any]
+    else {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist file is not a readable property list.")
+    }
+    plist["CFBundleVersion"] = buildNumber
+    let overriddenData: Data
+    do {
+      overriddenData = try PropertyListSerialization.data(
+        fromPropertyList: plist, format: format, options: 0)
+    } catch {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist could not be updated (\(error.localizedDescription)).")
+    }
+    guard overriddenData != originalData else { return nil }
+    let originalAttributes = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+    let originalPermissions = originalAttributes[.posixPermissions] as? NSNumber
+    do {
+      try overriddenData.write(to: url, options: .atomic)
+      if let originalPermissions {
+        try FileManager.default.setAttributes(
+          [.posixPermissions: originalPermissions], ofItemAtPath: url.path)
+      }
+    } catch {
+      throw AppStoreDistributionError.buildNumberOverrideFailed(
+        "the Release target's Info.plist could not be temporarily updated (\(error.localizedDescription)).")
+    }
+    return .init(
+      url: url, originalData: originalData, overriddenData: overriddenData,
+      originalPOSIXPermissions: originalPermissions?.intValue)
+  }
+
   public static func archiveCommand(
     xcodebuild: URL, target: LocalDistributionTarget, archivePath: URL, derivedDataPath: URL,
     developerDirectory: URL, authentication: AppStoreDistributionAuthentication? = nil,
-    allowProvisioningUpdates: Bool
+    allowProvisioningUpdates: Bool, buildNumberOverride: String? = nil
   ) -> CommandSpec {
     var arguments = [
       target.container.pathExtension == "xcworkspace" ? "-workspace" : "-project",
@@ -146,6 +239,12 @@ public enum AppStoreDistributionSupport {
       "-destination", "generic/platform=iOS", "-archivePath", archivePath.path,
       "-derivedDataPath", derivedDataPath.path, "archive",
     ]
+    if let buildNumberOverride {
+      arguments += [
+        "CURRENT_PROJECT_VERSION=\(buildNumberOverride)",
+        "INFOPLIST_KEY_CFBundleVersion=\(buildNumberOverride)",
+      ]
+    }
     if let teamID = normalizedTeamID(target.developmentTeam) {
       arguments.append("DEVELOPMENT_TEAM=\(teamID)")
     }
@@ -158,6 +257,28 @@ public enum AppStoreDistributionSupport {
     return .init(
       executable: xcodebuild, arguments: arguments,
       environment: ["DEVELOPER_DIR": developerDirectory.path])
+  }
+
+  /// Returns the preferred build number when it is above every uploaded number, otherwise
+  /// returns the next numeric build number after Apple's highest uploaded build.
+  ///
+  /// Apple accepts numeric and period-separated numeric CFBundleVersion values. Lys keeps the
+  /// source project unchanged and advances only the archive's build settings. Unsupported local
+  /// values return nil so the caller can stop with an actionable preflight message.
+  public static func uniqueBuildNumber(preferred: String, existing: [String]) -> String? {
+    guard let preferred = NumericBuildNumber(preferred) else { return nil }
+    let existingNumbers = existing.compactMap(NumericBuildNumber.init)
+    guard let highestExisting = existingNumbers.max(by: {
+      NumericBuildNumber.compare($0, $1) == .orderedAscending
+    }) else {
+      return preferred.value
+    }
+    switch NumericBuildNumber.compare(preferred, highestExisting) {
+    case .orderedDescending:
+      return preferred.value
+    case .orderedAscending, .orderedSame:
+      return highestExisting.incremented().value
+    }
   }
 
   public static func uploadCommand(
@@ -306,5 +427,68 @@ public enum AppStoreDistributionSupport {
   private static func unique(_ values: [String]) -> [String] {
     var seen = Set<String>()
     return values.filter { seen.insert($0).inserted }
+  }
+
+  private struct NumericBuildNumber: Sendable {
+    let components: [String]
+
+    init?(_ value: String) {
+      let pieces = value.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+      guard !pieces.isEmpty,
+        pieces.allSatisfy({ piece in
+          !piece.isEmpty
+            && piece.unicodeScalars.allSatisfy { scalar in scalar.value >= 48 && scalar.value <= 57 }
+        })
+      else { return nil }
+      components = pieces.map(Self.normalize)
+    }
+
+    private init(components: [String]) {
+      self.components = components
+    }
+
+    var value: String { components.joined(separator: ".") }
+
+    func incremented() -> Self {
+      var components = self.components
+      components[components.index(before: components.endIndex)] = Self.increment(
+        components[components.index(before: components.endIndex)])
+      return .init(components: components)
+    }
+
+    static func compare(_ lhs: Self, _ rhs: Self) -> ComparisonResult {
+      let count = max(lhs.components.count, rhs.components.count)
+      for index in 0..<count {
+        let left = index < lhs.components.count ? lhs.components[index] : "0"
+        let right = index < rhs.components.count ? rhs.components[index] : "0"
+        if left.count != right.count {
+          return left.count < right.count ? .orderedAscending : .orderedDescending
+        }
+        if left != right {
+          return left < right ? .orderedAscending : .orderedDescending
+        }
+      }
+      return .orderedSame
+    }
+
+    private static func normalize(_ value: String) -> String {
+      let normalized = value.drop(while: { $0 == "0" })
+      return normalized.isEmpty ? "0" : String(normalized)
+    }
+
+    private static func increment(_ value: String) -> String {
+      var digits = Array(value.utf8)
+      var index = digits.count
+      while index > 0 {
+        index -= 1
+        if digits[index] == 57 {
+          digits[index] = 48
+        } else {
+          digits[index] += 1
+          return String(decoding: digits, as: UTF8.self)
+        }
+      }
+      return "1" + String(decoding: digits, as: UTF8.self)
+    }
   }
 }

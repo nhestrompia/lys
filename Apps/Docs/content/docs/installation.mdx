@@ -20,6 +20,12 @@ the macOS security prompt if it appears on the first launch.
 - Full Xcode with an iOS Simulator runtime
 - [AXe 1.8.0](https://github.com/cameroncooke/axe) for the in-app Simulator surface
 
+After Lys discovers a supported Xcode and Simulator, it automatically downloads and builds the
+verified WebDriverAgent runner in the background. This one-time setup is required for semantic
+UI interaction and is shared by every supported coding agent; no separate setup action is needed.
+The first launch may take a few minutes, and Lys shows its progress in **Settings → Compatibility
+gates**.
+
 ## First project
 
 Open an existing Git repository that contains an Xcode project or workspace, then select its app

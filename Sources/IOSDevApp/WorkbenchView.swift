@@ -1727,8 +1727,11 @@ private struct InteractionPalette: View {
         }
         if model.wdaStatus.availability == .setupRequired {
           Divider()
-          Button("Set up semantic automation", systemImage: "lock.open", action: model.setupWebDriverAgent)
-            .disabled(model.isBusy)
+          Button(
+            model.isWDASetupInProgress ? "Preparing semantic automation…" : "Retry semantic setup",
+            systemImage: model.isWDASetupInProgress ? "hourglass" : "arrow.clockwise",
+            action: model.setupWebDriverAgent)
+            .disabled(model.isBusy || model.isWDASetupInProgress)
         }
       } label: {
         Image(systemName: "ellipsis")
@@ -6175,12 +6178,10 @@ private struct AppStoreUploadSheet: View {
         } label: {
           Label("View Build Log", systemImage: "terminal")
         }
-        Button(model.appStoreUploadPreflight == nil ? "Run Preflight" : "Try Again") {
-          if model.appStoreUploadPreflight == nil {
-            Task { await model.prepareAppStoreUpload() }
-          } else {
-            model.startAppStoreUpload()
-          }
+        Button {
+          Task { await model.prepareAppStoreUpload() }
+        } label: {
+          Text(model.appStoreUploadPreflight == nil ? "Run Preflight" : "Try Again")
         }
         .buttonStyle(.borderedProminent)
       }
@@ -7911,12 +7912,15 @@ private struct SettingsWorkspace: View {
                 SimulatorLiveSession.helperAvailable ? Studio.success : Studio.warning)
           }
           SettingRow(
-            symbol: wdaSymbol, title: model.wdaStatus.title, detail: model.wdaStatus.detail
+            symbol: wdaSymbol, title: model.wdaStatus.title,
+            detail: model.wdaSetupMessage ?? model.wdaStatus.detail
           ) {
-            if model.wdaStatus.availability == .setupRequired,
+            if model.isWDASetupInProgress {
+              ProgressView().controlSize(.small)
+            } else if model.wdaStatus.availability == .setupRequired,
               model.selectedDestination != nil
             {
-              Button("Build Runner…", action: model.setupWebDriverAgent)
+              Button("Retry setup", action: model.setupWebDriverAgent)
                 .disabled(model.isBusy)
             } else {
               Text(wdaBadge)

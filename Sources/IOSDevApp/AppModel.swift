@@ -292,6 +292,8 @@ public final class AppModel: ObservableObject {
   @Published var wdaStatus = WDAStatus(
     availability: .unsupported, title: "Checking semantic UI automation",
     detail: "Select Xcode and a Simulator destination.", entry: nil, cacheDirectory: nil)
+  @Published private(set) var isWDASetupInProgress = false
+  @Published private(set) var wdaSetupMessage: String?
   @Published var recoverableWorkspaces: [RecoverableWorkspace] = []
   @Published var testSecretIDs: [String] = BlueprintSecretStore.accounts()
   @Published var appStoreConnection: AppStoreConnection?
@@ -504,6 +506,9 @@ public final class AppModel: ObservableObject {
   private var metroRecoveryTask: Task<Void, Never>?
   private var repositoryLoadTask: Task<Void, Never>?
   private var repositoryLoadID = UUID()
+  private var wdaSetupTask: Task<WDAValidationReceipt, Error>?
+  private var wdaSetupTaskKey: String?
+  private var automaticWDASetupKey: String?
   private var permissionContinuation: CheckedContinuation<RPCEnvelope, Never>?
   private var pendingPermissionRPCID: RPCID?
   private var pendingPermissionFingerprint: String?
@@ -722,6 +727,7 @@ public final class AppModel: ObservableObject {
 
   func selectDestination(_ id: String) {
     resetPreviewInteraction()
+    if selectedDestinationID != id { automaticWDASetupKey = nil }
     selectedDestinationID = id
     selectedTarget = nil
     refreshWDAStatus()
@@ -905,34 +911,14 @@ public final class AppModel: ObservableObject {
   }
 
   func setupWebDriverAgent() {
-    guard let entry = wdaStatus.entry, let destination = selectedDestination,
-      let xcodebuild = preflight?.xcodebuildPath, let developer = preflight?.developerDirectory
-    else {
-      notice = "Select the validated Xcode build and a supported Simulator first."
-      return
-    }
-    let confirmation = NSAlert()
-    confirmation.messageText = "Build the pinned WebDriverAgent runner?"
-    confirmation.informativeText =
-      "The verified source archive will be downloaded, checksum-validated, and built locally for \(destination.name). It will listen on loopback only."
-    confirmation.addButton(withTitle: "Build Runner")
-    confirmation.addButton(withTitle: "Cancel")
-    guard confirmation.runModal() == .alertFirstButtonReturn else { return }
-    isBusy = true
-    status = "Preparing UI automation"
     Task {
       do {
-        _ = try await wdaInstaller.install(
-          entry: entry, runtime: destination.runtime, destinationUDID: destination.udid,
-          stateRoot: wdaRoot, xcodebuild: URL(fileURLWithPath: xcodebuild),
-          developerDirectory: URL(fileURLWithPath: developer))
-        refreshWDAStatus()
+        try await ensureWebDriverAgentReady(announce: true, retry: true)
         status = "UI automation ready"
       } catch {
         notice = error.localizedDescription
         status = "UI automation setup failed"
       }
-      isBusy = false
     }
   }
 
@@ -1044,6 +1030,9 @@ public final class AppModel: ObservableObject {
           throw RPCError(
             code: -32090,
             message: "Choose an ACP-ready coding agent in Settings before starting a task.")
+        }
+        if intent.requiresRunningApp {
+          try await ensureWebDriverAgentReady(announce: true, retry: true)
         }
         plan[2].state = .active
         let flowIncomplete = try await connectAgent(
@@ -2490,6 +2479,120 @@ public final class AppModel: ObservableObject {
   private func refreshWDAStatus() {
     wdaStatus = WDACompatibilityGate.status(
       preflight: preflight, runtime: selectedDestination?.runtime, stateRoot: wdaRoot)
+    scheduleAutomaticWDASetup()
+  }
+
+  private func wdaSetupKey(for status: WDAStatus) -> String? {
+    guard let entry = status.entry, let runtime = selectedDestination?.runtime else { return nil }
+    return [entry.xcodeBuild, runtime, entry.commit, entry.sourceSHA256].joined(separator: "|")
+  }
+
+  private func scheduleAutomaticWDASetup() {
+    guard ProcessInfo.processInfo.processName != "IOSDevSnapshot",
+      !isWDASetupInProgress, wdaStatus.availability == .setupRequired,
+      let key = wdaSetupKey(for: wdaStatus), automaticWDASetupKey != key
+    else { return }
+    automaticWDASetupKey = key
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      do {
+        try await ensureWebDriverAgentReady(announce: false, retry: false)
+      } catch {
+        wdaSetupMessage =
+          "Automatic setup could not finish. Lys will retry when semantic testing starts."
+      }
+    }
+  }
+
+  private func ensureWebDriverAgentReady(announce: Bool, retry: Bool) async throws {
+    let currentStatus = WDACompatibilityGate.status(
+      preflight: preflight, runtime: selectedDestination?.runtime, stateRoot: wdaRoot)
+    wdaStatus = currentStatus
+    guard currentStatus.availability != .ready else { return }
+    guard currentStatus.availability == .setupRequired,
+      let entry = currentStatus.entry, let destination = selectedDestination,
+      let xcodebuild = preflight?.xcodebuildPath, let developer = preflight?.developerDirectory
+    else {
+      throw RPCError(code: -32072, message: currentStatus.detail)
+    }
+    let key = wdaSetupKey(for: currentStatus) ?? ""
+
+    if let existing = wdaSetupTask {
+      if wdaSetupTaskKey == key {
+        _ = try await existing.value
+        let refreshed = WDACompatibilityGate.status(
+          preflight: preflight, runtime: destination.runtime, stateRoot: wdaRoot)
+        wdaStatus = refreshed
+        guard refreshed.availability == .ready else {
+          throw RPCError(code: -32072, message: refreshed.detail)
+        }
+        return
+      }
+      _ = try? await existing.value
+      wdaSetupTask = nil
+      wdaSetupTaskKey = nil
+    }
+
+    if !retry, automaticWDASetupKey == key, wdaSetupMessage != nil {
+      throw RPCError(code: -32072, message: wdaSetupMessage ?? currentStatus.detail)
+    }
+
+    isWDASetupInProgress = true
+    wdaSetupMessage =
+      "Preparing semantic UI automation for \(destination.name). This happens once on this Mac."
+    if announce {
+      status = "Preparing semantic UI automation"
+      timeline.append(
+        .init(
+          time: Self.now(), title: "Preparing semantic UI automation",
+          detail: "Building the verified WebDriverAgent runner for \(destination.name).",
+          state: .active, category: .tool))
+    }
+
+    let stateRoot = wdaRoot
+    let xcodebuildURL = URL(fileURLWithPath: xcodebuild)
+    let developerURL = URL(fileURLWithPath: developer)
+    let task = Task<WDAValidationReceipt, Error> { [wdaInstaller] in
+      try await wdaInstaller.install(
+        entry: entry, runtime: destination.runtime, destinationUDID: destination.udid,
+        stateRoot: stateRoot, xcodebuild: xcodebuildURL, developerDirectory: developerURL)
+    }
+    wdaSetupTask = task
+    wdaSetupTaskKey = key
+    do {
+      _ = try await task.value
+      wdaSetupTask = nil
+      wdaSetupTaskKey = nil
+      isWDASetupInProgress = false
+      wdaSetupMessage = nil
+      wdaStatus = WDACompatibilityGate.status(
+        preflight: preflight, runtime: destination.runtime, stateRoot: wdaRoot)
+      guard wdaStatus.availability == .ready else {
+        throw RPCError(code: -32072, message: wdaStatus.detail)
+      }
+      if announce {
+        status = "UI automation ready"
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Semantic UI automation ready",
+            detail: "The pinned WebDriverAgent runner is ready for all supported agents.",
+            state: .complete, category: .tool))
+      }
+    } catch {
+      wdaSetupTask = nil
+      wdaSetupTaskKey = nil
+      isWDASetupInProgress = false
+      wdaSetupMessage = "Setup failed: \(error.localizedDescription)"
+      wdaStatus = WDACompatibilityGate.status(
+        preflight: preflight, runtime: destination.runtime, stateRoot: wdaRoot)
+      if announce {
+        timeline.append(
+          .init(
+            time: Self.now(), title: "Semantic UI automation setup failed",
+            detail: error.localizedDescription, state: .warning, category: .tool))
+      }
+      throw error
+    }
   }
 
   private func connectAgent(
