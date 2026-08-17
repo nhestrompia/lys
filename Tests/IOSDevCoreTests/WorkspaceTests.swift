@@ -3,6 +3,19 @@ import Testing
 
 @testable import IOSDevCore
 
+/// Fixture repositories must not inherit developer-level git configuration. A global
+/// `core.excludesFile` listing a fixture filename hides it from `git add` and `git status`,
+/// and global attribute or end-of-line settings rewrite the content these tests diff. The
+/// settings are repository-local so every git process touching the fixture observes them,
+/// including the ones `WorkspaceManager` spawns with its own inherited environment.
+private let fixtureGitSettings = [
+  ["user.email", "fixture@example.com"],
+  ["user.name", "Fixture"],
+  ["core.excludesFile", "/dev/null"],
+  ["core.attributesFile", "/dev/null"],
+  ["core.autocrlf", "false"],
+]
+
 @Test func taskWorktreeOverlaysDirtyCheckoutAndBlocksConflictingApply() async throws {
   let base = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: UUID().uuidString)
   let repository = base.appending(path: "repo")
@@ -16,8 +29,7 @@ import Testing
     guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
   }
   try await runGit(["init"])
-  try await runGit(["config", "user.email", "fixture@example.com"])
-  try await runGit(["config", "user.name", "Fixture"])
+  for setting in fixtureGitSettings { try await runGit(["config"] + setting) }
   let tracked = repository.appending(path: "Profile.swift")
   try Data("let theme = \"light\"\n".utf8).write(to: tracked)
   try await runGit(["add", "Profile.swift"])
@@ -72,8 +84,7 @@ import Testing
     guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
   }
   try await runGit(["init"])
-  try await runGit(["config", "user.email", "fixture@example.com"])
-  try await runGit(["config", "user.name", "Fixture"])
+  for setting in fixtureGitSettings { try await runGit(["config"] + setting) }
   try Data("host metadata\n".utf8).write(to: repository.appending(path: ".lys/contract.json"))
   try FileManager.default.createDirectory(
     at: repository.appending(path: "Assets"), withIntermediateDirectories: true)
@@ -123,8 +134,7 @@ import Testing
     guard result.succeeded else { throw WorkspaceError.gitFailure(result.stderr) }
   }
   try await runGit(["init"])
-  try await runGit(["config", "user.email", "fixture@example.com"])
-  try await runGit(["config", "user.name", "Fixture"])
+  for setting in fixtureGitSettings { try await runGit(["config"] + setting) }
   try Data("ios/\nnode_modules/\n".utf8).write(to: repository.appending(path: ".gitignore"))
   try Data("export const value = 1\n".utf8).write(to: repository.appending(path: "index.js"))
   try await runGit(["add", ".gitignore", "index.js"])
@@ -171,8 +181,7 @@ import Testing
   }
 
   try await runGit(["init"])
-  try await runGit(["config", "user.email", "fixture@example.com"])
-  try await runGit(["config", "user.name", "Fixture"])
+  for setting in fixtureGitSettings { try await runGit(["config"] + setting) }
   try Data("one\ntwo\n".utf8).write(to: repository.appending(path: "README.md"))
   try Data("remove me\n".utf8).write(to: repository.appending(path: "Deleted.txt"))
   try await runGit(["add", "."])
@@ -188,9 +197,7 @@ import Testing
   let manager = WorkspaceManager()
   let changes = try await manager.repositoryChanges(repository: repository)
   #expect(changes.map(\.path) == [".lys/contract.json", "Deleted.txt", "README.md"])
-  #expect(changes.first?.kind == .added)
-  #expect(changes[1].kind == .deleted)
-  #expect(changes[2].kind == .modified)
+  #expect(changes.map(\.kind) == [.added, .deleted, .modified])
 
   let diff = try await manager.repositoryDiff(
     repository: repository, change: try #require(changes.first { $0.path == "README.md" }))

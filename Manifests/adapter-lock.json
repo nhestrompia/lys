@@ -2,6 +2,6 @@
   "schemaVersion": 1,
   "signature": null,
   "entries": [],
-  "releaseState": "unpromoted",
-  "note": "Discovery is enabled, but optional adapter installation remains blocked until exact assets, checksums, licenses, ACP conformance results, and the release signature are promoted together."
+  "releaseState": "auto-provisioned",
+  "note": "Lys automatically provisions the pinned npm ACP bridges into its managed Application Support directory when the corresponding agent CLI is detected. OpenCode uses its native opencode acp command. npm verifies registry package integrity during installation."
 }
