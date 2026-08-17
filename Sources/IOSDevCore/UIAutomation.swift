@@ -395,6 +395,9 @@ public struct NavigationEdge: Codable, Identifiable, Hashable, Sendable {
   /// Recorded for intent-graph diagnostics. Only tap edges are eligible for automatic replay;
   /// text input is deliberately not persisted in the graph.
   public var action: String?
+  /// Keeps iPhone and iPad validation separate while allowing legacy family-agnostic edges to
+  /// remain reusable when no more specific edge exists.
+  public var destinationFamily: String?
   public var preconditions: [String]
   public var successCount: Int
   public var failureCount: Int
@@ -406,13 +409,15 @@ public struct NavigationEdge: Codable, Identifiable, Hashable, Sendable {
   }
   public init(
     id: UUID = UUID(), from: ScreenFingerprint, to: ScreenFingerprint, selector: ElementSelector,
-    action: String = "tap", preconditions: [String] = [], lastValidatedBuild: String
+    action: String = "tap", destinationFamily: String? = nil, preconditions: [String] = [],
+    lastValidatedBuild: String
   ) {
     self.id = id
     self.from = from
     self.to = to
     self.selector = selector
     self.action = action
+    self.destinationFamily = destinationFamily
     self.preconditions = preconditions
     self.successCount = 1
     self.failureCount = 0
@@ -453,7 +458,8 @@ public actor AppGraph {
 
   @discardableResult public func observe(
     from: ScreenFingerprint, to: ScreenFingerprint, selector: ElementSelector, build: String,
-    action: String = "tap", name: String = "Observed screen"
+    action: String = "tap", destinationFamily: String? = nil,
+    name: String = "Observed screen"
   ) -> NavigationEdge? {
     nodes[from.digest] = nodes[from.digest] ?? ScreenNode(fingerprint: from, name: name)
     nodes[to.digest] = ScreenNode(fingerprint: to, name: name)
@@ -461,6 +467,7 @@ public actor AppGraph {
     if let existingID = edges.first(where: {
       $0.value.from == from && $0.value.to == to && $0.value.selector == selector
         && ($0.value.action ?? "tap") == action
+        && $0.value.destinationFamily == destinationFamily
     })?.key {
       edges[existingID]!.successCount += 1
       edges[existingID]!.stale = false
@@ -468,13 +475,22 @@ public actor AppGraph {
       return edges[existingID]
     }
     let edge = NavigationEdge(
-      from: from, to: to, selector: selector, action: action, lastValidatedBuild: build)
+      from: from, to: to, selector: selector, action: action,
+      destinationFamily: destinationFamily, lastValidatedBuild: build)
     edges[edge.id] = edge
     return edge
   }
 
   public func path(from start: ScreenFingerprint, to goal: ScreenFingerprint, build: String)
     -> [NavigationEdge]?
+  {
+    path(from: start, to: goal, build: build, destinationFamily: nil)
+  }
+
+  public func path(
+    from start: ScreenFingerprint, to goal: ScreenFingerprint, build: String,
+    destinationFamily: String?
+  ) -> [NavigationEdge]?
   {
     if start == goal { return [] }
     var queue: [(ScreenFingerprint, [NavigationEdge])] = [(start, [])]
@@ -485,6 +501,7 @@ public actor AppGraph {
       where edge.from == current && !edge.stale && edge.selector.deterministic
         && (edge.action ?? "tap") == "tap"
         && edge.lastValidatedBuild == build
+        && (edge.destinationFamily == nil || edge.destinationFamily == destinationFamily)
       {
         if edge.to == goal { return path + [edge] }
         if visited.insert(edge.to.digest).inserted { queue.append((edge.to, path + [edge])) }

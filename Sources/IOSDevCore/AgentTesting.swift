@@ -99,20 +99,73 @@ public struct RuntimeSessionConfiguration: Codable, Sendable {
   public var scheme: String
   public var configuration: String
   public var destination: Destination?
+  /// The destinations currently visible in the Develop canvas. `destination` remains the
+  /// focused destination for backwards compatibility with existing runtime clients.
+  public var destinations: [Destination]
+  public var focusedDestinationID: String?
+  public var requiredDestinationUDIDs: [String]
+  public var requiredDestinationFamilies: [String]
   public var target: AppTarget?
   public var startDevelopmentServer: Bool
 
+  private enum CodingKeys: String, CodingKey {
+    case intent, container, scheme, configuration, destination, destinations,
+      focusedDestinationID, requiredDestinationUDIDs, requiredDestinationFamilies, target,
+      startDevelopmentServer
+  }
+
   public init(
     intent: AgentTaskIntent, container: String?, scheme: String, configuration: String = "Debug",
-    destination: Destination?, target: AppTarget?, startDevelopmentServer: Bool
+    destination: Destination?, destinations: [Destination] = [], focusedDestinationID: String? = nil,
+    requiredDestinationUDIDs: [String] = [], requiredDestinationFamilies: [String] = [],
+    target: AppTarget?, startDevelopmentServer: Bool
   ) {
     self.intent = intent
     self.container = container
     self.scheme = scheme
     self.configuration = configuration
     self.destination = destination
+    self.destinations = destinations.isEmpty ? destination.map { [$0] } ?? [] : destinations
+    self.focusedDestinationID = focusedDestinationID ?? destination?.udid
+    self.requiredDestinationUDIDs = requiredDestinationUDIDs
+    self.requiredDestinationFamilies = requiredDestinationFamilies
     self.target = target
     self.startDevelopmentServer = startDevelopmentServer
+  }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    intent = try values.decode(AgentTaskIntent.self, forKey: .intent)
+    container = try values.decodeIfPresent(String.self, forKey: .container)
+    scheme = try values.decode(String.self, forKey: .scheme)
+    configuration = try values.decodeIfPresent(String.self, forKey: .configuration) ?? "Debug"
+    destination = try values.decodeIfPresent(Destination.self, forKey: .destination)
+    destinations = try values.decodeIfPresent([Destination].self, forKey: .destinations)
+      ?? destination.map { [$0] } ?? []
+    focusedDestinationID = try values.decodeIfPresent(String.self, forKey: .focusedDestinationID)
+      ?? destination?.udid
+    requiredDestinationUDIDs = try values.decodeIfPresent(
+      [String].self, forKey: .requiredDestinationUDIDs) ?? []
+    requiredDestinationFamilies = try values.decodeIfPresent(
+      [String].self, forKey: .requiredDestinationFamilies) ?? []
+    target = try values.decodeIfPresent(AppTarget.self, forKey: .target)
+    startDevelopmentServer = try values.decodeIfPresent(Bool.self, forKey: .startDevelopmentServer)
+      ?? false
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var values = encoder.container(keyedBy: CodingKeys.self)
+    try values.encode(intent, forKey: .intent)
+    try values.encodeIfPresent(container, forKey: .container)
+    try values.encode(scheme, forKey: .scheme)
+    try values.encode(configuration, forKey: .configuration)
+    try values.encodeIfPresent(destination, forKey: .destination)
+    try values.encode(destinations, forKey: .destinations)
+    try values.encodeIfPresent(focusedDestinationID, forKey: .focusedDestinationID)
+    try values.encode(requiredDestinationUDIDs, forKey: .requiredDestinationUDIDs)
+    try values.encode(requiredDestinationFamilies, forKey: .requiredDestinationFamilies)
+    try values.encodeIfPresent(target, forKey: .target)
+    try values.encode(startDevelopmentServer, forKey: .startDevelopmentServer)
   }
 
   public var destinationSpecifier: String? {
@@ -282,6 +335,9 @@ public struct JourneyRecord: Codable, Identifiable, Sendable {
 public enum RuntimeEventKind: String, Codable, Equatable, Sendable {
   case sessionConfigured
   case sessionAttached
+  case simulatorAdded
+  case simulatorRemoved
+  case simulatorFocused
   case buildStarted
   case buildFinished
   case appLaunched

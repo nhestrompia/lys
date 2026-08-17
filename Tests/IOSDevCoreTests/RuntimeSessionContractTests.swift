@@ -198,6 +198,43 @@ private func temporaryRuntimeRoot() throws -> URL {
   #expect(events.result?["events"]?.arrayValue?.first?["kind"] == .string("sessionConfigured"))
 }
 
+@Test func simulatorManagementUsesStableRoleIdsForFocusedDestinations() async throws {
+  let root = try temporaryRuntimeRoot()
+  let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)
+  var authenticated = true
+  let iphone = Destination(
+    udid: "iphone", name: "iPhone 17 Pro", deviceType: "iPhone 17 Pro",
+    runtime: "iOS 26.5", state: "Booted")
+  let ipad = Destination(
+    udid: "ipad", name: "iPad Pro 13-inch", deviceType: "iPad Pro 13-inch",
+    runtime: "iPadOS 26.5", state: "Booted")
+  let configuration = RuntimeSessionConfiguration(
+    intent: AgentTaskIntentRouter.classify("Make the layout work on iPad"),
+    container: nil, scheme: "Demo", destination: ipad,
+    destinations: [iphone, ipad], focusedDestinationID: ipad.udid,
+    requiredDestinationFamilies: ["iPad"], target: nil, startDevelopmentServer: false)
+  _ = await service.handle(
+    .init(id: .int(1), method: "session.configure", params: try jsonValue(configuration)),
+    authenticated: &authenticated)
+
+  let active = await service.handle(
+    .init(id: .int(2), method: "simulator.active"), authenticated: &authenticated)
+  #expect(active.result?["destination"]?["udid"] == .string("ipad"))
+  #expect(active.result?["focusedDestinationID"] == .string("ipad-secondary"))
+
+  let listed = await service.handle(
+    .init(id: .int(3), method: "simulator.list_active"), authenticated: &authenticated)
+  #expect(listed.result?["destinations"]?.arrayValue?.first?["id"] == .string("iphone-primary"))
+  #expect(listed.result?["destinations"]?.arrayValue?.last?["id"] == .string("ipad-secondary"))
+
+  let focused = await service.handle(
+    .init(
+      id: .int(4), method: "simulator.focus",
+      params: .object(["destinationID": .string("iphone-primary")])),
+    authenticated: &authenticated)
+  #expect(focused.result?["focused"]?["udid"] == .string("iphone"))
+}
+
 @Test func runtimeShutdownRequiresAuthenticationAndReportsCompletion() async throws {
   let root = try temporaryRuntimeRoot()
   let service = RuntimeService(workspace: root, token: "secret", stateRoot: root)

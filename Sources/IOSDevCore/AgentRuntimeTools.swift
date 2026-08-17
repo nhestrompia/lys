@@ -43,6 +43,39 @@ public enum AgentRuntimeToolCatalog {
         "Inspect the host-selected workspace and testing policy. Call this instead of searching for Xcode project metadata.",
         properties: [:], readOnly: true),
       tool(
+        "simulator.active",
+        "Read the focused Simulator destination used when a device is not explicitly supplied.",
+        properties: [:], readOnly: true),
+      tool(
+        "simulator.list_active",
+        "List the one or two Simulator destinations currently active in the Develop canvas.",
+        properties: [:], readOnly: true),
+      tool(
+        "simulator.add",
+        "Add one installed Simulator to the task. When platform is iPadOS and no device type is supplied, Lys chooses the preferred installed iPad.",
+        properties: [
+          "platform": string("Simulator platform", allowed: ["iOS", "iPadOS"]),
+          "deviceType": string("Optional installed device type or name"),
+          "runtime": string("Optional runtime identifier or display name"),
+        ], required: ["platform"], readOnly: false, idempotent: true),
+      tool(
+        "simulator.remove",
+        "Remove a destination from the active Develop canvas without deleting or erasing the Simulator.",
+        properties: ["destinationID": string("Active destination ID")],
+        required: ["destinationID"], readOnly: false, idempotent: true),
+      tool(
+        "simulator.focus",
+        "Make one active Simulator the focused destination for interactions, screenshots, and omitted targets.",
+        properties: ["destinationID": string("Active destination ID")],
+        required: ["destinationID"], readOnly: false, idempotent: true),
+      tool(
+        "simulator.configure",
+        "Configure the appearance of an active Simulator. Omit destinationID to configure the focused destination.",
+        properties: [
+          "destinationID": string("Optional active destination ID"),
+          "appearance": string("Appearance", allowed: ["light", "dark"]),
+        ], required: ["appearance"], readOnly: false, idempotent: true),
+      tool(
         "app.describe",
         "Read the current logical screen and executable capabilities. Lys merges its repository test contract with the live accessibility state.",
         properties: [:], readOnly: true,
@@ -111,10 +144,13 @@ public enum AgentRuntimeToolCatalog {
       tool(
         "screenshot.capture",
         "Capture stable current Simulator evidence using host-selected context.",
-        properties: [:], readOnly: true),
+        properties: ["destination": string("Optional active destination ID")], readOnly: true),
       tool(
         "logs.query", "Query bounded logs for the host-selected app.",
-        properties: ["seconds": number("Lookback seconds, from 1 to 3600")], readOnly: true),
+        properties: [
+          "seconds": number("Lookback seconds, from 1 to 3600"),
+          "destination": string("Optional active destination ID"),
+        ], readOnly: true),
       tool(
         "evidence.summary",
         "Return the host-owned final status: what ran, what passed, and what remains missing.",

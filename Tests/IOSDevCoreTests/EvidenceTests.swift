@@ -75,6 +75,49 @@ import Testing
   #expect(report.status == .verified)
 }
 
+@Test func requiredDestinationsKeepVerificationPartiallyVerifiedUntilEachIsCovered() async throws {
+  let ledger = EvidenceLedger()
+  try await ledger.record(
+    Evidence(
+      kind: .launch, status: .passed, taskGeneration: 0, destinationUDID: "iphone"))
+  try await ledger.record(
+    Evidence(
+      kind: .uiAssertion, status: .passed, taskGeneration: 0, criterionID: "profile",
+      destinationUDID: "iphone"))
+  try await ledger.record(
+    Evidence(
+      kind: .screenshot, status: .passed, taskGeneration: 0, destinationUDID: "iphone"))
+  let report = await ledger.verify(
+    VerificationRequirement(
+      codeChanged: false, uiChanged: true, testsChanged: false, criterionIDs: ["profile"],
+      requiredDestinationUDIDs: ["iphone", "ipad"]))
+  #expect(report.status == .partiallyVerified)
+  #expect(report.missing.contains("Fresh successful launch on ipad"))
+  #expect(report.missing.contains("Acceptance criterion profile on ipad"))
+  #expect(report.missing.contains("Fresh screenshot on ipad"))
+}
+
+@Test func requiredDestinationFamilyBlocksVerificationBeforeDeviceIsAdded() async throws {
+  let ledger = EvidenceLedger()
+  for item in [
+    Evidence(kind: .launch, status: .passed, taskGeneration: 0, destinationUDID: "iphone"),
+    Evidence(
+      kind: .uiAssertion, status: .passed, taskGeneration: 0, criterionID: "profile",
+      destinationUDID: "iphone"),
+    Evidence(kind: .screenshot, status: .passed, taskGeneration: 0, destinationUDID: "iphone"),
+  ] {
+    try await ledger.record(item)
+  }
+  let report = await ledger.verify(
+    VerificationRequirement(
+      codeChanged: false, uiChanged: true, testsChanged: false, criterionIDs: ["profile"],
+      requiredDestinationFamilies: ["iPad"]))
+  #expect(report.status == .partiallyVerified)
+  #expect(report.missing.contains("Fresh successful launch on iPad"))
+  #expect(report.missing.contains("Acceptance criterion profile on iPad"))
+  #expect(report.missing.contains("Fresh screenshot on iPad"))
+}
+
 @Test func successfulJourneyRetrySupersedesItsEarlierFailedAssertion() async throws {
   let ledger = EvidenceLedger()
   for item in [

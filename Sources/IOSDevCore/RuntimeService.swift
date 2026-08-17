@@ -98,6 +98,18 @@ public actor RuntimeService {
             "intent": sessionConfiguration.flatMap { try? jsonValue($0.intent) } ?? .null,
             "message": .string("Using the host-selected workspace and runtime policy."),
           ]))
+      case "simulator.active":
+        return activeSimulator(request)
+      case "simulator.list_active":
+        return listActiveSimulators(request)
+      case "simulator.add":
+        return await addSimulator(request)
+      case "simulator.remove":
+        return removeSimulator(request)
+      case "simulator.focus":
+        return focusSimulator(request)
+      case "simulator.configure":
+        return await configureSimulator(request)
       case "session.configure":
         return await configureSession(request)
       case "session.stop":
@@ -151,14 +163,6 @@ public actor RuntimeService {
         return await runSimulator(
           request, make: { AppleCommandBuilder.shutdown(simctl: $0, udid: udid) },
           evidenceKind: .runtimeLog)
-      case "simulator.configure":
-        guard let udid = request.params?["udid"]?.stringValue,
-          let appearance = request.params?["appearance"]?.stringValue,
-          let value = SimulatorAppearance(rawValue: appearance)
-        else { return failure(request.id, -32602, "udid and a light/dark appearance are required") }
-        return await runSimulator(
-          request, make: { AppleCommandBuilder.appearance(simctl: $0, udid: udid, value: value) },
-          evidenceKind: .uiAction)
       case "devserver.start":
         return await startDevelopmentServer(request)
       case "devserver.status":
@@ -189,10 +193,7 @@ public actor RuntimeService {
           make: { AppleCommandBuilder.resetAppData(simctl: $0, udid: udid, bundleID: bundleID) },
           evidenceKind: .runtimeLog)
       case "screenshot.capture":
-        guard
-          let udid = request.params?["udid"]?.stringValue
-            ?? sessionConfiguration?.destination?.udid
-        else {
+        guard let udid = requestedDestinationUDID(request) else {
           return failure(request.id, -32602, "udid is required")
         }
         return await captureStableScreenshot(request, udid: udid)
@@ -241,40 +242,367 @@ public actor RuntimeService {
     await wda.stop()
   }
 
+  private func configuredDestinations(
+    from configuration: RuntimeSessionConfiguration
+  ) -> [Destination] {
+    if !configuration.destinations.isEmpty { return configuration.destinations }
+    return configuration.destination.map { [$0] } ?? []
+  }
+
+  private func enrichedEvidence(_ evidence: Evidence) -> Evidence {
+    guard let udid = evidence.destinationUDID,
+      let configuration = sessionConfiguration
+    else { return evidence }
+    let destinations = configuredDestinations(from: configuration)
+    guard let index = destinations.firstIndex(where: { $0.udid == udid }) else {
+      return evidence
+    }
+    let destination = destinations[index]
+    var enriched = evidence
+    enriched.destinationID = evidence.destinationID ?? destinationRoleID(destination, index: index)
+    enriched.deviceType = evidence.deviceType ?? destination.deviceType
+    enriched.runtime = evidence.runtime ?? destination.runtime
+    enriched.orientation = evidence.orientation ?? destination.orientation
+    enriched.appearance = evidence.appearance ?? destination.appearance
+    return enriched
+  }
+
+  private func destinationFamily(for udid: String?) -> String? {
+    guard let udid, let configuration = sessionConfiguration else { return nil }
+    let destination = configuredDestinations(from: configuration).first { $0.udid == udid }
+    guard let destination else { return nil }
+    let isPad = destination.name.localizedCaseInsensitiveContains("iPad")
+      || destination.deviceType.localizedCaseInsensitiveContains("iPad")
+      || destination.runtime.localizedCaseInsensitiveContains("iPadOS")
+    return isPad ? "iPad" : "iPhone"
+  }
+
+  private func destinationRoleID(_ destination: Destination, index: Int) -> String {
+    let isPad = destination.name.localizedCaseInsensitiveContains("iPad")
+      || destination.deviceType.localizedCaseInsensitiveContains("iPad")
+      || destination.runtime.localizedCaseInsensitiveContains("iPadOS")
+    if index == 0 { return isPad ? "ipad-primary" : "iphone-primary" }
+    if index == 1 { return isPad ? "ipad-secondary" : "iphone-secondary" }
+    return "destination-\(index + 1)"
+  }
+
+  private func destinationSummary(
+    _ destination: Destination, index: Int, role: String? = nil
+  ) -> JSONValue {
+    var values = (try? jsonValue(destination))?.objectValue ?? [:]
+    let identifier = role ?? destinationRoleID(destination, index: index)
+    values["id"] = .string(identifier)
+    values["destinationID"] = .string(identifier)
+    values["role"] = .string(index == 0 ? "primary" : "secondary")
+    return .object(values)
+  }
+
+  private func resolveConfiguredDestination(
+    _ identifier: String?, in destinations: [Destination]
+  ) -> (destination: Destination, index: Int)? {
+    guard !destinations.isEmpty else { return nil }
+    guard let identifier, !identifier.isEmpty else {
+      let focusedID = sessionConfiguration?.focusedDestinationID
+        ?? sessionConfiguration?.destination?.udid
+      let index = destinations.enumerated().first(where: { item in
+        focusedID == item.element.udid
+          || focusedID == destinationRoleID(item.element, index: item.offset)
+      })?.offset ?? 0
+      return (destinations[index], index)
+    }
+    if let index = destinations.firstIndex(where: { $0.udid == identifier }) {
+      return (destinations[index], index)
+    }
+    if let index = destinations.firstIndex(where: {
+      destinationRoleID($0, index: destinations.firstIndex(of: $0) ?? 0) == identifier
+    }) {
+      return (destinations[index], index)
+    }
+    if let index = destinations.firstIndex(where: {
+      $0.name.caseInsensitiveCompare(identifier) == .orderedSame
+    }) {
+      return (destinations[index], index)
+    }
+    return nil
+  }
+
+  private func activeSimulator(_ request: RPCEnvelope) -> RPCEnvelope {
+    guard let configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let destinations = configuredDestinations(from: configuration)
+    guard let resolved = resolveConfiguredDestination(nil, in: destinations) else {
+      return failure(request.id, -32051, "No active Simulator destination is available")
+    }
+    return success(
+      request.id,
+      .object([
+        "destination": destinationSummary(resolved.destination, index: resolved.index),
+        "focusedDestinationID": .string(
+          configuration.focusedDestinationID
+            ?? destinationRoleID(resolved.destination, index: resolved.index)),
+        "message": .string("Using \(resolved.destination.name) for omitted device targets."),
+      ]))
+  }
+
+  private func requestedDestinationUDID(_ request: RPCEnvelope) -> String? {
+    if let udid = request.params?["udid"]?.stringValue, !udid.isEmpty { return udid }
+    if let identifier = request.params?["destination"]?.stringValue, !identifier.isEmpty {
+      if let configuration = sessionConfiguration {
+        let destinations = configuredDestinations(from: configuration)
+        return resolveConfiguredDestination(identifier, in: destinations)?.destination.udid
+      }
+      return identifier
+    }
+    return sessionConfiguration?.destination?.udid
+  }
+
+  private func listActiveSimulators(_ request: RPCEnvelope) -> RPCEnvelope {
+    guard let configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let destinations = configuredDestinations(from: configuration)
+    return success(
+      request.id,
+      .object([
+        "destinations": .array(
+          destinations.enumerated().map { destinationSummary($0.element, index: $0.offset) }),
+        "focusedDestinationID": configuration.focusedDestinationID.map(JSONValue.string)
+          ?? destinations.first.map { .string($0.udid) } ?? .null,
+        "message": .string(
+          destinations.isEmpty
+            ? "No active Simulator destinations."
+            : "\(destinations.count) active Simulator destination(s)."),
+      ]))
+  }
+
+  private func addSimulator(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard var configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let platform = request.params?["platform"]?.stringValue
+    guard platform == "iOS" || platform == "iPadOS" else {
+      return failure(request.id, -32602, "platform must be iOS or iPadOS")
+    }
+    let active = configuredDestinations(from: configuration)
+    guard active.count < 2 else {
+      return failure(request.id, -32061, "Only two active Simulator destinations are supported")
+    }
+    let preflight = await resolvedToolchainPreflight()
+    guard let simctl = preflight.simctlPath, let developer = preflight.developerDirectory else {
+      return failure(request.id, -32050, "Full Xcode is unavailable")
+    }
+    do {
+      let available = try await ToolchainDiscovery.simulators(
+        simctl: URL(fileURLWithPath: simctl), developerDirectory: URL(fileURLWithPath: developer))
+      let requestedType = request.params?["deviceType"]?.stringValue
+      let requestedRuntime = request.params?["runtime"]?.stringValue
+      let candidates = available.filter { destination in
+        guard !active.contains(where: { $0.udid == destination.udid }) else { return false }
+        let isPad = destination.name.localizedCaseInsensitiveContains("iPad")
+          || destination.deviceType.localizedCaseInsensitiveContains("iPad")
+          || destination.runtime.localizedCaseInsensitiveContains("iPadOS")
+        guard (platform == "iPadOS") == isPad else { return false }
+        if let requestedType, !requestedType.isEmpty {
+          let matchesType = destination.name.caseInsensitiveCompare(requestedType) == .orderedSame
+            || destination.deviceType.caseInsensitiveCompare(requestedType) == .orderedSame
+            || destination.name.localizedCaseInsensitiveContains(requestedType)
+            || destination.deviceType.localizedCaseInsensitiveContains(requestedType)
+          guard matchesType else { return false }
+        }
+        if let requestedRuntime, !requestedRuntime.isEmpty {
+          guard destination.runtime.caseInsensitiveCompare(requestedRuntime) == .orderedSame
+            || destination.runtime.localizedCaseInsensitiveContains(requestedRuntime)
+          else { return false }
+        }
+        return true
+      }
+      let sorted = candidates.sorted { left, right in
+        if platform == "iPadOS" {
+          let leftPriority = left.name.localizedCaseInsensitiveContains("Pro") ? 0
+            : (left.name.localizedCaseInsensitiveContains("mini") ? 2 : 1)
+          let rightPriority = right.name.localizedCaseInsensitiveContains("Pro") ? 0
+            : (right.name.localizedCaseInsensitiveContains("mini") ? 2 : 1)
+          if leftPriority != rightPriority { return leftPriority < rightPriority }
+        }
+        if left.runtime != right.runtime { return left.runtime > right.runtime }
+        return left.name.localizedStandardCompare(right.name) == .orderedAscending
+      }
+      guard let selected = sorted.first else {
+        return failure(
+          request.id, -32062,
+          platform == "iPadOS"
+            ? "No installed iPad Simulator matches the requested runtime or device type"
+            : "No installed iPhone Simulator matches the requested runtime or device type")
+      }
+      configuration.destinations = active + [selected]
+      configuration.destination = selected
+      configuration.focusedDestinationID = destinationRoleID(selected, index: active.count)
+      sessionConfiguration = configuration
+      cachedSimulatorRuntimes[selected.udid] = selected.runtime
+      emit(
+        .simulatorAdded, message: "Added \(selected.name).", target: configuration.target,
+        destinationUDID: selected.udid)
+      emit(
+        .simulatorFocused, message: "Focused \(selected.name).", target: configuration.target,
+        destinationUDID: selected.udid)
+
+      let booted = await bootSimulator(
+        .init(id: request.id, method: "simulator.boot", params: .object(["udid": .string(selected.udid)])),
+        udid: selected.udid)
+      if let error = booted.error { return failure(request.id, error.code, error.message) }
+      var result: [String: JSONValue] = [
+        "destination": destinationSummary(selected, index: active.count),
+        "focusedDestinationID": .string(configuration.focusedDestinationID ?? selected.udid),
+        "message": .string("Added and booted \(selected.name)."),
+      ]
+      if let bootResult = booted.result?.objectValue {
+        result["boot"] = .object(bootResult)
+      }
+      return success(request.id, .object(result))
+    } catch {
+      return failure(request.id, -32062, error.localizedDescription)
+    }
+  }
+
+  private func removeSimulator(_ request: RPCEnvelope) -> RPCEnvelope {
+    guard var configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let identifier = request.params?["destinationID"]?.stringValue
+    var active = configuredDestinations(from: configuration)
+    guard let resolved = resolveConfiguredDestination(identifier, in: active) else {
+      return failure(request.id, -32063, "The requested Simulator is not active")
+    }
+    guard active.count > 1 else {
+      return failure(request.id, -32064, "At least one active development destination is required")
+    }
+    active.remove(at: resolved.index)
+    let removedFocused = configuration.destination?.udid == resolved.destination.udid
+    configuration.destinations = active
+    let nextIndex = active.firstIndex { $0.udid == configuration.destination?.udid } ?? 0
+    configuration.destination = active[nextIndex]
+    configuration.focusedDestinationID = destinationRoleID(active[nextIndex], index: nextIndex)
+    sessionConfiguration = configuration
+    emit(
+      .simulatorRemoved, message: "Removed \(resolved.destination.name) from the active canvas.",
+      target: configuration.target, destinationUDID: resolved.destination.udid)
+    if removedFocused {
+      emit(
+        .simulatorFocused, message: "Focused \(active[0].name).", target: configuration.target,
+        destinationUDID: active[0].udid)
+    }
+    return success(
+      request.id,
+      .object([
+        "removed": destinationSummary(resolved.destination, index: resolved.index),
+        "focusedDestinationID": configuration.focusedDestinationID.map(JSONValue.string)
+          ?? .string(active[0].udid),
+        "message": .string("\(resolved.destination.name) is no longer active; its Simulator was kept."),
+      ]))
+  }
+
+  private func focusSimulator(_ request: RPCEnvelope) -> RPCEnvelope {
+    guard var configuration = sessionConfiguration else {
+      return failure(request.id, -32083, "The host has not configured this testing session")
+    }
+    let active = configuredDestinations(from: configuration)
+    guard let identifier = request.params?["destinationID"]?.stringValue,
+      let resolved = resolveConfiguredDestination(identifier, in: active)
+    else { return failure(request.id, -32063, "The requested Simulator is not active") }
+    configuration.destination = resolved.destination
+    configuration.focusedDestinationID = destinationRoleID(resolved.destination, index: resolved.index)
+    configuration.destinations = active
+    sessionConfiguration = configuration
+    emit(
+      .simulatorFocused, message: "Focused \(resolved.destination.name).", target: configuration.target,
+      destinationUDID: resolved.destination.udid)
+    return success(
+      request.id,
+      .object([
+        "focused": destinationSummary(resolved.destination, index: resolved.index),
+        "message": .string("Interactions without a destination now target \(resolved.destination.name)."),
+      ]))
+  }
+
+  private func configureSimulator(_ request: RPCEnvelope) async -> RPCEnvelope {
+    guard let appearance = request.params?["appearance"]?.stringValue,
+      let value = SimulatorAppearance(rawValue: appearance)
+    else { return failure(request.id, -32602, "appearance must be light or dark") }
+    guard var configuration = sessionConfiguration else {
+      guard let udid = request.params?["udid"]?.stringValue else {
+        return failure(request.id, -32083, "The host has not configured this testing session")
+      }
+      return await runSimulator(
+        request,
+        make: { AppleCommandBuilder.appearance(simctl: $0, udid: udid, value: value) },
+        evidenceKind: .uiAction)
+    }
+    let active = configuredDestinations(from: configuration)
+    let identifier = request.params?["destinationID"]?.stringValue
+      ?? request.params?["udid"]?.stringValue
+    guard let resolved = resolveConfiguredDestination(identifier, in: active) else {
+      return failure(request.id, -32063, "The requested Simulator is not active")
+    }
+    var updated = resolved.destination
+    updated.appearance = appearance
+    configuration.destinations[resolved.index] = updated
+    if configuration.destination?.udid == updated.udid { configuration.destination = updated }
+    sessionConfiguration = configuration
+    var normalized = request
+    normalized.params = .object([
+      "udid": .string(updated.udid), "appearance": .string(value.rawValue),
+    ])
+    return await runSimulator(
+      normalized,
+      make: { AppleCommandBuilder.appearance(simctl: $0, udid: updated.udid, value: value) },
+      evidenceKind: .uiAction)
+  }
+
   private func configureSession(_ request: RPCEnvelope) async -> RPCEnvelope {
     guard let params = request.params else {
       return failure(request.id, -32602, "A host session configuration is required")
     }
     do {
       let configuration: RuntimeSessionConfiguration = try decode(params)
+      var normalizedConfiguration = configuration
+      let destinations = configuredDestinations(from: normalizedConfiguration)
+      if !destinations.isEmpty {
+        let focusedIndex = destinations.firstIndex {
+          $0.udid == normalizedConfiguration.destination?.udid
+        } ?? 0
+        normalizedConfiguration.destination = destinations[focusedIndex]
+        normalizedConfiguration.focusedDestinationID = destinationRoleID(
+          destinations[focusedIndex], index: focusedIndex)
+      }
       let loadedBlueprint = try InteractionBlueprintDiscovery.load(in: workspace)
       let projectConfigurationURL = workspace.appending(path: ".lys/config.json")
       let loadedProjectConfiguration =
         FileManager.default.fileExists(atPath: projectConfigurationURL.path)
         ? try LysConfiguration.load(from: projectConfigurationURL) : nil
-      sessionConfiguration = configuration
+      sessionConfiguration = normalizedConfiguration
       interactionBlueprint = loadedBlueprint
       projectConfiguration = loadedProjectConfiguration
       sessionStoppedByHost = false
       activeJourney = nil
       rejectedActionStates = [:]
-      if let destination = configuration.destination {
+      for destination in configuredDestinations(from: normalizedConfiguration) {
         cachedSimulatorRuntimes[destination.udid] = destination.runtime
       }
-      if let target = configuration.target { lastLaunchedBundleID = target.bundleID }
-      if let snapshot = try await store?.appGraph(key: configuration.buildFingerprint) {
+      if let target = normalizedConfiguration.target { lastLaunchedBundleID = target.bundleID }
+      if let snapshot = try await store?.appGraph(key: normalizedConfiguration.buildFingerprint) {
         await appGraph.replace(with: snapshot)
       } else {
         await appGraph.replace(with: .init())
       }
       emit(
         .sessionConfigured,
-        message: "\(configuration.intent.kind.rawValue) · \(configuration.scheme)",
-        target: configuration.target, destinationUDID: configuration.destination?.udid)
+        message: "\(normalizedConfiguration.intent.kind.rawValue) · \(normalizedConfiguration.scheme)",
+        target: normalizedConfiguration.target, destinationUDID: normalizedConfiguration.destination?.udid)
       return success(
         request.id,
         .object([
-          "configured": .bool(true), "intent": try jsonValue(configuration.intent),
+          "configured": .bool(true), "intent": try jsonValue(normalizedConfiguration.intent),
           "message": .string("Host testing policy configured."),
         ]))
     } catch let error as RPCError {
@@ -394,7 +722,9 @@ public actor RuntimeService {
       codeChanged: sessionConfiguration?.intent.allowsSourceWrites == true,
       uiChanged: sessionConfiguration?.intent.requiresRunningApp == true,
       testsChanged: sessionConfiguration?.intent.kind == .runTests,
-      criterionIDs: activeJourney?.steps.compactMap { $0.step.criterionID } ?? [])
+      criterionIDs: activeJourney?.steps.compactMap { $0.step.criterionID } ?? [],
+      requiredDestinationUDIDs: sessionConfiguration?.requiredDestinationUDIDs ?? [],
+      requiredDestinationFamilies: sessionConfiguration?.requiredDestinationFamilies ?? [])
     let report = await ledger.verify(requirement)
     let journeyStatus = activeJourney?.status.rawValue ?? "notStarted"
     let trusted = activeJourney?.mode == .declared && activeJourney?.status == .passed
@@ -645,7 +975,7 @@ public actor RuntimeService {
             ? "Blueprint acceptance \(index + 1) passed"
             : "Blueprint acceptance \(index + 1) failed",
           deterministic: true)
-        try await ledger.record(item)
+        try await ledger.record(self.enrichedEvidence(item))
         journey.steps.append(
           .init(
             step: .init(
@@ -759,7 +1089,7 @@ public actor RuntimeService {
           destinationUDID: sessionConfiguration?.destination?.udid,
           diagnosticSummary: passed ? "\(declared.title) passed" : "\(declared.title) failed",
           deterministic: true)
-        try await ledger.record(item)
+        try await ledger.record(enrichedEvidence(item))
         result = .init(
           step: .init(id: declared.id, title: declared.title, criterionID: criterionID),
           status: passed ? .passed : .failed, detail: item.diagnosticSummary,
@@ -872,7 +1202,7 @@ public actor RuntimeService {
       diagnosticSummary: outcome.succeeded
         ? "Lys relaunched the app for an isolated flow context"
         : "Flow context relaunch failed: \(outcome.stderr)")
-    try await ledger.record(evidence)
+    try await ledger.record(enrichedEvidence(evidence))
     guard outcome.succeeded else {
       throw RPCError(code: -32125, message: evidence.diagnosticSummary)
     }
@@ -936,7 +1266,7 @@ public actor RuntimeService {
       diagnosticSummary: outcome.succeeded
         ? "Lys prepared the authenticated test session"
         : "Authenticated test session launch failed: \(outcome.stderr)")
-    try await ledger.record(evidence)
+    try await ledger.record(enrichedEvidence(evidence))
     guard outcome.succeeded else {
       throw RPCError(code: -32125, message: evidence.diagnosticSummary)
     }
@@ -1194,12 +1524,13 @@ public actor RuntimeService {
         kind: .uiAction, status: stateChanged ? .passed : .failed,
         taskGeneration: await ledger.generation, destinationUDID: context.udid,
         diagnosticSummary: diagnostic, deterministic: true)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       if stateChanged {
         _ = await appGraph.observe(
           from: beforeFingerprint, to: afterFingerprint,
           selector: .hierarchyPath(selected.xpath ?? selected.childPath),
-          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action,
+          destinationFamily: destinationFamily(for: context.udid))
       }
       let actions = currentCapabilities(elements: after, fingerprint: afterFingerprint)
       await appGraph.observeScreen(afterFingerprint, actions: actions)
@@ -1638,7 +1969,9 @@ public actor RuntimeService {
         let requirement = VerificationRequirement(
           codeChanged: configuration.intent.allowsSourceWrites,
           uiChanged: configuration.intent.requiresRunningApp, testsChanged: false,
-          criterionIDs: journey.steps.compactMap { $0.step.criterionID })
+          criterionIDs: journey.steps.compactMap { $0.step.criterionID },
+          requiredDestinationUDIDs: configuration.requiredDestinationUDIDs,
+          requiredDestinationFamilies: configuration.requiredDestinationFamilies)
         _ = await ledger.verify(requirement)
         // A model-guided discovery may produce a useful draft and evidence, but it is not a Lys
         // contract run. Only declared host-owned flows can become trusted green verification.
@@ -1785,7 +2118,7 @@ public actor RuntimeService {
           kind: .launch, status: .passed, taskGeneration: generation,
           destinationUDID: destination.udid,
           diagnosticSummary: "Attached to the compatible running app without rebuilding")
-        try await ledger.record(attached)
+        try await ledger.record(enrichedEvidence(attached))
         emit(
           .sessionAttached, message: attached.diagnosticSummary, journeyID: journeyID,
           target: target, destinationUDID: destination.udid)
@@ -1971,7 +2304,7 @@ public actor RuntimeService {
           ? "The screen changed after \(step.title)."
           : "The screen did not change after \(step.title).",
         deterministic: true)
-      try? await ledger.record(item)
+      try? await ledger.record(enrichedEvidence(item))
       evidenceIDs.append(item.id)
       emit(
         .assertion, message: item.diagnosticSummary, journeyID: journeyID,
@@ -2138,7 +2471,7 @@ public actor RuntimeService {
           kind: evidenceKind, status: outcome.succeeded ? .passed : .failed,
           taskGeneration: generation, artifactPaths: [resultPath.path],
           diagnosticSummary: outcome.succeeded ? "xcodebuild \(action) completed" : outcome.stderr)
-        try await ledger.record(item)
+        try await ledger.record(self.enrichedEvidence(item))
         return XcodeExecution(
           outcome: outcome, resultPath: resultPath, evidenceID: item.id, appTargets: targets)
       }
@@ -2180,6 +2513,8 @@ public actor RuntimeService {
           "actions": try jsonValue(actions),
           "elements": try jsonValue(UIHierarchyInspector.meaningfulElements(from: elements)),
           "fingerprint": try jsonValue(fingerprint),
+          "destinationID": .string(context.udid),
+          "runtime": .string(context.runtime),
           "progress": UIFlowProgressDetector.detect(in: elements).flatMap { try? jsonValue($0) }
             ?? .null,
           "message": .string(
@@ -2338,7 +2673,7 @@ public actor RuntimeService {
         destinationUDID: context.udid,
         diagnosticSummary: "Deterministic \(action) using \(selectorSummary)",
         deterministic: true)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       let beforeFingerprint = ScreenFingerprint.make(
         elements: before, modal: false, navigationTitle: nil)
       let afterFingerprint = ScreenFingerprint.make(
@@ -2346,7 +2681,8 @@ public actor RuntimeService {
       if let selector = graphSelector(identifier: identifier, label: label, type: type) {
         _ = await appGraph.observe(
           from: beforeFingerprint, to: afterFingerprint, selector: selector,
-          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action,
+          destinationFamily: destinationFamily(for: context.udid))
         await persistAppGraph()
       }
       if var journey = activeJourney {
@@ -2494,11 +2830,12 @@ public actor RuntimeService {
         destinationUDID: context.udid,
         diagnosticSummary: diagnostic,
         deterministic: true)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       if actionSucceeded {
         _ = await appGraph.observe(
           from: beforeFingerprint, to: afterFingerprint, selector: resolved.selector,
-          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action)
+          build: sessionConfiguration?.buildFingerprint ?? "unknown", action: action,
+          destinationFamily: destinationFamily(for: context.udid))
       } else {
         rejectedActionStates[actionID] = beforeState
       }
@@ -2591,7 +2928,7 @@ public actor RuntimeService {
           ? "Found \(selectorSummary)"
           : (matches.isEmpty ? "Missing \(selectorSummary)" : "Ambiguous \(selectorSummary)"),
         deterministic: true)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       emit(
         .assertion, message: item.diagnosticSummary, journeyID: activeJourney?.id,
         destinationUDID: context.udid)
@@ -2624,10 +2961,7 @@ public actor RuntimeService {
   private func automationContext(_ request: RPCEnvelope) async throws -> (
     udid: String, runtime: String, bundleID: String, preflight: ToolchainPreflight
   ) {
-    guard
-      let udid = request.params?["udid"]?.stringValue
-        ?? sessionConfiguration?.destination?.udid
-    else {
+    guard let udid = requestedDestinationUDID(request) else {
       throw RPCError(code: -32602, message: "udid is required")
     }
     guard
@@ -2716,7 +3050,8 @@ public actor RuntimeService {
     guard let destinationDigest = request.params?["screen"]?.stringValue else {
       return failure(request.id, -32602, "screen is required")
     }
-    let currentResponse = await uiSnapshot(.init(id: nil, method: "ui.snapshot"))
+    let currentResponse = await uiSnapshot(
+      .init(id: nil, method: "ui.snapshot", params: request.params))
     if let error = currentResponse.error { return failure(request.id, error.code, error.message) }
     guard let currentValue = currentResponse.result?["fingerprint"],
       let current: ScreenFingerprint = try? decode(currentValue)
@@ -2726,7 +3061,8 @@ public actor RuntimeService {
       let destination = snapshot.nodes.first(where: { $0.id == destinationDigest })?.fingerprint,
       let path = await appGraph.path(
         from: current, to: destination,
-        build: sessionConfiguration?.buildFingerprint ?? "unknown")
+        build: sessionConfiguration?.buildFingerprint ?? "unknown",
+        destinationFamily: destinationFamily(for: requestedDestinationUDID(request)))
     else { return failure(request.id, -32081, "No currently valid App Graph path is available") }
 
     for edge in path {
@@ -2734,12 +3070,17 @@ public actor RuntimeService {
         await appGraph.recordFailure(edge.id)
         return failure(request.id, -32081, "The graph path contains a non-replayable action")
       }
+      var performParameters: [String: JSONValue] = [
+        "selector": selector, "action": .string(edge.action ?? "tap"),
+      ]
+      if let destination = request.params?["destination"] {
+        performParameters["destination"] = destination
+      }
+      if let udid = request.params?["udid"] {
+        performParameters["udid"] = udid
+      }
       let performed = await uiPerform(
-        .init(
-          id: nil, method: "ui.perform",
-          params: .object([
-            "selector": selector, "action": .string(edge.action ?? "tap"),
-          ])))
+        .init(id: nil, method: "ui.perform", params: .object(performParameters)))
       if let error = performed.error {
         await appGraph.recordFailure(edge.id)
         await persistAppGraph()
@@ -2821,8 +3162,7 @@ public actor RuntimeService {
 
   private func queryLogs(_ request: RPCEnvelope) async -> RPCEnvelope {
     guard
-      let udid = request.params?["udid"]?.stringValue
-        ?? sessionConfiguration?.destination?.udid,
+      let udid = requestedDestinationUDID(request),
       let process = request.params?["process"]?.stringValue
         ?? sessionConfiguration?.target?.bundleID, !process.isEmpty
     else { return failure(request.id, -32602, "udid and process are required") }
@@ -2848,7 +3188,7 @@ public actor RuntimeService {
         taskGeneration: await ledger.generation, destinationUDID: udid,
         artifactPaths: [artifact.path],
         diagnosticSummary: outcome.succeeded ? "\(seconds)s log query" : outcome.stderr)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       return success(
         request.id,
         .object([
@@ -2992,7 +3332,7 @@ public actor RuntimeService {
         kind: .launch, status: launched.succeeded ? .passed : .failed,
         taskGeneration: await ledger.generation, destinationUDID: udid,
         diagnosticSummary: launched.succeeded ? launched.stdout : launched.stderr)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       if launched.succeeded { lastLaunchedBundleID = bundleID }
       if launched.succeeded, shouldUseDevServer {
         lastDevelopmentLaunch = .init(udid: udid, appPath: appPath, bundleID: bundleID)
@@ -3321,7 +3661,7 @@ public actor RuntimeService {
         artifactPaths: artifact.map { [$0] } ?? [],
         diagnosticSummary: outcome.succeeded ? outcome.stdout : outcome.stderr,
         deterministic: evidenceKind != .uiAction)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       return success(
         request.id,
         .object([
@@ -3358,7 +3698,7 @@ public actor RuntimeService {
         kind: .runtimeLog, status: succeeded ? .passed : .failed,
         taskGeneration: await ledger.generation, destinationUDID: udid,
         diagnosticSummary: detail)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       return success(
         request.id,
         .object([
@@ -3406,7 +3746,7 @@ public actor RuntimeService {
           let item = Evidence(
             kind: .screenshot, status: .failed, taskGeneration: await ledger.generation,
             destinationUDID: udid, diagnosticSummary: outcome.stderr)
-          try await ledger.record(item)
+          try await ledger.record(enrichedEvidence(item))
           return success(
             request.id,
             .object([
@@ -3437,7 +3777,7 @@ public actor RuntimeService {
       let item = Evidence(
         kind: .screenshot, status: .passed, taskGeneration: await ledger.generation,
         destinationUDID: udid, artifactPaths: [output.path], diagnosticSummary: summary)
-      try await ledger.record(item)
+      try await ledger.record(enrichedEvidence(item))
       emit(
         .screenshot, message: summary, journeyID: activeJourney?.id,
         destinationUDID: udid, artifactPath: output.path)
@@ -3512,7 +3852,13 @@ private func requirement(from params: JSONValue?) -> VerificationRequirement {
     codeChanged: params?["codeChanged"]?.boolValue ?? true,
     uiChanged: params?["uiChanged"]?.boolValue ?? false,
     testsChanged: params?["testsChanged"]?.boolValue ?? false,
-    criterionIDs: params?["criterionIDs"]?.arrayValue?.compactMap { $0.stringValue } ?? [])
+    criterionIDs: params?["criterionIDs"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
+    requiredDestinationUDIDs: params?["requiredDestinationUDIDs"]?.arrayValue?.compactMap {
+      $0.stringValue
+    } ?? [],
+    requiredDestinationFamilies: params?["requiredDestinationFamilies"]?.arrayValue?.compactMap {
+      $0.stringValue
+    } ?? [])
 }
 
 public func jsonValue<T: Encodable>(_ value: T) throws -> JSONValue {

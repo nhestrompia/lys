@@ -109,6 +109,11 @@ public struct Evidence: Codable, Identifiable, Hashable, Sendable {
   public var taskGeneration: Int
   public var criterionID: String?
   public var destinationUDID: String?
+  public var destinationID: String?
+  public var deviceType: String?
+  public var runtime: String?
+  public var orientation: String?
+  public var appearance: String?
   public var createdAt: Date
   public var artifactPaths: [String]
   public var diagnosticSummary: String
@@ -116,8 +121,10 @@ public struct Evidence: Codable, Identifiable, Hashable, Sendable {
   public var acknowledged: Bool
   public init(
     id: UUID = UUID(), kind: EvidenceKind, status: EvidenceStatus, taskGeneration: Int,
-    criterionID: String? = nil, destinationUDID: String? = nil, artifactPaths: [String] = [],
-    diagnosticSummary: String = "", deterministic: Bool = true, acknowledged: Bool = false
+    criterionID: String? = nil, destinationUDID: String? = nil, destinationID: String? = nil,
+    deviceType: String? = nil, runtime: String? = nil, orientation: String? = nil,
+    appearance: String? = nil, artifactPaths: [String] = [], diagnosticSummary: String = "",
+    deterministic: Bool = true, acknowledged: Bool = false
   ) {
     self.id = id
     self.kind = kind
@@ -125,6 +132,11 @@ public struct Evidence: Codable, Identifiable, Hashable, Sendable {
     self.taskGeneration = taskGeneration
     self.criterionID = criterionID
     self.destinationUDID = destinationUDID
+    self.destinationID = destinationID
+    self.deviceType = deviceType
+    self.runtime = runtime
+    self.orientation = orientation
+    self.appearance = appearance
     self.createdAt = Date()
     self.artifactPaths = artifactPaths
     self.diagnosticSummary = diagnosticSummary

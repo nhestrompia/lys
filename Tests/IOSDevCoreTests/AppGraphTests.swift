@@ -25,6 +25,29 @@ private func fingerprint(_ value: String) -> ScreenFingerprint {
   #expect(await graph.path(from: a, to: d, build: "new-build") == nil)
 }
 
+@Test func graphNavigationKeepsDestinationFamiliesSeparate() async {
+  let graph = AppGraph()
+  let home = fingerprint("home")
+  let phoneProfile = fingerprint("phone-profile")
+  let padProfile = fingerprint("pad-profile")
+  _ = await graph.observe(
+    from: home, to: phoneProfile, selector: .accessibilityIdentifier("phone-profile"),
+    build: "17F", destinationFamily: "iPhone")
+  _ = await graph.observe(
+    from: home, to: padProfile, selector: .accessibilityIdentifier("pad-profile"),
+    build: "17F", destinationFamily: "iPad")
+
+  #expect(
+    await graph.path(from: home, to: phoneProfile, build: "17F", destinationFamily: "iPhone")?
+      .first?.destinationFamily == "iPhone")
+  #expect(
+    await graph.path(from: home, to: padProfile, build: "17F", destinationFamily: "iPad")?
+      .first?.destinationFamily == "iPad")
+  #expect(
+    await graph.path(from: home, to: padProfile, build: "17F", destinationFamily: "iPhone")
+      == nil)
+}
+
 @Test func failedEdgeBecomesStale() async {
   let graph = AppGraph()
   let a = fingerprint("a")

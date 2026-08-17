@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import IOSDevCore
@@ -45,6 +46,48 @@ import Testing
   #expect(names.contains("build.run"))
   #expect(names.contains("test.run"))
   #expect(!names.contains("devserver.stop"))
+}
+
+@Test func simulatorManagementToolsAreAvailableForDeviceValidation() throws {
+  let names = Set(AgentRuntimeToolCatalog.tools(for: .modifyAndVerify).map(\.name))
+  for name in [
+    "simulator.active", "simulator.list_active", "simulator.add", "simulator.remove",
+    "simulator.focus", "simulator.configure",
+  ] {
+    #expect(names.contains(name))
+  }
+  let add = try #require(
+    AgentRuntimeToolCatalog.definition(named: "simulator.add", for: .modifyAndVerify))
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: add, arguments: .object(["platform": .string("iPadOS")])) == nil)
+  #expect(
+    AgentRuntimeToolCatalog.argumentViolation(
+      for: add, arguments: .object(["platform": .string("Android")])) != nil)
+}
+
+@Test func runtimeSessionConfigurationCarriesFocusedAndActiveDestinations() throws {
+  let iphone = Destination(
+    udid: "iphone", name: "iPhone 17 Pro", deviceType: "iPhone 17 Pro",
+    runtime: "iOS 26.5", state: "Booted")
+  let ipad = Destination(
+    udid: "ipad", name: "iPad Pro 13-inch", deviceType: "iPad Pro 13-inch",
+    runtime: "iPadOS 26.5", state: "Booted")
+  let intent = AgentTaskIntentRouter.classify("Make the layout work on iPad")
+  let configuration = RuntimeSessionConfiguration(
+    intent: intent, container: nil, scheme: "Demo", destination: iphone,
+    destinations: [iphone, ipad], focusedDestinationID: ipad.udid,
+    requiredDestinationUDIDs: [iphone.udid, ipad.udid],
+    requiredDestinationFamilies: [], target: nil,
+    startDevelopmentServer: false)
+  let roundTrip = try JSONDecoder().decode(
+    RuntimeSessionConfiguration.self,
+    from: JSONEncoder().encode(configuration))
+  #expect(roundTrip.destinations.map(\.udid) == ["iphone", "ipad"])
+  #expect(roundTrip.focusedDestinationID == "ipad")
+  #expect(roundTrip.requiredDestinationUDIDs == ["iphone", "ipad"])
+  #expect(roundTrip.requiredDestinationFamilies.isEmpty)
+  #expect(roundTrip.destination?.udid == "iphone")
 }
 
 @Test func allRuntimeToolSchemasRejectUnknownArguments() {

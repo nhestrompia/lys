@@ -251,6 +251,9 @@ public final class AppModel: ObservableObject {
   @Published var selectedScheme = ""
   @Published var destinations: [Destination] = []
   @Published var selectedDestinationID = ""
+  /// The one or two destinations shown in the Develop canvas. The focused destination remains
+  /// `selectedDestinationID` so existing build and interaction APIs keep their semantics.
+  @Published var activeDestinationIDs: [String] = []
   @Published var selectedTarget: AppTarget?
   @Published var files: [FileNode] = []
   @Published var selectedFile: URL?
@@ -278,8 +281,12 @@ public final class AppModel: ObservableObject {
   @Published var applyConflicts: [ApplyConflict] = []
   @Published var isBusy = false
   @Published var selectedAppearance: SimulatorAppearance = .light
+  @Published private(set) var appearanceByDestinationID: [String: SimulatorAppearance] = [:]
+  @Published private(set) var landscapeByDestinationID: [String: Bool] = [:]
   @Published var currentScreenshot: URL?
   @Published var currentScreenshotImage: NSImage?
+  @Published private(set) var screenshotsByDestinationID: [String: URL] = [:]
+  @Published private(set) var screenshotImagesByDestinationID: [String: NSImage] = [:]
   @Published var previewInteractionState: PreviewInteractionState = .unavailable
   @Published var previewTapFeedback: PreviewTapFeedback?
   @Published var previewLatencyMS: Int?
@@ -341,9 +348,71 @@ public final class AppModel: ObservableObject {
   @Published var evidenceWorkspaceTab: EvidenceWorkspaceTab = .evidence
   @Published public var isEvidenceWorkspaceOpen = false
   let simulatorLiveSession = SimulatorLiveSession()
+  @Published private(set) var simulatorLiveSessions: [String: SimulatorLiveSession] = [:]
 
   var selectedDestination: Destination? {
     destinations.first { $0.udid == selectedDestinationID }
+  }
+  var activeDestinations: [Destination] {
+    let active = activeDestinationIDs.compactMap { id in
+      destinations.first { $0.udid == id }
+    }
+    if !active.isEmpty { return active }
+    return selectedDestination.map { [$0] } ?? []
+  }
+  var isMultiDevice: Bool { activeDestinations.count > 1 }
+  /// Form-factor mentions in the task turn into required destination evidence. A voluntarily
+  /// added device stays observable without making an otherwise single-device task fail closed.
+  var requiredVerificationDestinationIDs: [String] {
+    let text = "\(taskPrompt) \(taskTitle)".lowercased()
+    let mentionsPad = text.contains("ipad") || text.contains("tablet")
+    let mentionsPhone = text.contains("iphone") || text.contains("phone")
+    let requiresBoth = mentionsPad && mentionsPhone
+      || (mentionsPad && (text.contains("both") || text.contains("across")))
+    if requiresBoth { return activeDestinations.map(\.udid) }
+    if mentionsPad { return activeDestinations.filter(isPadDestination).map(\.udid) }
+    if mentionsPhone {
+      return activeDestinations.filter { !isPadDestination($0) }.map(\.udid)
+    }
+    return []
+  }
+  var requiredVerificationDestinationFamilies: [String] {
+    let text = "\(taskPrompt) \(taskTitle)".lowercased()
+    let families = [
+      text.contains("ipad") || text.contains("tablet") ? "iPad" : nil,
+      text.contains("iphone") || text.contains("phone") ? "iPhone" : nil,
+    ].compactMap { $0 }
+    return families.filter { family in
+      !activeDestinations.contains { destination in
+        family == "iPad" ? isPadDestination(destination) : !isPadDestination(destination)
+      }
+    }
+  }
+  var addableDestinations: [Destination] {
+    destinations.filter { destination in
+      !activeDestinationIDs.contains(destination.udid)
+    }
+  }
+  var preferredAdditionalDestination: Destination? {
+    let candidates = addableDestinations
+    func isPad(_ destination: Destination) -> Bool {
+      destination.name.localizedCaseInsensitiveContains("iPad")
+        || destination.deviceType.localizedCaseInsensitiveContains("iPad")
+        || destination.runtime.localizedCaseInsensitiveContains("iPadOS")
+    }
+    let pads = candidates.filter(isPad)
+    return pads.sorted { left, right in
+      let leftPriority = left.name.localizedCaseInsensitiveContains("Pro") ? 0
+        : (left.name.localizedCaseInsensitiveContains("mini") ? 2 : 1)
+      let rightPriority = right.name.localizedCaseInsensitiveContains("Pro") ? 0
+        : (right.name.localizedCaseInsensitiveContains("mini") ? 2 : 1)
+      if leftPriority != rightPriority { return leftPriority < rightPriority }
+      if left.runtime != right.runtime { return left.runtime > right.runtime }
+      return left.name.localizedStandardCompare(right.name) == .orderedAscending
+    }.first ?? candidates.sorted {
+      if $0.runtime != $1.runtime { return $0.runtime > $1.runtime }
+      return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    }.first
   }
   var selectedAppStoreApp: AppStoreApp? {
     if let appStoreSelectedAppID {
@@ -654,6 +723,15 @@ public final class AppModel: ObservableObject {
     evidence = []
     verificationReport = nil
     taskSummary = nil
+    destinations = []
+    selectedDestinationID = ""
+    activeDestinationIDs = []
+    appearanceByDestinationID = [:]
+    landscapeByDestinationID = [:]
+    screenshotsByDestinationID = [:]
+    screenshotImagesByDestinationID = [:]
+    simulatorLiveSessions.values.forEach { $0.stop() }
+    simulatorLiveSessions = [:]
     setCurrentScreenshot(nil)
     selectedTarget = nil
     selectedElement = nil
@@ -716,10 +794,161 @@ public final class AppModel: ObservableObject {
   }
 
   func selectDestination(_ id: String) {
-    resetPreviewInteraction()
-    selectedDestinationID = id
-    selectedTarget = nil
-    refreshWDAStatus()
+    focusDestination(id)
+  }
+
+  /// Focuses one active destination. Focus is deliberately lightweight: it changes the target of
+  /// shared controls and syncs the canvas snapshot, but it does not stop the other Simulator.
+  func focusDestination(_ id: String) {
+    guard destinations.contains(where: { $0.udid == id }) else { return }
+    if !activeDestinationIDs.contains(id) {
+      if activeDestinationIDs.count < 2 {
+        activeDestinationIDs.append(id)
+      } else if !activeDestinationIDs.isEmpty {
+        activeDestinationIDs[0] = id
+      }
+    }
+    if selectedDestinationID != id {
+      resetPreviewInteraction(stopLiveSessions: false)
+      selectedDestinationID = id
+      selectedAppearance = appearanceByDestinationID[id] ?? .light
+      syncFocusedScreenshot()
+      refreshWDAStatus()
+      if let destination = selectedDestination, let target = selectedTarget {
+        warmPreviewInteraction(destination: destination, target: target)
+      }
+      persistSimulatorConfiguration()
+    }
+  }
+
+  func addDestination(_ id: String? = nil) {
+    guard activeDestinationIDs.count < 2 else {
+      notice = "Lys supports two active Simulator destinations at a time."
+      return
+    }
+    guard let destination = (id.flatMap { requested in
+      addableDestinations.first { $0.udid == requested }
+    } ?? preferredAdditionalDestination) else {
+      notice = "No additional iPad or iPhone Simulator is available."
+      return
+    }
+    if activeDestinationIDs.isEmpty {
+      if let primary = destinations.first(where: { !isPadDestination($0) }) ?? destinations.first,
+        primary.udid != destination.udid
+      {
+        activeDestinationIDs = [primary.udid]
+      }
+    }
+    guard activeDestinationIDs.count < 2, !activeDestinationIDs.contains(destination.udid) else {
+      notice = "Lys supports two active Simulator destinations at a time."
+      return
+    }
+    activeDestinationIDs.append(destination.udid)
+    if simulatorLiveSessions[destination.udid] == nil {
+      simulatorLiveSessions[destination.udid] = SimulatorLiveSession()
+    }
+    appearanceByDestinationID[destination.udid] = appearanceByDestinationID[destination.udid] ?? .light
+    landscapeByDestinationID[destination.udid] = landscapeByDestinationID[destination.udid] ?? false
+    persistSimulatorConfiguration()
+    focusDestination(destination.udid)
+    timeline.append(
+      .init(
+        time: Self.now(), title: "Simulator added",
+        detail: "\(destination.name) · \(simulatorRuntimeName(destination.runtime))", state: .complete))
+  }
+
+  func removeDestination(_ id: String) {
+    guard activeDestinationIDs.count > 1 else {
+      notice = "Keep at least one active development destination."
+      return
+    }
+    guard activeDestinationIDs.contains(id),
+      let destination = destinations.first(where: { $0.udid == id })
+    else { return }
+    if selectedTarget != nil, embeddedSimulatorSessionActive {
+      Task { [weak self] in
+        guard let self, let target = self.selectedTarget else { return }
+        try? await self.ensureRuntime()
+        _ = try? await self.runtime.request(
+          method: "app.terminate",
+          params: .object(["udid": .string(id), "bundleID": .string(target.bundleID)]))
+      }
+    }
+    if selectedDestinationID == id {
+      resetPreviewInteraction(stopLiveSessions: false)
+    }
+    simulatorLiveSessions[id]?.stop()
+    simulatorLiveSessions.removeValue(forKey: id)
+    screenshotsByDestinationID.removeValue(forKey: id)
+    screenshotImagesByDestinationID.removeValue(forKey: id)
+    appearanceByDestinationID.removeValue(forKey: id)
+    landscapeByDestinationID.removeValue(forKey: id)
+    activeDestinationIDs.removeAll { $0 == id }
+    if selectedDestinationID == id, let next = activeDestinationIDs.first {
+      selectedDestinationID = next
+      selectedAppearance = appearanceByDestinationID[next] ?? .light
+      syncFocusedScreenshot()
+      refreshWDAStatus()
+    }
+    embeddedSimulatorSessionActive = activeDestinationIDs.contains {
+      liveSession(for: $0).isStreaming
+    }
+    persistSimulatorConfiguration()
+    timeline.append(
+      .init(
+        time: Self.now(), title: "Simulator removed",
+        detail: "\(destination.name) remains installed and was removed from this canvas.",
+        state: .complete))
+  }
+
+  func useSingleDevice() {
+    guard let primary = activeDestinationIDs.first ?? selectedDestination?.udid else { return }
+    for id in activeDestinationIDs.dropFirst() {
+      simulatorLiveSessions[id]?.stop()
+      simulatorLiveSessions.removeValue(forKey: id)
+    }
+    activeDestinationIDs = [primary]
+    if selectedDestinationID != primary { focusDestination(primary) }
+    persistSimulatorConfiguration()
+  }
+
+  func setLandscape(_ landscape: Bool, for destinationID: String? = nil) {
+    let id = destinationID ?? selectedDestinationID
+    guard !id.isEmpty else { return }
+    landscapeByDestinationID[id] = landscape
+    if let index = destinations.firstIndex(where: { $0.udid == id }) {
+      destinations[index].orientation = landscape ? "landscape" : "portrait"
+    }
+  }
+
+  func isLandscape(for destinationID: String) -> Bool {
+    landscapeByDestinationID[destinationID] ?? false
+  }
+
+  func isPadDestination(_ destination: Destination) -> Bool {
+    destination.name.localizedCaseInsensitiveContains("iPad")
+      || destination.deviceType.localizedCaseInsensitiveContains("iPad")
+      || destination.runtime.localizedCaseInsensitiveContains("iPadOS")
+  }
+
+  func deviceAspectRatio(for destination: Destination) -> CGFloat {
+    isPadDestination(destination) ? 0.745 : 0.505
+  }
+
+  func appearance(for destinationID: String) -> SimulatorAppearance {
+    appearanceByDestinationID[destinationID] ?? .light
+  }
+
+  func screenshotImage(for destinationID: String) -> NSImage? {
+    screenshotImagesByDestinationID[destinationID]
+  }
+
+  func liveSession(for destinationID: String) -> SimulatorLiveSession {
+    simulatorLiveSessions[destinationID] ?? simulatorLiveSession
+  }
+
+  var focusedSimulatorLiveSession: SimulatorLiveSession {
+    liveSession(for: selectedDestinationID)
   }
 
   func refreshSimulators() {
@@ -1108,13 +1337,26 @@ public final class AppModel: ObservableObject {
       intent.requiresRunningApp
       ? "Call flow.list. If it returns a matching Lys flow, call flow.run once with its exact flowID and required parameters; the host normalizes independent flows before execution, owns navigation from the normalized context to the flow start, authenticated-session setup, every interaction, loops, all acceptance criteria, evidence, and terminal completion. Do not pre-navigate or require the user to leave the app on a particular screen. If no declared flow matches the requested goal, state that the run is exploratory, then call flow.run without flowID; a new exploratory journey is also normalized, while continuing the same journey preserves its state. Continue only through host-returned actions. Never invent selectors, coordinates, routes, or actions. Never start, stop, install, terminate, or rebuild app infrastructure yourself. Before ending, call evidence.summary and give the user a short summary of what ran, what passed, and what remains."
       : "Use only test.list and test.run with the host-selected project context. Do not start Simulator or app lifecycle operations."
+    let activeDestinationSummary = activeDestinations.isEmpty
+      ? "none"
+      : activeDestinations.map {
+        "\($0.name) [\($0.udid)] · \(simulatorRuntimeName($0.runtime))"
+      }.joined(separator: "; ")
+    let requiredDestinations = requiredVerificationDestinationIDs.compactMap { id in
+      activeDestinations.first(where: { $0.udid == id })?.name
+    } + requiredVerificationDestinationFamilies.map { "\($0) destination (must be added)" }
+    let requiredDestinationSummary = requiredDestinations.isEmpty
+      ? "No additional form factor is required by the current task wording."
+      : "Verification must cover: " + requiredDestinations.joined(separator: ", ") + "."
+    let simulatorPolicy =
+      "Active Simulator destinations: \(activeDestinationSummary). Focused destination: \(selectedDestination?.name ?? "none"). \(requiredDestinationSummary) If the request explicitly names iPad, tablet, phone and tablet, or multiple form factors, inspect simulator.list_active first and add the preferred iPad with simulator.add(platform: \"iPadOS\") when it is not active. Use simulator.focus before omitted-destination interactions; screenshot.capture and logs.query accept an optional destination ID. Keep ambiguous tasks on the focused primary device."
     return """
       \(prompt)
 
       Host-classified intent: \(intent.kind.rawValue).
       \(sourcePolicy)
       \(journeyPolicy)
-      The selected scheme is \(selectedScheme.isEmpty ? "not selected" : selectedScheme), and the selected Simulator is \(selectedDestination?.name ?? "not selected"). Tool results contain structuredContent; use it instead of parsing display text. Do not claim completion from prose. Completion requires fresh host-recorded evidence for the active generation.
+      The selected scheme is \(selectedScheme.isEmpty ? "not selected" : selectedScheme). \(simulatorPolicy) Tool results contain structuredContent; use it instead of parsing display text. Do not claim completion from prose. Completion requires fresh host-recorded evidence for the active generation.
       """
   }
 
@@ -1366,7 +1608,7 @@ public final class AppModel: ObservableObject {
     guard canStop else { return }
     agentStopRequested = true
     let shouldStopApp = embeddedSimulatorSessionActive
-    let destination = selectedDestination
+    let activeDestinations = self.activeDestinations
     let target = selectedTarget
     isBusy = true
     Task {
@@ -1379,12 +1621,14 @@ public final class AppModel: ObservableObject {
       disableMetroPersistence()
       _ = try? await runtime.request(method: "build.cancel")
       await stopOwnedMetro()
-      if shouldStopApp, let destination, let target {
-        _ = try? await runtime.request(
-          method: "app.terminate",
-          params: .object([
-            "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
-          ]))
+      if shouldStopApp, let target {
+        for destination in activeDestinations {
+          _ = try? await runtime.request(
+            method: "app.terminate",
+            params: .object([
+              "udid": .string(destination.udid), "bundleID": .string(target.bundleID),
+            ]))
+        }
       }
       resetPreviewInteraction()
       if shouldStopApp { setCurrentScreenshot(nil) }
@@ -1427,6 +1671,10 @@ public final class AppModel: ObservableObject {
   func updateAppearance(_ appearance: SimulatorAppearance) {
     selectedAppearance = appearance
     guard let destination = selectedDestination else { return }
+    appearanceByDestinationID[destination.udid] = appearance
+    if let index = destinations.firstIndex(where: { $0.udid == destination.udid }) {
+      destinations[index].appearance = appearance.rawValue
+    }
     Task {
       do {
         _ = try await runtime.request(
@@ -1512,7 +1760,10 @@ public final class AppModel: ObservableObject {
     }
   }
 
-  func tapPreview(normalizedX: Double, normalizedY: Double) {
+  func tapPreview(
+    normalizedX: Double, normalizedY: Double, destinationID: String? = nil
+  ) {
+    if let destinationID, destinationID != selectedDestinationID { focusDestination(destinationID) }
     guard let destination = selectedDestination, let target = selectedTarget else {
       notice = "Build and run the app before interacting with the embedded Simulator."
       return
@@ -1548,8 +1799,9 @@ public final class AppModel: ObservableObject {
   }
 
   func swipePreview(
-    startX: Double, startY: Double, endX: Double, endY: Double
+    startX: Double, startY: Double, endX: Double, endY: Double, destinationID: String? = nil
   ) {
+    if let destinationID, destinationID != selectedDestinationID { focusDestination(destinationID) }
     guard let destination = selectedDestination, let target = selectedTarget else {
       notice = "Build and run the app before interacting with the embedded Simulator."
       return
@@ -1639,7 +1891,7 @@ public final class AppModel: ObservableObject {
           selectedTarget?.bundleID == target.bundleID,
           let path = frame["path"]?.stringValue
         else { continue }
-        setCurrentScreenshot(URL(fileURLWithPath: path))
+        setCurrentScreenshot(URL(fileURLWithPath: path), destinationID: destination.udid)
         previewLatencyMS = Int(
           (DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
         schedulePreviewSettleFrame(
@@ -1686,7 +1938,7 @@ public final class AppModel: ObservableObject {
         !Task.isCancelled, sessionID == previewSessionID,
         let path = frame["path"]?.stringValue
       else { return }
-      setCurrentScreenshot(URL(fileURLWithPath: path))
+      setCurrentScreenshot(URL(fileURLWithPath: path), destinationID: destination.udid)
       previewSettleTask = nil
     }
   }
@@ -1730,8 +1982,7 @@ public final class AppModel: ObservableObject {
         let frame = try await runtime.request(
           method: "preview.capture",
           params: .object(["udid": .string(destination.udid)]))
-        guard sessionID == previewSessionID,
-          selectedDestinationID == destination.udid,
+        guard sessionID == previewSessionID || activeDestinationIDs.contains(destination.udid),
           let path = frame["path"]?.stringValue,
           let image = NSImage(contentsOfFile: path),
           let representation = image.representations.max(by: {
@@ -1739,8 +1990,8 @@ public final class AppModel: ObservableObject {
           }),
           representation.pixelsWide > 0, representation.pixelsHigh > 0
         else { return }
-        setCurrentScreenshot(URL(fileURLWithPath: path))
-        simulatorLiveSession.start(
+        setCurrentScreenshot(URL(fileURLWithPath: path), destinationID: destination.udid)
+        liveSession(for: destination.udid).start(
           udid: destination.udid, nativePixelWidth: representation.pixelsWide,
           nativePixelHeight: representation.pixelsHigh,
           developerDirectory: developerDirectory)
@@ -1750,9 +2001,12 @@ public final class AppModel: ObservableObject {
     }
   }
 
-  private func resetPreviewInteraction() {
-    embeddedSimulatorSessionActive = false
-    simulatorLiveSession.stop()
+  private func resetPreviewInteraction(stopLiveSessions: Bool = true) {
+    if stopLiveSessions {
+      embeddedSimulatorSessionActive = false
+      simulatorLiveSession.stop()
+      simulatorLiveSessions.values.forEach { $0.stop() }
+    }
     previewTapWorker?.cancel()
     previewWarmupTask?.cancel()
     previewSettleTask?.cancel()
@@ -2092,6 +2346,7 @@ public final class AppModel: ObservableObject {
         udid: "SYNTHETIC-IPHONE", name: "iPhone 16 Pro", deviceType: "iPhone 16 Pro",
         runtime: "iOS 18.2", state: "Booted")
     ]
+    activeDestinationIDs = ["SYNTHETIC-IPHONE"]
     plan = [
       .init(title: "Review Profile implementation", state: .complete),
       .init(title: "Update colors and assets", state: .complete),
@@ -2314,6 +2569,7 @@ public final class AppModel: ObservableObject {
         state: "Booted")
     ]
     selectedDestinationID = destinations[0].udid
+    activeDestinationIDs = [destinations[0].udid]
     refreshAdapters()
     refreshWDAStatus()
   }
@@ -2441,11 +2697,32 @@ public final class AppModel: ObservableObject {
       destinations = try await ToolchainDiscovery.simulators(
         simctl: URL(fileURLWithPath: simctl),
         developerDirectory: URL(fileURLWithPath: developer))
-      if !destinations.contains(where: { $0.udid == selectedDestinationID }) {
-        selectedDestinationID = destinations.first?.udid ?? ""
+      if activeDestinationIDs.isEmpty { restoreSimulatorConfiguration() }
+      let availableIDs = Set(destinations.map(\.udid))
+      activeDestinationIDs = activeDestinationIDs.filter(availableIDs.contains).prefix(2).map { $0 }
+      if activeDestinationIDs.isEmpty {
+        let defaultDestination = destinations.first(where: {
+          !$0.name.localizedCaseInsensitiveContains("iPad")
+            && !$0.deviceType.localizedCaseInsensitiveContains("iPad")
+        }) ?? destinations.first
+        if let defaultDestination {
+          activeDestinationIDs = [defaultDestination.udid]
+          selectedDestinationID = defaultDestination.udid
+        } else {
+          selectedDestinationID = ""
+        }
+      } else if !activeDestinationIDs.contains(selectedDestinationID) {
+        selectedDestinationID = activeDestinationIDs.first ?? ""
       }
+      for id in activeDestinationIDs.dropFirst() where simulatorLiveSessions[id] == nil {
+        simulatorLiveSessions[id] = SimulatorLiveSession()
+      }
+      selectedAppearance = appearanceByDestinationID[selectedDestinationID] ?? .light
+      syncFocusedScreenshot()
+      persistSimulatorConfiguration()
     } catch {
       destinations = []
+      activeDestinationIDs = []
       selectedDestinationID = ""
       notice = "Simulator discovery failed: \(error.localizedDescription)"
     }
@@ -2455,6 +2732,56 @@ public final class AppModel: ObservableObject {
   private func refreshWDAStatus() {
     wdaStatus = WDACompatibilityGate.status(
       preflight: preflight, runtime: selectedDestination?.runtime, stateRoot: wdaRoot)
+  }
+
+  private func syncActiveDestinationsFromRuntime() async {
+    guard let value = try? await runtime.request(method: "simulator.list_active"),
+      let encoded = value["destinations"]?.arrayValue,
+      let active = try? encoded.map({
+        try JSONDecoder().decode(Destination.self, from: JSONEncoder().encode($0))
+      })
+    else { return }
+    for destination in active {
+      if let index = destinations.firstIndex(where: { $0.udid == destination.udid }) {
+        if let appearance = destination.appearance {
+          destinations[index].appearance = appearance
+          if let value = SimulatorAppearance(rawValue: appearance) {
+            appearanceByDestinationID[destination.udid] = value
+          }
+        }
+        if let orientation = destination.orientation {
+          destinations[index].orientation = orientation
+          landscapeByDestinationID[destination.udid] = orientation == "landscape"
+        }
+      } else {
+        destinations.append(destination)
+      }
+    }
+    activeDestinationIDs = active.map(\.udid).prefix(2).map { $0 }
+    if let focusedID = value["focusedDestinationID"]?.stringValue {
+      if let focused = active.enumerated().first(where: { item in
+        focusedID == item.element.udid
+          || focusedID == destinationRoleID(item.element, index: item.offset)
+      }) {
+        selectedDestinationID = focused.element.udid
+      }
+    }
+    for id in activeDestinationIDs.dropFirst() where simulatorLiveSessions[id] == nil {
+      simulatorLiveSessions[id] = SimulatorLiveSession()
+    }
+    selectedAppearance = appearanceByDestinationID[selectedDestinationID] ?? .light
+    syncFocusedScreenshot()
+    refreshWDAStatus()
+    persistSimulatorConfiguration()
+  }
+
+  private func destinationRoleID(_ destination: Destination, index: Int) -> String {
+    let isPad = destination.name.localizedCaseInsensitiveContains("iPad")
+      || destination.deviceType.localizedCaseInsensitiveContains("iPad")
+      || destination.runtime.localizedCaseInsensitiveContains("iPadOS")
+    if index == 0 { return isPad ? "ipad-primary" : "iphone-primary" }
+    if index == 1 { return isPad ? "ipad-secondary" : "iphone-secondary" }
+    return "destination-\(index + 1)"
   }
 
   private func connectAgent(
@@ -3209,6 +3536,12 @@ public final class AppModel: ObservableObject {
 
   private static let runtimeToolTitles: [String: String] = [
     "workspace.describe": "Inspecting the task workspace",
+    "simulator.active": "Checking the focused Simulator",
+    "simulator.list_active": "Listing active Simulators",
+    "simulator.add": "Adding a Simulator",
+    "simulator.remove": "Removing a Simulator",
+    "simulator.focus": "Focusing a Simulator",
+    "simulator.configure": "Configuring a Simulator",
     "app.describe": "Mapping the current app",
     "flow.list": "Finding declared app flows",
     "flow.run": "Running the app flow",
@@ -3222,7 +3555,6 @@ public final class AppModel: ObservableObject {
     "test.run": "Running tests",
     "simulator.list": "Finding Simulators",
     "simulator.boot": "Starting the Simulator",
-    "simulator.configure": "Configuring the Simulator",
     "devserver.start": "Starting the development server",
     "devserver.status": "Checking the development server",
     "devserver.stop": "Stopping the development server",
@@ -3244,7 +3576,8 @@ public final class AppModel: ObservableObject {
   private static let routineTestingTools: Set<String> = [
     "workspace.describe", "app.describe", "flow.list", "flow.run", "flow.step", "flow.finish",
     "flow.status", "flow.stop", "build.run", "test.list", "test.run", "screenshot.capture",
-    "logs.query", "evidence.summary",
+    "logs.query", "evidence.summary", "simulator.active", "simulator.list_active",
+    "simulator.add", "simulator.remove", "simulator.focus", "simulator.configure",
   ]
 
   private func startRuntime(workspace: URL) async throws {
@@ -3270,7 +3603,10 @@ public final class AppModel: ObservableObject {
   private func configureRuntime(intent: AgentTaskIntent) async throws {
     let configuration = RuntimeSessionConfiguration(
       intent: intent, container: taskContainer()?.path, scheme: selectedScheme,
-      destination: selectedDestination, target: selectedTarget,
+      destination: selectedDestination, destinations: activeDestinations,
+      focusedDestinationID: selectedDestinationID,
+      requiredDestinationUDIDs: requiredVerificationDestinationIDs,
+      requiredDestinationFamilies: requiredVerificationDestinationFamilies, target: selectedTarget,
       startDevelopmentServer: isExpoRepository && startDevServerOnRun)
     _ = try await runtime.request(
       method: "session.configure", params: try jsonValue(configuration))
@@ -3307,8 +3643,14 @@ public final class AppModel: ObservableObject {
   private func consumeRuntimeEvent(_ event: RuntimeEvent) async {
     if let target = event.target { selectedTarget = target }
     switch event.kind {
+    case .simulatorAdded, .simulatorRemoved, .simulatorFocused:
+      status = event.message
+      Task { [weak self] in await self?.syncActiveDestinationsFromRuntime() }
     case .sessionAttached, .appLaunched, .previewAvailable:
-      if let destination = selectedDestination {
+      let eventDestination = event.destinationUDID.flatMap { id in
+        destinations.first { $0.udid == id }
+      }
+      if let destination = eventDestination ?? selectedDestination {
         if let target = event.target { selectedTarget = target }
         if selectedTarget != nil {
           warmPreviewInteraction(destination: destination, target: selectedTarget!)
@@ -3317,7 +3659,8 @@ public final class AppModel: ObservableObject {
       }
     case .screenshot:
       if let path = event.artifactPath {
-        setCurrentScreenshot(URL(fileURLWithPath: path))
+        setCurrentScreenshot(
+          URL(fileURLWithPath: path), destinationID: event.destinationUDID)
       }
       await refreshEvidence()
     case .journeyStarted, .journeyReady, .journeyStepStarted, .journeyStepFinished,
@@ -3423,7 +3766,8 @@ public final class AppModel: ObservableObject {
   }
 
   private func installAndLaunch() async {
-    guard let container = taskContainer(), let destination = selectedDestination else { return }
+    guard let container = taskContainer(), let selected = selectedDestination else { return }
+    let launchDestinations = activeDestinations.isEmpty ? [selected] : activeDestinations
     isBusy = true
     appOperation = .launching
     status = "Preparing launch"
@@ -3431,74 +3775,88 @@ public final class AppModel: ObservableObject {
       // A build can take long enough for a development server to exit. Revalidate immediately
       // before installation so we never launch an Expo client against a dead port.
       if isExpoRepository && startDevServerOnRun { try await ensureMetro() }
-      let booted = try await runtime.request(
-        method: "simulator.boot", params: .object(["udid": .string(destination.udid)]))
-      guard booted["succeeded"]?.boolValue == true else {
-        throw RPCError(code: -32054, message: "The selected Simulator did not become ready")
-      }
-      let targets: [AppTarget] = try await runtime.request(
-        [AppTarget].self, method: "target.discover",
-        params: .object([
-          "container": .string(container.path), "scheme": .string(selectedScheme),
-          "configuration": .string("Debug"),
-          "destination": .string("platform=iOS Simulator,id=\(destination.udid)"),
-        ]))
-      guard let target = targets.first, let productPath = target.productPath else {
-        throw RPCError(
-          code: -32056,
-          message:
-            "The \(selectedScheme) scheme does not produce a runnable iOS app. Choose the application scheme from the App menu and try Run again."
-        )
-      }
-      selectedTarget = target
-      let launched = try await runtime.request(
-        method: "app.install_launch",
-        params: .object([
-          "udid": .string(destination.udid), "appPath": .string(productPath.path),
-          "bundleID": .string(target.bundleID),
-          "runtime": .string(destination.runtime),
-          "startDevServer": .bool(false),
-          "useDevServer": .bool(isExpoRepository && startDevServerOnRun),
-        ]))
-      guard launched["launched"]?.boolValue == true else {
-        throw RPCError(code: -32053, message: "The selected app did not launch")
-      }
-      status = "Running"
-      timeline.append(
-        .init(
-          time: Self.now(), title: "Application launched",
-          detail: "\(target.bundleID) on \(destination.name)", state: .complete))
-      warmPreviewInteraction(destination: destination, target: target)
-      beginLiveSimulatorSession(destination: destination)
-      status = "Waiting for app to settle"
-      await captureScreenshot(settleDelayMS: isExpoRepository ? 2_500 : 900)
-      let shouldVerifyMetro = isExpoRepository && startDevServerOnRun
-      var metroStillReady = true
-      if shouldVerifyMetro { metroStillReady = await isMetroReady() }
-      if shouldVerifyMetro && !metroStillReady {
-        timeline.append(
-          .init(
-            time: Self.now(), title: "Metro stopped during launch",
-            detail: metroExitDiagnostic ?? "Restarting before presenting the app.",
-            state: .warning))
-        metroRecoveryTask?.cancel()
-        metroRecoveryTask = nil
-        try await ensureMetro()
-        let retry = try await runtime.request(
-          method: "app.install_launch",
-          params: .object([
-            "udid": .string(destination.udid), "appPath": .string(productPath.path),
-            "bundleID": .string(target.bundleID),
-            "runtime": .string(destination.runtime), "startDevServer": .bool(false),
-            "useDevServer": .bool(true),
-          ]))
-        guard retry["launched"]?.boolValue == true else {
-          throw RPCError(code: -32053, message: "The app did not relaunch after Metro restarted")
+      var successes = 0
+      var failures: [String] = []
+      var firstFailure: String?
+      for destination in launchDestinations {
+        do {
+          let booted = try await runtime.request(
+            method: "simulator.boot", params: .object(["udid": .string(destination.udid)]))
+          guard booted["succeeded"]?.boolValue == true else {
+            throw RPCError(code: -32054, message: "\(destination.name) did not become ready")
+          }
+          let targets: [AppTarget] = try await runtime.request(
+            [AppTarget].self, method: "target.discover",
+            params: .object([
+              "container": .string(container.path), "scheme": .string(selectedScheme),
+              "configuration": .string("Debug"),
+              "destination": .string("platform=iOS Simulator,id=\(destination.udid)"),
+            ]))
+          guard let target = targets.first, let productPath = target.productPath else {
+            throw RPCError(
+              code: -32056,
+              message:
+                "The \(selectedScheme) scheme does not produce a runnable iOS app for \(destination.name)."
+            )
+          }
+          selectedTarget = target
+          let launched = try await runtime.request(
+            method: "app.install_launch",
+            params: .object([
+              "udid": .string(destination.udid), "appPath": .string(productPath.path),
+              "bundleID": .string(target.bundleID), "runtime": .string(destination.runtime),
+              "startDevServer": .bool(false),
+              "useDevServer": .bool(isExpoRepository && startDevServerOnRun),
+            ]))
+          guard launched["launched"]?.boolValue == true else {
+            throw RPCError(code: -32053, message: "The app did not launch on \(destination.name)")
+          }
+          successes += 1
+          timeline.append(
+            .init(
+              time: Self.now(), title: "Application launched",
+              detail: "\(target.bundleID) on \(destination.name)", state: .complete))
+          warmPreviewInteraction(destination: destination, target: target)
+          beginLiveSimulatorSession(destination: destination)
+          status = "Waiting for app to settle · \(destination.name)"
+          await captureScreenshot(
+            settleDelayMS: isExpoRepository ? 2_500 : 900, destinationID: destination.udid)
+          let metroReady = isExpoRepository && startDevServerOnRun ? await isMetroReady() : true
+          if isExpoRepository && startDevServerOnRun && !metroReady {
+            timeline.append(
+              .init(
+                time: Self.now(), title: "Metro stopped during launch",
+                detail: metroExitDiagnostic ?? "Restarting before presenting the app.",
+                state: .warning))
+            metroRecoveryTask?.cancel()
+            metroRecoveryTask = nil
+            try await ensureMetro()
+            let retry = try await runtime.request(
+              method: "app.install_launch",
+              params: .object([
+                "udid": .string(destination.udid), "appPath": .string(productPath.path),
+                "bundleID": .string(target.bundleID), "runtime": .string(destination.runtime),
+                "startDevServer": .bool(false), "useDevServer": .bool(true),
+              ]))
+            guard retry["launched"]?.boolValue == true else {
+              throw RPCError(code: -32053, message: "The app did not relaunch on \(destination.name)")
+            }
+            await captureScreenshot(settleDelayMS: 1_500, destinationID: destination.udid)
+          }
+        } catch {
+          let detail = error.localizedDescription
+          failures.append("\(destination.name): \(detail)")
+          firstFailure = firstFailure ?? detail
+          timeline.append(
+            .init(
+              time: Self.now(), title: "Launch failed",
+              detail: "\(destination.name) · \(detail)", state: .warning))
         }
-        warmPreviewInteraction(destination: destination, target: target)
-        beginLiveSimulatorSession(destination: destination)
-        await captureScreenshot(settleDelayMS: 1_500)
       }
+      guard successes > 0 else {
+        throw RPCError(code: -32053, message: firstFailure ?? "No Simulator destination launched")
+      }
+      status = failures.isEmpty ? "Running" : "Running · \(failures.count) destination unavailable"
       await refreshEvidence()
     } catch {
       status = "Launch failed"
@@ -3513,8 +3871,12 @@ public final class AppModel: ObservableObject {
   }
 
   @discardableResult
-  private func captureScreenshot(settleDelayMS: Int = 0) async -> Bool {
-    guard let destination = selectedDestination else { return false }
+  private func captureScreenshot(
+    settleDelayMS: Int = 0, destinationID: String? = nil
+  ) async -> Bool {
+    let destination = destinationID.flatMap { id in destinations.first { $0.udid == id } }
+      ?? selectedDestination
+    guard let destination else { return false }
     do {
       let result = try await runtime.request(
         method: "screenshot.capture",
@@ -3525,7 +3887,8 @@ public final class AppModel: ObservableObject {
       // The runtime returns the final artifact path. Present it immediately so
       // a manual capture is visible even before the evidence refresh completes.
       if let path = result["artifactPath"]?.stringValue {
-        setCurrentScreenshot(URL(fileURLWithPath: path))
+        setCurrentScreenshot(
+          URL(fileURLWithPath: path), destinationID: destination.udid)
       }
       await refreshEvidence()
       return result["succeeded"]?.boolValue != false
@@ -3538,10 +3901,14 @@ public final class AppModel: ObservableObject {
   private func refreshEvidence() async {
     do {
       evidence = try await runtime.request([Evidence].self, method: "evidence.list")
-      setCurrentScreenshot(
-        evidence.reversed().first(where: {
-          $0.kind == .screenshot && $0.status == .passed && $0.taskGeneration == generation
-        }).flatMap { $0.artifactPaths.first.map(URL.init(fileURLWithPath:)) })
+      if let path = evidence.reversed().first(where: {
+        $0.kind == .screenshot && $0.status == .passed && $0.taskGeneration == generation
+          && $0.destinationUDID == selectedDestinationID
+      })?.artifactPaths.first {
+        setCurrentScreenshot(URL(fileURLWithPath: path), destinationID: selectedDestinationID)
+      } else {
+        syncFocusedScreenshot()
+      }
       var report: VerificationReport = try await runtime.request(
         VerificationReport.self, method: "verification.status",
         params: .object([
@@ -3549,6 +3916,10 @@ public final class AppModel: ObservableObject {
             activeWorktree != nil || evidence.contains(where: { $0.kind == .build })),
           "uiChanged": .bool(requiresUIVerification),
           "testsChanged": .bool(false),
+          "requiredDestinationUDIDs": .array(
+            requiredVerificationDestinationIDs.map(JSONValue.string)),
+          "requiredDestinationFamilies": .array(
+            requiredVerificationDestinationFamilies.map(JSONValue.string)),
         ]))
       if activeTaskIntent?.kind == .verifyCurrentApp, activeJourney?.status != .passed {
         report.status = activeJourney?.status == .failed ? .failed : .partiallyVerified
@@ -4180,15 +4551,69 @@ public final class AppModel: ObservableObject {
     }
   }
 
-  private func setCurrentScreenshot(_ url: URL?) {
+  private func setCurrentScreenshot(_ url: URL?, destinationID: String? = nil) {
+    let id = destinationID ?? selectedDestinationID
+    if !id.isEmpty {
+      if let url {
+        screenshotsByDestinationID[id] = url
+        if let image = NSImage(contentsOf: url) {
+          image.cacheMode = .always
+          screenshotImagesByDestinationID[id] = image
+        } else {
+          screenshotImagesByDestinationID.removeValue(forKey: id)
+        }
+      } else {
+        screenshotsByDestinationID.removeValue(forKey: id)
+        screenshotImagesByDestinationID.removeValue(forKey: id)
+      }
+    }
+    guard id == selectedDestinationID else { return }
     currentScreenshot = url
-    guard let url else {
-      currentScreenshotImage = nil
+    currentScreenshotImage = id.isEmpty ? nil : screenshotImagesByDestinationID[id]
+  }
+
+  private func syncFocusedScreenshot() {
+    currentScreenshot = screenshotsByDestinationID[selectedDestinationID]
+    currentScreenshotImage = screenshotImagesByDestinationID[selectedDestinationID]
+  }
+
+  private func simulatorRuntimeName(_ runtime: String) -> String {
+    runtime
+      .replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.iOS-", with: "iOS ")
+      .replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.iPadOS-", with: "iPadOS ")
+      .replacingOccurrences(of: "-", with: ".")
+  }
+
+  private func simulatorConfigurationKey() -> String? {
+    guard let repository else { return nil }
+    return "Lys.simulatorConfiguration.\(repository.standardizedFileURL.path)"
+  }
+
+  private func persistSimulatorConfiguration() {
+    guard let key = simulatorConfigurationKey() else { return }
+    UserDefaults.standard.set(
+      [
+        "active": activeDestinationIDs,
+        "focused": selectedDestinationID,
+      ], forKey: key)
+  }
+
+  private func restoreSimulatorConfiguration() {
+    guard let key = simulatorConfigurationKey(),
+      let value = UserDefaults.standard.dictionary(forKey: key),
+      let storedActive = value["active"] as? [String]
+    else {
+      activeDestinationIDs = []
       return
     }
-    let image = NSImage(contentsOf: url)
-    image?.cacheMode = .always
-    currentScreenshotImage = image
+    let available = Set(destinations.map(\.udid))
+    let restored = storedActive.filter(available.contains).prefix(2)
+    activeDestinationIDs = Array(restored)
+    if let focused = value["focused"] as? String,
+      activeDestinationIDs.contains(focused)
+    {
+      selectedDestinationID = focused
+    }
   }
 
   private static func readLocalAgentConfigOptions(for adapter: DetectedAdapter?)

@@ -314,6 +314,12 @@ private struct LysToolbar: View {
               }
             }
             Divider()
+            if model.activeDestinations.count > 1 {
+              Button("Use Single Device", systemImage: "iphone") {
+                model.useSingleDevice()
+              }
+              Divider()
+            }
           } else {
             Text("No simulators found")
           }
@@ -1240,25 +1246,27 @@ private struct ExpoSetupCallout: View {
 private struct AppStage: View {
   @EnvironmentObject var model: AppModel
   @State private var previewZoom: CGFloat = 0.9
-  @State private var landscape = false
+  @State private var showAddDevice = false
 
   var body: some View {
     GeometryReader { geometry in
       let compact = geometry.size.height < 560
-      let emptyState = model.currentScreenshotImage == nil
       let previewViewportWidth = max(0, geometry.size.width - 58)
-      let widthFittedDeviceHeight = landscape
-        ? max(300, previewViewportWidth - 44)
-        : max(300, (previewViewportWidth - 44) / 0.505)
-      let fittedDeviceHeight = min(
-        650,
-        max(360, min(geometry.size.height - (compact ? 180 : 100), widthFittedDeviceHeight)))
-      let emptyDeviceHeight = min(
-        700,
-        max(420, min(geometry.size.height - (compact ? 78 : 92), widthFittedDeviceHeight)))
-      let deviceHeight = compact
-        ? max(300, min(geometry.size.height - 78, widthFittedDeviceHeight))
-        : (emptyState ? emptyDeviceHeight : fittedDeviceHeight)
+      let activeDestinations = model.activeDestinations
+      let gap: CGFloat = activeDestinations.count > 1 ? 34 : 0
+      let horizontalBudget = max(
+        180, previewViewportWidth - 44 - gap * CGFloat(max(activeDestinations.count - 1, 0)))
+      let widthFactors = activeDestinations.map { destination in
+        model.isLandscape(for: destination.udid) ? 1 : model.deviceAspectRatio(for: destination)
+      }
+      let heightFactors = activeDestinations.map { destination in
+        model.isLandscape(for: destination.udid) ? model.deviceAspectRatio(for: destination) : 1
+      }
+      let maxHeightByWidth = horizontalBudget / max(widthFactors.reduce(0, +), 0.505)
+      let availableHeight = max(260, geometry.size.height - (compact ? 82 : 98))
+      let maxHeightByHeight = availableHeight / max(heightFactors.max() ?? 1, 1)
+      let deviceHeight = min(650, maxHeightByWidth, maxHeightByHeight)
+      let fittedDeviceHeight = max(compact ? 270 : 300, deviceHeight)
 
       VStack(alignment: .leading, spacing: 0) {
         HStack {
@@ -1280,6 +1288,22 @@ private struct AppStage: View {
             .font(.system(size: 11, weight: .semibold))
           }
           .menuStyle(.borderlessButton)
+          Button {
+            showAddDevice = true
+          } label: {
+            Image(systemName: "plus")
+              .font(.system(size: 12, weight: .semibold))
+              .frame(width: 30, height: 30)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(model.activeDestinations.count >= 2 ? Studio.tertiary : Studio.accent)
+          .disabled(model.activeDestinations.count >= 2)
+          .accessibilityLabel("Add Simulator device")
+          .help(model.activeDestinations.count >= 2 ? "Two active devices maximum" : "Add a Simulator device")
+          .popover(isPresented: $showAddDevice, arrowEdge: .top) {
+            AddDevicePopover(isPresented: $showAddDevice)
+          }
           if model.isExpoRepository {
             Button {
               model.startDevServerOnRun.toggle()
@@ -1348,12 +1372,17 @@ private struct AppStage: View {
 
         HStack(spacing: 0) {
           ScrollView([.horizontal, .vertical]) {
-            DevicePreview(height: deviceHeight * previewZoom, landscape: landscape)
-              .padding(.horizontal, 22)
-              .padding(.vertical, 8)
-              .frame(
-                minWidth: max(0, previewViewportWidth - 44),
-                minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .center)
+            HStack(alignment: .top, spacing: gap) {
+              ForEach(activeDestinations) { destination in
+                DeviceCanvasItem(
+                  destination: destination, height: fittedDeviceHeight * previewZoom)
+              }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 8)
+            .frame(
+              minWidth: max(0, previewViewportWidth - 44),
+              minHeight: max(0, geometry.size.height - (compact ? 78 : 98)), alignment: .center)
           }
           .frame(
             minWidth: previewViewportWidth, maxWidth: previewViewportWidth,
@@ -1387,9 +1416,14 @@ private struct AppStage: View {
   }
 
   private var orientationControls: some View {
-    HStack(spacing: 2) {
-      orientationButton("Portrait", selected: !landscape) { landscape = false }
-      orientationButton("Landscape", selected: landscape) { landscape = true }
+    let landscape = model.selectedDestination.map { model.isLandscape(for: $0.udid) } ?? false
+    return HStack(spacing: 2) {
+      orientationButton("Portrait", selected: !landscape) {
+        model.setLandscape(false)
+      }
+      orientationButton("Landscape", selected: landscape) {
+        model.setLandscape(true)
+      }
     }
     .fixedSize()
   }
@@ -1462,7 +1496,7 @@ private struct AppStage: View {
 
   private var previewInteractionStatus: some View {
     SimulatorInteractionStatus(
-      session: model.simulatorLiveSession, fallbackState: model.previewInteractionState,
+      session: model.focusedSimulatorLiveSession, fallbackState: model.previewInteractionState,
       fallbackLatencyMS: model.previewLatencyMS)
   }
 
@@ -1482,6 +1516,168 @@ private struct AppStage: View {
     }
     .buttonStyle(.plain)
     .disabled(model.selectedDestination == nil)
+  }
+}
+
+private struct DeviceCanvasItem: View {
+  @EnvironmentObject var model: AppModel
+  let destination: Destination
+  let height: CGFloat
+
+  private var itemWidth: CGFloat {
+    let widthFactor = model.isLandscape(for: destination.udid)
+      ? 1 : model.deviceAspectRatio(for: destination)
+    return height * widthFactor + 12
+  }
+
+  var body: some View {
+    VStack(spacing: 8) {
+      Button {
+        model.focusDestination(destination.udid)
+      } label: {
+        HStack(spacing: 6) {
+          Circle()
+            .fill(model.selectedDestinationID == destination.udid ? Studio.accent : .clear)
+            .frame(width: 6, height: 6)
+          Text("\(destination.name) · \(runtimeName(destination.runtime))")
+            .font(.system(size: 10.5, weight: model.selectedDestinationID == destination.udid ? .semibold : .medium))
+            .foregroundStyle(model.selectedDestinationID == destination.udid ? Color.primary : Studio.secondary)
+            .lineLimit(1)
+        }
+        .frame(minHeight: 24)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .help("Focus \(destination.name)")
+      .contextMenu {
+        Button("Focus Device", systemImage: "scope") {
+          model.focusDestination(destination.udid)
+        }
+        if model.activeDestinations.count > 1 {
+          Divider()
+          Button("Remove Device", systemImage: "minus.circle") {
+            model.removeDestination(destination.udid)
+          }
+        }
+      }
+
+      DevicePreview(destination: destination, height: height)
+        .overlay {
+          if model.selectedDestinationID == destination.udid {
+            RoundedRectangle(cornerRadius: 55, style: .continuous)
+              .stroke(Studio.accent.opacity(0.34), lineWidth: 1)
+              .padding(4)
+              .allowsHitTesting(false)
+          }
+        }
+        .onTapGesture {
+          model.focusDestination(destination.udid)
+        }
+    }
+    .frame(width: itemWidth)
+  }
+}
+
+private struct AddDevicePopover: View {
+  @EnvironmentObject var model: AppModel
+  @Binding var isPresented: Bool
+  @State private var selectedDestinationID: String?
+
+  private var recommended: Destination? { model.preferredAdditionalDestination }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text("Add Device")
+          .font(.system(size: 13, weight: .semibold))
+        Text("Extend the canvas when the task needs another form factor.")
+          .font(.system(size: 10.5))
+          .foregroundStyle(Studio.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      .padding(.bottom, 12)
+
+      if let recommended {
+        Text("Recommended")
+          .font(.system(size: 9.5, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+          .textCase(.uppercase)
+          .padding(.bottom, 5)
+        destinationRow(recommended, recommended: true)
+      }
+
+      let otherDevices = model.addableDestinations.filter { $0.udid != recommended?.udid }
+      if !otherDevices.isEmpty {
+        Divider().padding(.vertical, 10)
+        Text("Installed Simulators")
+          .font(.system(size: 9.5, weight: .semibold))
+          .foregroundStyle(Studio.secondary)
+          .textCase(.uppercase)
+          .padding(.bottom, 5)
+        ScrollView {
+          VStack(spacing: 2) {
+            ForEach(otherDevices) { destination in
+              destinationRow(destination, recommended: false)
+            }
+          }
+        }
+        .frame(maxHeight: 148)
+      }
+
+      Divider().padding(.vertical, 12)
+      HStack {
+        Button("Cancel") { isPresented = false }
+          .buttonStyle(.borderless)
+        Spacer()
+        Button("Add Device") {
+          model.addDestination(selectedDestinationID ?? recommended?.udid)
+          isPresented = false
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .disabled(recommended == nil && selectedDestinationID == nil)
+      }
+    }
+    .padding(16)
+    .frame(width: 286)
+    .onAppear {
+      if selectedDestinationID == nil
+        || !model.addableDestinations.contains(where: { $0.udid == selectedDestinationID })
+      {
+        selectedDestinationID = recommended?.udid
+      }
+    }
+  }
+
+  private func destinationRow(_ destination: Destination, recommended: Bool) -> some View {
+    Button {
+      selectedDestinationID = destination.udid
+    } label: {
+      HStack(spacing: 10) {
+        Image(systemName: model.isPadDestination(destination) ? "ipad" : "iphone")
+          .font(.system(size: 14, weight: .regular))
+          .foregroundStyle(selectedDestinationID == destination.udid ? Studio.accent : Studio.secondary)
+          .frame(width: 20)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(destination.name)
+            .font(.system(size: 11, weight: .semibold))
+          Text(runtimeName(destination.runtime))
+            .font(.system(size: 9.5))
+            .foregroundStyle(Studio.secondary)
+        }
+        Spacer(minLength: 6)
+        if recommended { Text("Preferred").font(.system(size: 9)).foregroundStyle(Studio.accent) }
+        Image(systemName: selectedDestinationID == destination.udid ? "checkmark.circle.fill" : "circle")
+          .font(.system(size: 13))
+          .foregroundStyle(selectedDestinationID == destination.udid ? Studio.accent : Studio.tertiary)
+      }
+      .padding(.horizontal, 8)
+      .frame(height: 40)
+      .background(selectedDestinationID == destination.udid ? Studio.accentSoft : .clear)
+      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
   }
 }
 
@@ -1526,11 +1722,15 @@ private struct SimulatorInteractionStatus: View {
 
 private struct DevicePreview: View {
   @EnvironmentObject var model: AppModel
+  let destination: Destination
   let height: CGFloat
-  var landscape = false
+
+  private var landscape: Bool { model.isLandscape(for: destination.udid) }
+  private var screenshotImage: NSImage? { model.screenshotImage(for: destination.udid) }
+  private var liveSession: SimulatorLiveSession { model.liveSession(for: destination.udid) }
 
   private var scale: CGFloat { height / 650 }
-  private var width: CGFloat { height * 0.505 }
+  private var width: CGFloat { height * model.deviceAspectRatio(for: destination) }
 
   var body: some View {
     ZStack {
@@ -1541,7 +1741,9 @@ private struct DevicePreview: View {
     .frame(width: landscape ? height : width, height: landscape ? width : height)
     .accessibilityElement(children: .combine)
     .accessibilityLabel(
-      model.currentScreenshot == nil ? "No app screenshot" : "Latest app screenshot")
+      screenshotImage == nil
+        ? "No app screenshot on \(destination.name)"
+        : "Latest app screenshot on \(destination.name)")
   }
 
   @ViewBuilder private var deviceBody: some View {
@@ -1553,7 +1755,7 @@ private struct DevicePreview: View {
         .stroke(Color.white.opacity(0.32), lineWidth: max(1, 2 * scale)).padding(4 * scale)
       if let title = model.appOperation.title, let detail = model.appOperation.detail {
         deviceOperation(title: title, detail: detail)
-      } else if let image = model.currentScreenshotImage {
+      } else if let image = screenshotImage {
         ZStack {
           Image(nsImage: image)
             .resizable()
@@ -1570,7 +1772,8 @@ private struct DevicePreview: View {
                   guard screen.size.width > 0, screen.size.height > 0 else { return }
                   model.tapPreview(
                     normalizedX: value.location.x / screen.size.width,
-                    normalizedY: value.location.y / screen.size.height)
+                    normalizedY: value.location.y / screen.size.height,
+                    destinationID: destination.udid)
                 })
               .highPriorityGesture(
                 DragGesture(minimumDistance: 14).onEnded { value in
@@ -1581,19 +1784,22 @@ private struct DevicePreview: View {
                     startX: value.startLocation.x / screen.size.width,
                     startY: value.startLocation.y / screen.size.height,
                     endX: value.location.x / screen.size.width,
-                    endY: value.location.y / screen.size.height)
+                    endY: value.location.y / screen.size.height,
+                    destinationID: destination.udid)
                 })
           }
           .help(previewInteractionHelp)
           SimulatorLiveSurface(
-            session: model.simulatorLiveSession,
+            session: liveSession,
             onTap: { point in
-              model.tapPreview(normalizedX: Double(point.x), normalizedY: Double(point.y))
+              model.tapPreview(
+                normalizedX: Double(point.x), normalizedY: Double(point.y),
+                destinationID: destination.udid)
             },
             onSwipe: { start, end in
               model.swipePreview(
                 startX: Double(start.x), startY: Double(start.y),
-                endX: Double(end.x), endY: Double(end.y))
+                endX: Double(end.x), endY: Double(end.y), destinationID: destination.udid)
             }
           )
             .help(
@@ -1620,7 +1826,7 @@ private struct DevicePreview: View {
         .padding(8 * scale)
       } else {
         VStack(spacing: 14) {
-          Image(systemName: "iphone")
+          Image(systemName: model.isPadDestination(destination) ? "ipad" : "iphone")
             .font(.system(size: 34, weight: .light))
           Text(model.repository == nil ? "Open a project" : "App isn’t running")
             .font(.system(size: 15, weight: .semibold))
@@ -1672,12 +1878,12 @@ private struct DevicePreview: View {
   }
 
   private var previewInteractionHelp: String {
-    "Interact with the continuously streamed Simulator display. Manual gestures stay separate from deterministic agent verification evidence."
+    "Interact with the \(destination.name) display. Manual gestures stay separate from deterministic agent verification evidence."
   }
 
   private var deviceMessage: String {
     if model.repository == nil { return "Choose a Git repository from the toolbar to begin." }
-    return "Build and run to preview it."
+    return "Build and run to preview it on \(destination.name)."
   }
 }
 
@@ -2205,6 +2411,7 @@ private struct VerificationGlyph: View {
 }
 
 private struct EvidenceRow: View {
+  @EnvironmentObject var model: AppModel
   let evidence: Evidence
   let onOpen: () -> Void
 
@@ -2240,8 +2447,9 @@ private struct EvidenceRow: View {
   private var detail: String {
     let timestamp = evidence.createdAt.formatted(date: .omitted, time: .shortened)
     let count = evidence.artifactPaths.count
-    if count == 0 { return "\(timestamp) · details" }
-    return "\(timestamp) · \(count) \(count == 1 ? "file" : "files") · inspect"
+    let suffix = evidenceDestinationLabel(evidence, model: model).map { " · \($0)" } ?? ""
+    if count == 0 { return "\(timestamp)\(suffix) · details" }
+    return "\(timestamp) · \(count) \(count == 1 ? "file" : "files")\(suffix) · inspect"
   }
   private var title: String {
     switch evidence.kind {
@@ -2277,6 +2485,7 @@ private struct EvidenceRow: View {
 }
 
 private struct EvidenceArtifactInspector: View {
+  @EnvironmentObject var model: AppModel
   let evidence: Evidence
 
   var body: some View {
@@ -2288,6 +2497,11 @@ private struct EvidenceArtifactInspector: View {
           Text("Generation \(evidence.taskGeneration) · \(statusLabel)")
             .font(.system(size: 10).monospacedDigit())
             .foregroundStyle(Studio.secondary)
+          if let destinationLabel {
+            Text(destinationLabel)
+              .font(.system(size: 10, weight: .medium))
+              .foregroundStyle(Studio.secondary)
+          }
         }
         Spacer(minLength: 8)
         Image(systemName: symbol)
@@ -2381,6 +2595,10 @@ private struct EvidenceArtifactInspector: View {
     case .runtimeLog: "App log"
     case .diff: "Change set"
     }
+  }
+
+  private var destinationLabel: String? {
+    evidenceDestinationLabel(evidence, model: model)
   }
 
   private var symbol: String {
@@ -2763,6 +2981,7 @@ private struct EvidenceWorkspace: View {
 }
 
 private struct EvidenceThumbnail: View {
+  @EnvironmentObject var model: AppModel
   let evidence: Evidence
 
   var body: some View {
@@ -2783,6 +3002,13 @@ private struct EvidenceThumbnail: View {
         .font(.system(size: 9.5, weight: .medium))
         .lineLimit(1)
         .frame(width: 92, alignment: .center)
+      if let destinationLabel {
+        Text(destinationLabel)
+          .font(.system(size: 8.5, weight: .medium))
+          .foregroundStyle(Studio.secondary)
+          .lineLimit(1)
+          .frame(width: 92, alignment: .center)
+      }
     }
     .foregroundStyle(Color.primary)
   }
@@ -2791,6 +3017,10 @@ private struct EvidenceThumbnail: View {
     evidence.artifactPaths.compactMap { path in
       NSImage(contentsOf: URL(fileURLWithPath: path))
     }.first
+  }
+
+  private var destinationLabel: String? {
+    evidenceDestinationLabel(evidence, model: model)
   }
 
   private var title: String {
@@ -8350,6 +8580,26 @@ private struct AgentPermissionCard: View {
 }
 
 private func runtimeName(_ runtime: String) -> String {
-  runtime.replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.iOS-", with: "iOS ")
+  runtime
+    .replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.iPadOS-", with: "iPadOS ")
+    .replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.iOS-", with: "iOS ")
     .replacingOccurrences(of: "-", with: ".")
+}
+
+@MainActor
+private func evidenceDestinationLabel(_ evidence: Evidence, model: AppModel) -> String? {
+  if let id = evidence.destinationUDID,
+    let destination = model.destinations.first(where: { $0.udid == id })
+  {
+    let role = evidence.destinationID.map { " · \($0)" } ?? ""
+    return "\(destination.name) · \(runtimeName(destination.runtime))\(role)"
+  }
+  let values = [
+    evidence.destinationID,
+    evidence.deviceType,
+    evidence.runtime.map(runtimeName),
+    evidence.orientation,
+    evidence.appearance,
+  ].compactMap { $0?.isEmpty == false ? $0 : nil }
+  return values.isEmpty ? nil : values.joined(separator: " · ")
 }
