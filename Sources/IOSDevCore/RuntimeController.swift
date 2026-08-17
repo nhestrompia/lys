@@ -20,12 +20,30 @@ public enum RuntimeControllerError: Error, LocalizedError {
 }
 
 public actor RuntimeController {
+  private struct LaunchConfiguration {
+    var executable: URL
+    var workspace: URL
+    var stateRoot: URL
+    var developerDirectory: URL?
+    var socketPath: String
+    var token: String
+    var startupTimeout: Duration
+  }
+
+  private struct RuntimeRequestFailure: Error {
+    var underlying: Error
+    var requestSent: Bool
+  }
+
   private var process: Process?
   private var standardOutputHandle: FileHandle?
   private var standardErrorHandle: FileHandle?
   private var socketPath: String?
   private var token: String?
   private var nextID = 1
+  private var launchConfiguration: LaunchConfiguration?
+  private var explicitlyStopped = true
+  private var launchInProgress = false
 
   public init() {}
 
@@ -33,24 +51,116 @@ public actor RuntimeController {
     executable: URL, workspace: URL, stateRoot: URL, developerDirectory: URL? = nil,
     startupTimeout: Duration = .seconds(3)
   ) async throws {
-    await stop()
-    guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-      throw RuntimeControllerError.executableMissing(executable.path)
+    while launchInProgress {
+      try await Task.sleep(for: .milliseconds(20))
     }
-    try FileManager.default.createDirectory(at: stateRoot, withIntermediateDirectories: true)
-    let socket = stateRoot.appending(path: "runtime-\(UUID().uuidString.prefix(12)).sock").path
-    let taskToken = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    launchInProgress = true
+    defer { launchInProgress = false }
+
+    let normalizedExecutable = executable.standardizedFileURL
+    let normalizedWorkspace = workspace.standardizedFileURL
+    let normalizedStateRoot = stateRoot.standardizedFileURL
+    let previous = launchConfiguration
+    await stopProcess()
+    guard FileManager.default.isExecutableFile(atPath: normalizedExecutable.path) else {
+      launchConfiguration = nil
+      explicitlyStopped = true
+      throw RuntimeControllerError.executableMissing(normalizedExecutable.path)
+    }
+    try FileManager.default.createDirectory(at: normalizedStateRoot, withIntermediateDirectories: true)
+
+    let sameRuntime = previous?.executable == normalizedExecutable
+      && previous?.workspace == normalizedWorkspace
+      && previous?.stateRoot == normalizedStateRoot
+    let socket = normalizedStateRoot.appending(path: "runtime.sock").path
+    let taskToken = sameRuntime
+      ? (previous?.token ?? Self.makeToken())
+      : Self.makeToken()
+    let configuration = LaunchConfiguration(
+      executable: normalizedExecutable,
+      workspace: normalizedWorkspace,
+      stateRoot: normalizedStateRoot,
+      developerDirectory: developerDirectory?.standardizedFileURL,
+      socketPath: socket,
+      token: taskToken,
+      startupTimeout: startupTimeout)
+    launchConfiguration = configuration
+    explicitlyStopped = false
+
+    do {
+      try await launch(configuration)
+    } catch {
+      await stopProcess()
+      throw error
+    }
+  }
+
+  public func request<T: Decodable>(
+    _ type: T.Type, method: String, params: JSONValue? = nil
+  ) async throws -> T {
+    let result = try await request(method: method, params: params)
+    let data = try JSONEncoder().encode(result)
+    return try JSONDecoder().decode(type, from: data)
+  }
+
+  public func request(method: String, params: JSONValue? = nil) async throws -> JSONValue {
+    do {
+      return try authenticatedRequest(method: method, params: params)
+    } catch let failure as RuntimeRequestFailure {
+      guard !failure.requestSent, canRecover else { throw failure.underlying }
+      try await restartConfiguredRuntime()
+      do {
+        return try authenticatedRequest(method: method, params: params)
+      } catch let retryFailure as RuntimeRequestFailure {
+        throw retryFailure.underlying
+      }
+    } catch RuntimeControllerError.notRunning {
+      guard canRecover else { throw RuntimeControllerError.notRunning }
+      try await restartConfiguredRuntime()
+      do {
+        return try authenticatedRequest(method: method, params: params)
+      } catch let retryFailure as RuntimeRequestFailure {
+        throw retryFailure.underlying
+      }
+    }
+  }
+
+  public func mcpEnvironment() throws -> [String: String] {
+    guard launchConfiguration != nil,
+      let socketPath, let token, process?.isRunning == true, !explicitlyStopped
+    else {
+      throw RuntimeControllerError.notRunning
+    }
+    return [
+      "LYS_RUNTIME_SOCKET": socketPath,
+      "LYS_TASK_TOKEN": token,
+    ]
+  }
+
+  public func stop() async {
+    explicitlyStopped = true
+    await stopProcess()
+    launchConfiguration = nil
+  }
+
+  private var canRecover: Bool {
+    !explicitlyStopped && launchConfiguration != nil
+  }
+
+  private func launch(_ configuration: LaunchConfiguration) async throws {
     let child = Process()
     let output = Pipe()
     let errors = Pipe()
-    child.executableURL = executable
+    child.executableURL = configuration.executable
     child.arguments = [
-      "--socket", socket, "--workspace", workspace.path, "--token", taskToken,
+      "--socket", configuration.socketPath,
+      "--workspace", configuration.workspace.path,
+      "--token", configuration.token,
     ]
     child.standardOutput = output
     child.standardError = errors
     child.environment = ProcessInfo.processInfo.environment.merging(
-      developerDirectory.map { ["DEVELOPER_DIR": $0.path] } ?? [:]
+      configuration.developerDirectory.map { ["DEVELOPER_DIR": $0.path] } ?? [:]
     ) { _, task in task }
     let outputHandle = output.fileHandleForReading
     let errorHandle = errors.fileHandleForReading
@@ -70,13 +180,13 @@ public actor RuntimeController {
     process = child
     standardOutputHandle = outputHandle
     standardErrorHandle = errorHandle
-    socketPath = socket
-    token = taskToken
+    socketPath = configuration.socketPath
+    token = configuration.token
 
     let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: startupTimeout)
+    let deadline = clock.now.advanced(by: configuration.startupTimeout)
     while clock.now < deadline {
-      if FileManager.default.fileExists(atPath: socket) {
+      if FileManager.default.fileExists(atPath: configuration.socketPath) {
         do {
           _ = try authenticatedRequest(method: "workspace.describe", params: nil)
           return
@@ -86,30 +196,24 @@ public actor RuntimeController {
       }
       try await Task.sleep(for: .milliseconds(40))
     }
-    await stop()
+    await stopProcess()
     throw RuntimeControllerError.startupTimedOut
   }
 
-  public func request<T: Decodable>(
-    _ type: T.Type, method: String, params: JSONValue? = nil
-  ) throws -> T {
-    let result = try authenticatedRequest(method: method, params: params)
-    let data = try JSONEncoder().encode(result)
-    return try JSONDecoder().decode(type, from: data)
-  }
-
-  public func request(method: String, params: JSONValue? = nil) throws -> JSONValue {
-    try authenticatedRequest(method: method, params: params)
-  }
-
-  public func mcpEnvironment() throws -> [String: String] {
-    guard let socketPath, let token, process?.isRunning == true else {
+  private func restartConfiguredRuntime() async throws {
+    while launchInProgress {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    guard let configuration = launchConfiguration, !explicitlyStopped else {
       throw RuntimeControllerError.notRunning
     }
-    return ["LYS_RUNTIME_SOCKET": socketPath, "LYS_TASK_TOKEN": token]
+    launchInProgress = true
+    defer { launchInProgress = false }
+    await stopProcess()
+    try await launch(configuration)
   }
 
-  public func stop() async {
+  private func stopProcess() async {
     let child = process
     standardOutputHandle?.readabilityHandler = nil
     standardErrorHandle?.readabilityHandler = nil
@@ -124,6 +228,7 @@ public actor RuntimeController {
       if child.isRunning { child.terminate() }
     }
     if let socketPath { unlink(socketPath) }
+    else if let socketPath = launchConfiguration?.socketPath { unlink(socketPath) }
     process = nil
     socketPath = nil
     token = nil
@@ -133,20 +238,37 @@ public actor RuntimeController {
     guard let socketPath, let token, process?.isRunning == true else {
       throw RuntimeControllerError.notRunning
     }
-    let connection = try UnixSocketConnection.connect(path: socketPath)
-    try connection.send(
-      .init(
-        id: .int(0), method: "runtime.authenticate",
-        params: .object(["token": .string(token)])))
-    let authentication = try connection.receive()
-    if let error = authentication.error {
-      throw RuntimeControllerError.authenticationFailed(error.message)
+    let connection: UnixSocketConnection
+    do {
+      connection = try UnixSocketConnection.connect(path: socketPath)
+    } catch {
+      throw RuntimeRequestFailure(underlying: error, requestSent: false)
     }
-    let id = nextID
-    nextID += 1
-    try connection.send(.init(id: .int(id), method: method, params: params))
-    let response = try connection.receive()
-    if let error = response.error { throw RuntimeControllerError.remote(error) }
-    return response.result ?? .null
+    var requestSent = false
+    do {
+      try connection.send(
+        .init(
+          id: .int(0), method: "runtime.authenticate",
+          params: .object(["token": .string(token)])))
+      let authentication = try connection.receive()
+      if let error = authentication.error {
+        throw RuntimeControllerError.authenticationFailed(error.message)
+      }
+      let id = nextID
+      nextID += 1
+      requestSent = true
+      try connection.send(.init(id: .int(id), method: method, params: params))
+      let response = try connection.receive()
+      if let error = response.error { throw RuntimeControllerError.remote(error) }
+      return response.result ?? .null
+    } catch let error as RuntimeControllerError {
+      throw error
+    } catch {
+      throw RuntimeRequestFailure(underlying: error, requestSent: requestSent)
+    }
+  }
+
+  private static func makeToken() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "")
   }
 }

@@ -190,6 +190,7 @@ public actor WorkspaceManager {
     ])
     var entries: [String: ManifestEntry] = [:]
     for path in paths {
+      guard !isGeneratedWorkspacePath(path) else { continue }
       let url = try safeURL(path, under: root)
       if let entry = try fileEntry(at: url, relativePath: path) { entries[path] = entry }
     }
@@ -218,7 +219,7 @@ public actor WorkspaceManager {
         let path = url.standardizedFileURL.pathComponents.dropFirst(
           canonicalWorktree.pathComponents.count
         ).joined(separator: "/")
-        if path == ".git" || path == ".lys/baseline" || path == ".lys/conflicts" {
+        if path == ".git" || isGeneratedWorkspaceRoot(path) {
           enumerator.skipDescendants()
           continue
         }
@@ -327,6 +328,11 @@ public actor WorkspaceManager {
         report.conflicts.append(.init(path: path, reason: "Unsafe path"))
         continue
       }
+      if isGeneratedWorkspacePath(path) {
+        report.conflicts.append(
+          .init(path: path, reason: "App-generated workspace data cannot be applied"))
+        continue
+      }
       if baseline.submodulePaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) {
         report.conflicts.append(
           .init(
@@ -371,6 +377,7 @@ public actor WorkspaceManager {
       executable: git,
       arguments: ["-C", repository.path, "worktree", "remove", "--force", worktree.path])
     guard outcome.succeeded else { throw WorkspaceError.gitFailure(outcome.stderr) }
+    try? BuildDerivedDataStore.remove(for: worktree)
   }
 
   private func repositoryBlobData(repository: URL, path: String) async throws -> Data? {
@@ -401,6 +408,7 @@ public actor WorkspaceManager {
       "--exclude-standard",
     ])
     for path in paths {
+      if isGeneratedWorkspacePath(path) { continue }
       let source = try safeURL(path, under: sourceRoot)
       let target = try safeURL(path, under: targetRoot)
       if FileManager.default.fileExists(atPath: source.path) {
@@ -465,6 +473,7 @@ public actor WorkspaceManager {
   {
     let snapshotRoot = worktree.appending(path: ".lys/baseline", directoryHint: .isDirectory)
     for path in manifest.entries.keys {
+      if isGeneratedWorkspacePath(path) { continue }
       let source = try safeURL(path, under: original)
       guard FileManager.default.fileExists(atPath: source.path) else { continue }
       let destination = try safeURL(path, under: snapshotRoot)
@@ -576,11 +585,33 @@ private func makeFileDiff(
 }
 
 private func isReviewExcludedPath(_ path: String, baseline: BaselineManifest) -> Bool {
-  path == ".lys/baseline" || path.hasPrefix(".lys/baseline/")
-    || path == ".lys/conflicts" || path.hasPrefix(".lys/conflicts/")
-    || path == ".lys-baseline.json" || path == ".git" || path.hasPrefix(".git/")
+  isGeneratedWorkspacePath(path) || path == ".git" || path.hasPrefix(".git/")
     || baseline.ignoredOverlayPaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
     || baseline.submodulePaths.contains(where: { path == $0 || path.hasPrefix($0 + "/") })
+}
+
+private let generatedWorkspaceRoots = [
+  ".iosdev", // Legacy app-owned task state.
+  ".lys/artifacts",
+  ".lys/cache",
+  ".lys/baseline",
+  ".lys/conflicts",
+]
+
+private let generatedWorkspaceFiles = [
+  ".iosdev-baseline.json", // Legacy app-owned task metadata.
+  ".lys-baseline.json",
+]
+
+private func isGeneratedWorkspaceRoot(_ path: String) -> Bool {
+  generatedWorkspaceRoots.contains(path)
+}
+
+private func isGeneratedWorkspacePath(_ path: String) -> Bool {
+  generatedWorkspaceFiles.contains(path)
+    || generatedWorkspaceRoots.contains { root in
+      path == root || path.hasPrefix(root + "/")
+    }
 }
 
 private func dataIfPresent(at url: URL) throws -> Data? {

@@ -5,6 +5,10 @@ import IOSDevCore
 @main
 enum IOSDevRuntimeMain {
   static func main() async {
+    // A cancelled MCP request must not terminate the runtime when it replies to a
+    // client that has already closed its connection. The socket layer also sets
+    // SO_NOSIGPIPE per descriptor, but keep the process-level guard for safety.
+    signal(SIGPIPE, SIG_IGN)
     let arguments = CommandLine.arguments
     guard let socketPath = value(after: "--socket", in: arguments),
       let workspacePath = value(after: "--workspace", in: arguments),

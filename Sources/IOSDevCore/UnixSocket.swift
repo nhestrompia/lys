@@ -25,6 +25,15 @@ private func socketAddress(path: String) throws -> (sockaddr_un, socklen_t) {
   return (address, length)
 }
 
+private func disableSigPipe(on descriptor: Int32) throws {
+  var value: Int32 = 1
+  guard Darwin.setsockopt(
+    descriptor, SOL_SOCKET, SO_NOSIGPIPE, &value, socklen_t(MemoryLayout<Int32>.size)) == 0
+  else {
+    throw UnixSocketError.system("setsockopt", errno)
+  }
+}
+
 public final class UnixSocketConnection: @unchecked Sendable {
   private let descriptor: Int32
   private let lock = NSLock()
@@ -35,6 +44,12 @@ public final class UnixSocketConnection: @unchecked Sendable {
   public static func connect(path: String) throws -> UnixSocketConnection {
     let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
     guard descriptor >= 0 else { throw UnixSocketError.system("socket", errno) }
+    do {
+      try disableSigPipe(on: descriptor)
+    } catch {
+      Darwin.close(descriptor)
+      throw error
+    }
     var (address, length) = try socketAddress(path: path)
     let result = withUnsafePointer(to: &address) { pointer in
       pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -56,8 +71,12 @@ public final class UnixSocketConnection: @unchecked Sendable {
       while offset < bytes.count {
         let count = Darwin.write(
           descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
-        guard count > 0 else { throw UnixSocketError.system("write", errno) }
-        offset += count
+        if count > 0 {
+          offset += count
+          continue
+        }
+        if count < 0, errno == EINTR { continue }
+        throw UnixSocketError.system("write", errno)
       }
     }
   }
@@ -66,6 +85,7 @@ public final class UnixSocketConnection: @unchecked Sendable {
     var buffer = [UInt8](repeating: 0, count: 16_384)
     while true {
       let count = Darwin.read(descriptor, &buffer, buffer.count)
+      if count < 0, errno == EINTR { continue }
       guard count > 0 else { throw UnixSocketError.disconnected }
       let lines = lock.withLock { framer.append(Data(buffer.prefix(count))) }
       if let line = lines.first { return try JSONRPCCodec.decodeLine(line) }
@@ -81,6 +101,12 @@ public final class UnixSocketServer: @unchecked Sendable {
     unlink(path)
     descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
     guard descriptor >= 0 else { throw UnixSocketError.system("socket", errno) }
+    do {
+      try disableSigPipe(on: descriptor)
+    } catch {
+      Darwin.close(descriptor)
+      throw error
+    }
     var (address, length) = try socketAddress(path: path)
     let bound = withUnsafePointer(to: &address) { pointer in
       pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -110,8 +136,19 @@ public final class UnixSocketServer: @unchecked Sendable {
     unlink(path)
   }
   public func accept() throws -> UnixSocketConnection {
-    let client = Darwin.accept(descriptor, nil, nil)
-    guard client >= 0 else { throw UnixSocketError.system("accept", errno) }
-    return .init(descriptor: client)
+    while true {
+      let client = Darwin.accept(descriptor, nil, nil)
+      if client >= 0 {
+        do {
+          try disableSigPipe(on: client)
+        } catch {
+          Darwin.close(client)
+          throw error
+        }
+        return .init(descriptor: client)
+      }
+      if errno == EINTR { continue }
+      throw UnixSocketError.system("accept", errno)
+    }
   }
 }

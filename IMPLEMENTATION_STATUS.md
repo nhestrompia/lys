@@ -33,7 +33,7 @@ Updated 2026-08-12. Status meanings: **Implemented** is exercised locally; **Par
 | `lys-mcp` typed bridge | **Implemented** | Strict schemas and structured results are injected into authenticated ACP sessions. Every model receives the same `app.describe` / `flow.*` surface; unadvertised lifecycle, selector, coordinate, and low-level UI calls are rejected at dispatch. |
 | Absolute executable paths and argument arrays | **Implemented** | Command construction includes metacharacter tests. |
 | Structured output streaming/cancellation | **Implemented** | Stdout/stderr stream incrementally as structured events, buffers are bounded and marked when truncated, and cancellation escalates from interrupt to termination after five seconds. |
-| Shared keyed caches | **Partial** | Incremental DerivedData exists per task. Move it to Application Support and key by repository, scheme, Xcode build, and simulator runtime. |
+| Shared keyed caches | **Partial** | Incremental DerivedData is keyed per workspace under macOS Caches and removed when an isolated task is discarded. Add bounded eviction and broader repository/scheme reuse. |
 | Child supervision/restart | **Partial** | Process ownership is isolated from the UI. Add runtime/agent/WDA health tracking and restart only the failed child. |
 
 ## Project, build, and Simulator

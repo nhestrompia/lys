@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import IOSDevCore
 
@@ -9,6 +10,7 @@ enum IOSDevMCPMain {
   }
 
   static func main() {
+    signal(SIGPIPE, SIG_IGN)
     guard let socket = ProcessInfo.processInfo.environment["LYS_RUNTIME_SOCKET"],
       let token = ProcessInfo.processInfo.environment["LYS_TASK_TOKEN"]
     else {
@@ -62,19 +64,8 @@ enum IOSDevMCPMain {
         return toolError(request.id, violation)
       }
       do {
-        let connection = try UnixSocketConnection.connect(path: socket)
-        try connection.send(
-          .init(
-            id: .int(0), method: "runtime.authenticate", params: .object(["token": .string(token)]))
-        )
-        let authentication = try connection.receive()
-        if let error = authentication.error { throw error }
-        try connection.send(.init(id: request.id, method: toolName, params: arguments))
-        let runtime = try connection.receive()
-        if let error = runtime.error {
-          return toolError(request.id, "\(error.message) [\(error.code)]")
-        }
-        let structured = runtime.result ?? .object([:])
+        let structured = try runtimeRequest(
+          id: request.id, method: toolName, params: arguments, socket: socket, token: token)
         let text = humanSummary(tool: toolName, result: structured)
         return .init(
           id: request.id,
@@ -85,6 +76,47 @@ enum IOSDevMCPMain {
           ]))
       } catch { return toolError(request.id, error.localizedDescription) }
     default: return .init(id: request.id, error: .init(code: -32601, message: "Unknown MCP method"))
+    }
+  }
+
+  private static func runtimeRequest(
+    id: RPCID?, method: String, params: JSONValue, socket: String, token: String
+  ) throws -> JSONValue {
+    var lastError: Error?
+    for attempt in 0...12 {
+      var requestSent = false
+      do {
+        let connection = try UnixSocketConnection.connect(path: socket)
+        try connection.send(
+          .init(
+            id: .int(0), method: "runtime.authenticate",
+            params: .object(["token": .string(token)])))
+        let authentication = try connection.receive()
+        if let error = authentication.error { throw error }
+        requestSent = true
+        try connection.send(.init(id: id, method: method, params: params))
+        let runtime = try connection.receive()
+        if let error = runtime.error {
+          throw error
+        }
+        return runtime.result ?? .object([:])
+      } catch {
+        lastError = error
+        guard !requestSent, attempt < 12, isTransientSocketError(error) else { throw error }
+        Thread.sleep(forTimeInterval: 0.25)
+      }
+    }
+    throw lastError ?? UnixSocketError.disconnected
+  }
+
+  private static func isTransientSocketError(_ error: Error) -> Bool {
+    switch error {
+    case UnixSocketError.disconnected:
+      return true
+    case UnixSocketError.system(_, let code):
+      return code == ECONNREFUSED || code == ENOENT || code == ECONNRESET || code == EPIPE
+    default:
+      return false
     }
   }
 
